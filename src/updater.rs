@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
-pub const DEFAULT_REPO: &str = "ArtCraft-Suite/3d-paintcraft";
+pub const DEFAULT_REPO: &str = "Ras-Maciej/3DPaintCraft";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GitHubReleaseAsset {
