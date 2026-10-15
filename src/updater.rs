@@ -51,6 +51,9 @@ pub enum UpdateStatus {
         latest_version: String,
         release: GitHubRelease,
     },
+    NoReleases {
+        repo: String,
+    },
     Error(String),
 }
 
@@ -102,7 +105,7 @@ impl UpdateNotifier {
             let res = fetch_latest_release(&repo);
             if let Ok(mut guard) = status.lock() {
                 match res {
-                    Ok(release) => {
+                    Ok(Some(release)) => {
                         if is_newer_version(&release.tag_name, CURRENT_VERSION) {
                             *guard = UpdateStatus::UpdateAvailable {
                                 current_version: CURRENT_VERSION.to_string(),
@@ -114,6 +117,11 @@ impl UpdateNotifier {
                                 checked_version: release.tag_name,
                             };
                         }
+                    }
+                    Ok(None) => {
+                        *guard = UpdateStatus::NoReleases {
+                            repo,
+                        };
                     }
                     Err(err) => {
                         *guard = UpdateStatus::Error(err);
@@ -257,6 +265,35 @@ impl UpdateNotifier {
                             }
                         });
                     }
+                    UpdateStatus::NoReleases { repo } => {
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new("No GitHub Releases Published Yet").color(egui::Color32::from_rgb(52, 152, 219)).heading());
+                        });
+                        ui.add_space(8.0);
+                        ui.label(format!("Connected to repository '{}'.", repo));
+                        ui.label(format!("Installed version is v{}.", CURRENT_VERSION));
+                        ui.add_space(6.0);
+                        ui.label("This repository does not have any published GitHub Releases yet. Once you draft and publish your first release on GitHub, update notifications and download links will be displayed here automatically.");
+                        ui.add_space(10.0);
+                        ui.separator();
+                        ui.horizontal(|ui| {
+                            let open_btn = egui::Button::new(
+                                egui::RichText::new("Draft Release on GitHub").strong().color(egui::Color32::WHITE)
+                            ).fill(egui::Color32::from_rgb(46, 140, 255));
+
+                            if ui.add(open_btn).clicked() {
+                                let new_release_url = format!("https://github.com/{}/releases/new", repo);
+                                ctx.open_url(egui::OpenUrl::new_tab(new_release_url));
+                            }
+
+                            if ui.button("Check Again").clicked() {
+                                trigger_recheck = true;
+                            }
+                            if ui.button("Close").clicked() {
+                                self.show_dialog = false;
+                            }
+                        });
+                    }
                     UpdateStatus::Error(ref err_msg) => {
                         ui.horizontal(|ui| {
                             ui.label(egui::RichText::new("Unable to Check for Updates").color(egui::Color32::from_rgb(230, 70, 70)).heading());
@@ -315,7 +352,7 @@ pub fn is_newer_version(latest: &str, current: &str) -> bool {
 }
 
 /// Fetch latest release from GitHub API using platform native tools
-fn fetch_latest_release(repo: &str) -> Result<GitHubRelease, String> {
+fn fetch_latest_release(repo: &str) -> Result<Option<GitHubRelease>, String> {
     let repo_clean = repo.trim();
     if repo_clean.is_empty() || !repo_clean.contains('/') {
         return Err("Please specify a valid GitHub repository in the format 'username/repo'.".to_string());
@@ -378,15 +415,20 @@ fn fetch_latest_release(repo: &str) -> Result<GitHubRelease, String> {
         }
     };
 
-    if body.contains("\"message\": \"Not Found\"") {
-        return Err(format!(
-            "No releases found for GitHub repository '{}'. Make sure the repository exists, is public, and has at least one published release.",
-            repo_clean
-        ));
+    // Check if GitHub returned an API status/message JSON (e.g. 404 Not Found)
+    if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&body) {
+        if let Some(msg) = json_val.get("message").and_then(|m| m.as_str()) {
+            if msg.eq_ignore_ascii_case("Not Found") {
+                return Ok(None);
+            } else {
+                return Err(format!("GitHub API message: {}", msg));
+            }
+        }
     }
 
-    serde_json::from_str::<GitHubRelease>(&body)
-        .map_err(|e| format!("Failed to parse GitHub release data: {}", e))
+    let release = serde_json::from_str::<GitHubRelease>(&body)
+        .map_err(|e| format!("Failed to parse GitHub release data: {}", e))?;
+    Ok(Some(release))
 }
 
 #[cfg(test)]
