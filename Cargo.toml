@@ -1,0 +1,36 @@
+[package]
+name = "paintcraft-3d"
+version = "0.1.0"
+edition = "2021"
+authors = ["ArtCraft Team <contact@artcraft.dev>"]
+description = "A clean-room recreation of Substance 3D Painter written in pure Rust for Linux, using ArtCraft techniques"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+bvh = "0.7"
+bytemuck = { version = "1.18", features = ["derive"] }
+eframe = { version = "0.28", default-features = false, features = ["default_fonts", "wgpu", "wayland", "x11"] }
+glam = { version = "0.28", features = ["serde", "bytemuck"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "hdr"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+rayon = "1.10"
+chrono = "0.4"
+rfd = "0.17.2"
+pollster = "0.3"
+
+[[bin]]
+name = "paintcraft"
+path = "src/main.rs"
+
+[profile.dev]
+opt-level = 2
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"

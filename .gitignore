@@ -1,0 +1,30 @@
+# Rust build target directory
+target/
+**/*.rs.bk
+*.pdb
+
+# 3D Paintcraft local project saves & user state
+*.paintcraft
+recent_projects.json
+
+# Texture export directories
+exports/
+*_exports/
+
+# Operating System & Editor artifacts
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs & crash dumps
+*.log
+*.tmp
+crash.dmp
+
+# Extra large user-downloaded environment maps
+assets/hdris/*_8k.hdr
+assets/hdris/*_16k.hdr
