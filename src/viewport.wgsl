@@ -43,6 +43,8 @@ struct CameraUniform {
 @group(1) @binding(5) var tex_environment: texture_2d<f32>; // HDRI
 @group(1) @binding(6) var tex_baked_normal: texture_2d<f32>;
 @group(1) @binding(7) var tex_baked_ao: texture_2d<f32>;
+@group(1) @binding(8) var tex_emissive: texture_2d<f32>;
+@group(1) @binding(9) var tex_opacity: texture_2d<f32>;
 
 @vertex
 fn vs_main(model: VertexInput) -> VertexOutput {
@@ -99,6 +101,16 @@ struct FragmentOutput {
 
 @fragment
 fn fs_main(in: VertexOutput) -> FragmentOutput {
+    let opacity = textureSample(tex_opacity, samp_linear, in.uv).r;
+    // Substance 3D Painter Alpha Cutout for transparency (glass, visors, torn cloth, wire mesh, foliage)
+    if camera.view_mode != 12u && opacity < 0.33 {
+        discard;
+    }
+
+    let emissive_sample = textureSample(tex_emissive, samp_linear, in.uv);
+    let emissive_intensity = max(emissive_sample.a, 1.0);
+    let emissive_radiance = pow(max(emissive_sample.rgb, vec3<f32>(0.0)), vec3<f32>(2.2)) * emissive_intensity * 2.5;
+
     let base_color_srgb = textureSample(tex_base_color, samp_linear, in.uv).rgb;
     let base_color = pow(base_color_srgb, vec3<f32>(2.2));
     
@@ -247,7 +259,7 @@ fn fs_main(in: VertexOutput) -> FragmentOutput {
     let dir_specular = specular_brdf * sun_color * n_dot_l * camera.sun_intensity * matte_factor;
     let dir_diffuse = diffuse_color * (sun_color * n_dot_l / PI) * camera.sun_intensity;
 
-    let lit_color = ibl_diffuse + ibl_specular + dir_specular + dir_diffuse;
+    let lit_color = ibl_diffuse + ibl_specular + dir_specular + dir_diffuse + emissive_radiance;
     
     // Tone mapping modes
     var final_color = lit_color;
@@ -311,6 +323,14 @@ fn fs_main(in: VertexOutput) -> FragmentOutput {
     } else if camera.view_mode == 10u {
         // Height / Bump channel
         out.color = vec4<f32>(vec3<f32>(center_h), 1.0);
+        return out;
+    } else if camera.view_mode == 11u {
+        // Emissive channel
+        out.color = vec4<f32>(emissive_sample.rgb, 1.0);
+        return out;
+    } else if camera.view_mode == 12u {
+        // Opacity channel
+        out.color = vec4<f32>(vec3<f32>(opacity), 1.0);
         return out;
     }
 

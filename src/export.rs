@@ -114,6 +114,11 @@ impl TextureExporter {
                 let emis_path = output_dir.join(format!("{}_Emissive.png", clean_name));
                 Self::save_rgba(&textures.emissive, &emis_path, flip_v)?;
                 generated_files.push(emis_path);
+
+                // 5. Opacity
+                let opac_path = output_dir.join(format!("{}_Opacity.png", clean_name));
+                Self::save_scalar(&textures.opacity, &opac_path, flip_v)?;
+                generated_files.push(opac_path);
             }
 
             ExportPreset::BlenderGltf => {
@@ -141,6 +146,11 @@ impl TextureExporter {
                 let emis_path = output_dir.join(format!("{}_Emissive.png", clean_name));
                 Self::save_rgba(&textures.emissive, &emis_path, flip_v)?;
                 generated_files.push(emis_path);
+
+                // 6. Opacity
+                let opac_path = output_dir.join(format!("{}_Opacity.png", clean_name));
+                Self::save_scalar(&textures.opacity, &opac_path, flip_v)?;
+                generated_files.push(opac_path);
             }
 
             ExportPreset::Unity => {
@@ -163,6 +173,11 @@ impl TextureExporter {
                 let emis_path = output_dir.join(format!("{}_Emission.png", clean_name));
                 Self::save_rgba(&textures.emissive, &emis_path, flip_v)?;
                 generated_files.push(emis_path);
+
+                // 5. Opacity / Cutout
+                let opac_path = output_dir.join(format!("{}_Opacity.png", clean_name));
+                Self::save_scalar(&textures.opacity, &opac_path, flip_v)?;
+                generated_files.push(opac_path);
             }
 
             ExportPreset::IndividualMaps => {
@@ -512,6 +527,35 @@ mod tests {
         assert!(obj_content.contains("vt "));
         assert!(obj_content.contains("vn "));
         assert!(obj_content.contains("f "));
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_export_emissive_and_opacity_presets() {
+        let mut textures = CompositeTextureSet::new(16, 16);
+        textures.emissive.set_pixel(8, 8, glam::Vec4::new(1.0, 0.5, 0.2, 1.0));
+        textures.opacity.set_pixel(8, 8, 0.5);
+
+        let temp_dir = std::env::temp_dir().join("test_paintcraft_emissive_opacity_export");
+
+        // Test Unreal
+        let ue_dir = temp_dir.join("ue");
+        let ue_files = TextureExporter::export_preset(&textures, "TestMesh", ExportPreset::UnrealEngine, &ue_dir, false, None).unwrap();
+        assert!(ue_files.contains(&ue_dir.join("testmesh_Emissive.png")), "Unreal must export Emissive");
+        assert!(ue_files.contains(&ue_dir.join("testmesh_Opacity.png")), "Unreal must export Opacity");
+
+        // Test Blender / glTF
+        let blender_dir = temp_dir.join("blender");
+        let blender_files = TextureExporter::export_preset(&textures, "TestMesh", ExportPreset::BlenderGltf, &blender_dir, false, None).unwrap();
+        assert!(blender_files.contains(&blender_dir.join("testmesh_Emissive.png")), "Blender must export Emissive");
+        assert!(blender_files.contains(&blender_dir.join("testmesh_Opacity.png")), "Blender must export Opacity");
+
+        // Test Unity
+        let unity_dir = temp_dir.join("unity");
+        let unity_files = TextureExporter::export_preset(&textures, "TestMesh", ExportPreset::Unity, &unity_dir, false, None).unwrap();
+        assert!(unity_files.contains(&unity_dir.join("testmesh_Emission.png")), "Unity must export Emission");
+        assert!(unity_files.contains(&unity_dir.join("testmesh_Opacity.png")), "Unity must export Opacity");
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }

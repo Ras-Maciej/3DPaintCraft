@@ -391,11 +391,15 @@ impl BrushEngine {
         let r_target = self.settings.paint_roughness;
         let m_target = self.settings.paint_metallic;
         let h_target = self.settings.paint_height;
+        let emis_target = self.settings.paint_emissive;
+        let opac_target = self.settings.paint_opacity;
         
         let do_color = self.settings.channels.base_color;
         let do_r = self.settings.channels.roughness;
         let do_m = self.settings.channels.metallic;
         let do_h = self.settings.channels.height;
+        let do_emis = self.settings.channels.emission;
+        let do_opac = self.settings.channels.opacity;
 
         let rect_min_x = min_x as u32;
         let rect_max_x = max_x as u32;
@@ -446,6 +450,10 @@ impl BrushEngine {
                         layer.base_color_buf.data.get_unchecked_mut(idx).w = new_a;
                         let cur_h = *layer.height_buf.data.get_unchecked(idx);
                         *layer.height_buf.data.get_unchecked_mut(idx) = cur_h * (1.0 - weight) + 0.5 * weight;
+                        let cur_emis = *layer.emissive_buf.data.get_unchecked(idx);
+                        *layer.emissive_buf.data.get_unchecked_mut(idx) = cur_emis * (1.0 - weight);
+                        let cur_opac = *layer.opacity_buf.data.get_unchecked(idx);
+                        *layer.opacity_buf.data.get_unchecked_mut(idx) = cur_opac * (1.0 - weight) + 1.0 * weight;
                     } else {
                         let cur_col = *layer.base_color_buf.data.get_unchecked(idx);
                         let alpha = (cur_col.w + weight * (1.0 - cur_col.w)).clamp(0.0, 1.0);
@@ -468,6 +476,16 @@ impl BrushEngine {
                         if do_h {
                             let cur_h = *layer.height_buf.data.get_unchecked(idx);
                             *layer.height_buf.data.get_unchecked_mut(idx) = cur_h * (1.0 - weight) + h_target * weight;
+                        }
+                        if do_emis {
+                            let cur_e = *layer.emissive_buf.data.get_unchecked(idx);
+                            let blended_e = cur_e.truncate() * (1.0 - weight) + emis_target.truncate() * weight;
+                            let blended_w = cur_e.w * (1.0 - weight) + emis_target.w * weight;
+                            *layer.emissive_buf.data.get_unchecked_mut(idx) = Vec4::new(blended_e.x, blended_e.y, blended_e.z, blended_w);
+                        }
+                        if do_opac {
+                            let cur_o = *layer.opacity_buf.data.get_unchecked(idx);
+                            *layer.opacity_buf.data.get_unchecked_mut(idx) = cur_o * (1.0 - weight) + opac_target * weight;
                         }
                     }
                 }
@@ -551,11 +569,15 @@ pub fn barycentric_3d(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> (f32, f32, f32) {
         let r_target = self.settings.paint_roughness;
         let m_target = self.settings.paint_metallic;
         let h_target = self.settings.paint_height;
+        let emis_target = self.settings.paint_emissive;
+        let opac_target = self.settings.paint_opacity;
 
         let do_color = self.settings.channels.base_color;
         let do_r = self.settings.channels.roughness;
         let do_m = self.settings.channels.metallic;
         let do_h = self.settings.channels.height;
+        let do_emis = self.settings.channels.emission;
+        let do_opac = self.settings.channels.opacity;
 
         let mut overall_min_x = i32::MAX;
         let mut overall_min_y = i32::MAX;
@@ -724,6 +746,10 @@ pub fn barycentric_3d(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> (f32, f32, f32) {
                                     layer.base_color_buf.data.get_unchecked_mut(idx).w = new_a;
                                     let cur_h = *layer.height_buf.data.get_unchecked(idx);
                                     *layer.height_buf.data.get_unchecked_mut(idx) = cur_h * (1.0 - weight) + 0.5 * weight;
+                                    let cur_emis = *layer.emissive_buf.data.get_unchecked(idx);
+                                    *layer.emissive_buf.data.get_unchecked_mut(idx) = cur_emis * (1.0 - weight);
+                                    let cur_opac = *layer.opacity_buf.data.get_unchecked(idx);
+                                    *layer.opacity_buf.data.get_unchecked_mut(idx) = cur_opac * (1.0 - weight) + 1.0 * weight;
                                 } else {
                                     let cur_col = *layer.base_color_buf.data.get_unchecked(idx);
                                     let alpha = (cur_col.w + weight * (1.0 - cur_col.w)).clamp(0.0, 1.0);
@@ -744,6 +770,16 @@ pub fn barycentric_3d(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> (f32, f32, f32) {
                                     if do_h {
                                         let cur_h = *layer.height_buf.data.get_unchecked(idx);
                                         *layer.height_buf.data.get_unchecked_mut(idx) = cur_h * (1.0 - weight) + h_target * weight;
+                                    }
+                                    if do_emis {
+                                        let cur_e = *layer.emissive_buf.data.get_unchecked(idx);
+                                        let blended_e = cur_e.truncate() * (1.0 - weight) + emis_target.truncate() * weight;
+                                        let blended_w = cur_e.w * (1.0 - weight) + emis_target.w * weight;
+                                        *layer.emissive_buf.data.get_unchecked_mut(idx) = Vec4::new(blended_e.x, blended_e.y, blended_e.z, blended_w);
+                                    }
+                                    if do_opac {
+                                        let cur_o = *layer.opacity_buf.data.get_unchecked(idx);
+                                        *layer.opacity_buf.data.get_unchecked_mut(idx) = cur_o * (1.0 - weight) + opac_target * weight;
                                     }
                                 }
                             }
@@ -1025,5 +1061,38 @@ mod tests {
         }
         let stroke_elapsed = t3.elapsed();
         println!("DIAGNOSTIC: 10 paint_stroke_3d steps took {:?}", stroke_elapsed);
+    }
+
+    #[test]
+    fn test_emissive_and_opacity_painting_and_erasing() {
+        let mut layer = crate::layer::Layer::new_paint_layer(1, "TestLayer".to_string(), 64, 64);
+        let mut engine = BrushEngine::new();
+        engine.settings.radius = 10.0;
+        engine.settings.hardness = 1.0;
+        engine.settings.channels.emission = true;
+        engine.settings.channels.opacity = true;
+        engine.settings.paint_emissive = glam::Vec4::new(1.0, 0.4, 0.1, 2.5);
+        engine.settings.paint_opacity = 0.25;
+        engine.update_cache();
+
+        // 1. Paint stamp in 2D
+        engine.stamp_uv(&mut layer, glam::Vec2::new(0.5, 0.5));
+        let painted_emis = layer.emissive_buf.get_pixel(32, 32);
+        let painted_opac = layer.opacity_buf.get_pixel(32, 32);
+
+        assert!(painted_emis.x > 0.8, "Emissive red channel should be painted, got {}", painted_emis.x);
+        assert!(painted_emis.y > 0.3, "Emissive green channel should be painted, got {}", painted_emis.y);
+        assert!(painted_emis.w > 2.0, "Emissive intensity should be stamped, got {}", painted_emis.w);
+        assert!(painted_opac < 0.35, "Opacity should be reduced towards 0.25, got {}", painted_opac);
+
+        // 2. Erase stamp in 2D
+        engine.settings.mode = ToolMode::Eraser;
+        engine.stamp_uv(&mut layer, glam::Vec2::new(0.5, 0.5));
+        let erased_emis = layer.emissive_buf.get_pixel(32, 32);
+        let erased_opac = layer.opacity_buf.get_pixel(32, 32);
+
+        assert!(erased_emis.x < 0.2, "Emissive should be erased towards 0, got {}", erased_emis.x);
+        assert!(erased_emis.w < 0.5, "Emissive intensity should be erased, got {}", erased_emis.w);
+        assert!(erased_opac > 0.8, "Opacity should be restored towards 1.0, got {}", erased_opac);
     }
 }

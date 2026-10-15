@@ -20,6 +20,8 @@ pub enum ViewportChannelMode {
     Position,         // World Position Object (WPO)
     WorldNormal,      // World Space Normal
     Thickness,        // Thickness Map
+    Emissive,         // Emissive / Self-Illumination
+    Opacity,          // Opacity / Alpha Cutout
 }
 
 impl ViewportChannelMode {
@@ -36,6 +38,8 @@ impl ViewportChannelMode {
             Self::Position => "Position (WPO)",
             Self::WorldNormal => "World Space Normal",
             Self::Thickness => "Thickness",
+            Self::Emissive => "Emissive",
+            Self::Opacity => "Opacity",
         }
     }
 }
@@ -314,11 +318,17 @@ impl ViewportRenderer {
                     let uv = v0.uv * pc0 + v1.uv * pc1 + v2.uv * pc2;
 
                     // Sample PBR textures
+                    let opacity = textures.opacity.sample_bilinear(uv);
+                    if mode != ViewportChannelMode::Opacity && opacity < 0.33 {
+                        continue;
+                    }
+
                     let base_col = textures.base_color.sample_bilinear(uv);
                     let roughness = textures.roughness.sample_bilinear(uv).clamp(0.015, 1.0);
                     let metallic = textures.metallic.sample_bilinear(uv).clamp(0.0, 1.0);
                     let normal_sample = textures.normal.sample_bilinear(uv);
                     let ao = textures.ao.sample_bilinear(uv);
+                    let emissive = textures.emissive.sample_bilinear(uv).truncate();
 
                     // Compute TBN tangent-space normal perturbation
                     let bitangent = geo_normal.cross(tangent) * v0.tangent.w;
@@ -341,9 +351,11 @@ impl ViewportRenderer {
                         ViewportChannelMode::Position => (world_pos * 0.5 + Vec3::splat(0.5)).clamp(Vec3::ZERO, Vec3::ONE),
                         ViewportChannelMode::WorldNormal => perturbed_normal * 0.5 + Vec3::splat(0.5),
                         ViewportChannelMode::Thickness => Vec3::splat(ao),
+                        ViewportChannelMode::Emissive => emissive,
+                        ViewportChannelMode::Opacity => Vec3::splat(opacity),
                         ViewportChannelMode::Material => {
                             // Cook-Torrance GGX PBR with selectable HDRI IBL
-                            self.evaluate_pbr_hdri(
+                            let lit = self.evaluate_pbr_hdri(
                                 world_pos,
                                 perturbed_normal,
                                 eye,
@@ -351,7 +363,8 @@ impl ViewportRenderer {
                                 roughness,
                                 metallic,
                                 ao,
-                            )
+                            );
+                            lit + emissive * 2.0
                         }
                     };
 

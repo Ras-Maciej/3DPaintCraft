@@ -471,6 +471,8 @@ impl PaintcraftApp {
         let metal = &self.project.composite_textures.metallic;
         let normal = &self.project.composite_textures.normal;
         let height_map = &self.project.composite_textures.height_map;
+        let emis_map = &self.project.composite_textures.emissive;
+        let opac_map = &self.project.composite_textures.opacity;
         let ao_map = self.project.ao_map.as_ref();
         let curv_map = self.project.curvature_map.as_ref();
         let pos_map = self.project.position_map.as_ref();
@@ -553,6 +555,17 @@ impl PaintcraftApp {
                         };
                         row[idx] = val; row[idx + 1] = val; row[idx + 2] = val; row[idx + 3] = 255;
                     }
+                    ViewportChannelMode::Emissive => {
+                        let col = emis_map.get_pixel(x as u32, y as u32);
+                        row[idx] = (col.x.clamp(0.0, 1.0) * 255.0) as u8;
+                        row[idx + 1] = (col.y.clamp(0.0, 1.0) * 255.0) as u8;
+                        row[idx + 2] = (col.z.clamp(0.0, 1.0) * 255.0) as u8;
+                        row[idx + 3] = 255;
+                    }
+                    ViewportChannelMode::Opacity => {
+                        let o = (opac_map.get_pixel(x as u32, y as u32).clamp(0.0, 1.0) * 255.0) as u8;
+                        row[idx] = o; row[idx + 1] = o; row[idx + 2] = o; row[idx + 3] = 255;
+                    }
                 }
             }
         });
@@ -575,6 +588,8 @@ impl PaintcraftApp {
             ViewportChannelMode::Normal,
             ViewportChannelMode::Height,
             ViewportChannelMode::AmbientOcclusion,
+            ViewportChannelMode::Emissive,
+            ViewportChannelMode::Opacity,
         ];
         let cur_idx = order.iter().position(|&m| m == self.view_mode).unwrap_or(0);
         let next_idx = if forward {
@@ -1287,6 +1302,8 @@ impl eframe::App for PaintcraftApp {
                                 ui.selectable_value(&mut self.view_mode, ViewportChannelMode::Position, "Position (WPO)");
                                 ui.selectable_value(&mut self.view_mode, ViewportChannelMode::WorldNormal, "World Space Normal");
                                 ui.selectable_value(&mut self.view_mode, ViewportChannelMode::Thickness, "Thickness");
+                                ui.selectable_value(&mut self.view_mode, ViewportChannelMode::Emissive, "Emissive");
+                                ui.selectable_value(&mut self.view_mode, ViewportChannelMode::Opacity, "Opacity");
                             });
                         ui.label("Channel:");
 
@@ -2598,6 +2615,12 @@ impl eframe::App for PaintcraftApp {
                                                     prop_changed = true;
                                                 }
                                             });
+                                            ui.horizontal(|ui| {
+                                                ui.label("Emission Intensity:");
+                                                if ui.add(egui::Slider::new(&mut layer.fill_emissive.w, 0.0..=10.0)).changed() {
+                                                    prop_changed = true;
+                                                }
+                                            });
                                         }
 
                                         if layer.channel_flags.opacity {
@@ -2810,10 +2833,11 @@ impl eframe::App for PaintcraftApp {
                                                         col[0] as f32 / 255.0,
                                                         col[1] as f32 / 255.0,
                                                         col[2] as f32 / 255.0,
-                                                        1.0,
+                                                        self.brush_engine.settings.paint_emissive.w,
                                                     );
                                                 }
                                             });
+                                            ui.add(egui::Slider::new(&mut self.brush_engine.settings.paint_emissive.w, 0.0..=10.0).text("Emission Intensity"));
                                         }
                                         if self.brush_engine.settings.channels.opacity {
                                             ui.add(egui::Slider::new(&mut self.brush_engine.settings.paint_opacity, 0.0..=1.0).text("Opacity"));
@@ -4031,6 +4055,8 @@ impl PaintcraftApp {
                 ViewportChannelMode::WorldNormal => 8,
                 ViewportChannelMode::Thickness => 9,
                 ViewportChannelMode::Height => 10,
+                ViewportChannelMode::Emissive => 11,
+                ViewportChannelMode::Opacity => 12,
             };
             let t_rnd = std::time::Instant::now();
             wgpu.render(vp, eye_vec4, self.renderer.hdri.rotation.to_radians(), mode_u32, self.bg_blur, self.bg_opacity, &frame_settings, self.renderer.show_wireframe);
@@ -4428,7 +4454,12 @@ impl PaintcraftApp {
                         if self.brush_engine.settings.mode == ToolMode::Eyedropper {
                             let sampled = self.project.composite_textures.base_color.sample_bilinear(hit.uv);
                             self.brush_engine.settings.paint_color = sampled;
-                            self.status_message = format!("Sampled Color: RGBA({:.2}, {:.2}, {:.2}, {:.2})", sampled.x, sampled.y, sampled.z, sampled.w);
+                            self.brush_engine.settings.paint_roughness = self.project.composite_textures.roughness.sample_bilinear(hit.uv);
+                            self.brush_engine.settings.paint_metallic = self.project.composite_textures.metallic.sample_bilinear(hit.uv);
+                            self.brush_engine.settings.paint_height = self.project.composite_textures.height_map.sample_bilinear(hit.uv);
+                            self.brush_engine.settings.paint_emissive = self.project.composite_textures.emissive.sample_bilinear(hit.uv);
+                            self.brush_engine.settings.paint_opacity = self.project.composite_textures.opacity.sample_bilinear(hit.uv);
+                            self.status_message = format!("Sampled Material: Color RGBA({:.2}, {:.2}, {:.2}, {:.2}), Rough {:.2}, Metal {:.2}, Emis RGB({:.2}, {:.2}, {:.2})", sampled.x, sampled.y, sampled.z, sampled.w, self.brush_engine.settings.paint_roughness, self.brush_engine.settings.paint_metallic, self.brush_engine.settings.paint_emissive.x, self.brush_engine.settings.paint_emissive.y, self.brush_engine.settings.paint_emissive.z);
                         } else if self.brush_engine.settings.mode == ToolMode::FillBucket {
                             let mode = self.brush_engine.settings.polygon_fill_mode;
                             let tris = match mode {
@@ -4474,14 +4505,30 @@ impl PaintcraftApp {
                                         let rough = self.brush_engine.settings.paint_roughness;
                                         let metal = self.brush_engine.settings.paint_metallic;
                                         let height = self.brush_engine.settings.paint_height;
+                                        let emis = self.brush_engine.settings.paint_emissive;
+                                        let opac = self.brush_engine.settings.paint_opacity;
+                                        let do_col = layer.channel_flags.base_color;
+                                        let do_rough = layer.channel_flags.roughness;
+                                        let do_metal = layer.channel_flags.metallic;
+                                        let do_h = layer.channel_flags.height;
+                                        let do_emis = layer.channel_flags.emission;
+                                        let do_opac = layer.channel_flags.opacity;
                                         let w = layer.base_color_buf.width;
                                         let h = layer.base_color_buf.height;
                                         for &(uv0, uv1, uv2) in &tri_uvs {
                                             crate::mesh::Mesh::rasterize_triangle_uv(w, h, uv0, uv1, uv2, |px, py| {
-                                                layer.base_color_buf.set_pixel(px, py, col);
-                                                layer.roughness_buf.set_pixel(px, py, rough);
-                                                layer.metallic_buf.set_pixel(px, py, metal);
-                                                layer.height_buf.set_pixel(px, py, height);
+                                                if do_col {
+                                                    layer.base_color_buf.set_pixel(px, py, col);
+                                                } else {
+                                                    let mut cur = layer.base_color_buf.get_pixel(px, py);
+                                                    cur.w = 1.0;
+                                                    layer.base_color_buf.set_pixel(px, py, cur);
+                                                }
+                                                if do_rough { layer.roughness_buf.set_pixel(px, py, rough); }
+                                                if do_metal { layer.metallic_buf.set_pixel(px, py, metal); }
+                                                if do_h { layer.height_buf.set_pixel(px, py, height); }
+                                                if do_emis { layer.emissive_buf.set_pixel(px, py, emis); }
+                                                if do_opac { layer.opacity_buf.set_pixel(px, py, opac); }
                                             });
                                         }
                                         layer.update_normal_from_height(1.0);
@@ -4926,7 +4973,12 @@ impl PaintcraftApp {
                         if self.brush_engine.settings.mode == ToolMode::Eyedropper {
                             let sampled = self.project.composite_textures.base_color.sample_bilinear(glam::Vec2::new(u, v));
                             self.brush_engine.settings.paint_color = sampled;
-                            self.status_message = format!("Sampled Color [2D]: RGBA({:.2}, {:.2}, {:.2}, {:.2})", sampled.x, sampled.y, sampled.z, sampled.w);
+                            self.brush_engine.settings.paint_roughness = self.project.composite_textures.roughness.sample_bilinear(glam::Vec2::new(u, v));
+                            self.brush_engine.settings.paint_metallic = self.project.composite_textures.metallic.sample_bilinear(glam::Vec2::new(u, v));
+                            self.brush_engine.settings.paint_height = self.project.composite_textures.height_map.sample_bilinear(glam::Vec2::new(u, v));
+                            self.brush_engine.settings.paint_emissive = self.project.composite_textures.emissive.sample_bilinear(glam::Vec2::new(u, v));
+                            self.brush_engine.settings.paint_opacity = self.project.composite_textures.opacity.sample_bilinear(glam::Vec2::new(u, v));
+                            self.status_message = format!("Sampled Material [2D]: Color RGBA({:.2}, {:.2}, {:.2}, {:.2}), Rough {:.2}, Metal {:.2}, Emis RGB({:.2}, {:.2}, {:.2})", sampled.x, sampled.y, sampled.z, sampled.w, self.brush_engine.settings.paint_roughness, self.brush_engine.settings.paint_metallic, self.brush_engine.settings.paint_emissive.x, self.brush_engine.settings.paint_emissive.y, self.brush_engine.settings.paint_emissive.z);
                         } else if self.brush_engine.settings.mode == ToolMode::FillBucket {
                             let uv_point = glam::Vec2::new(u, v);
                             let tri_opt = self.project.mesh.find_triangle_at_uv(uv_point);
@@ -4974,14 +5026,30 @@ impl PaintcraftApp {
                                             let rough = self.brush_engine.settings.paint_roughness;
                                             let metal = self.brush_engine.settings.paint_metallic;
                                             let height = self.brush_engine.settings.paint_height;
+                                            let emis = self.brush_engine.settings.paint_emissive;
+                                            let opac = self.brush_engine.settings.paint_opacity;
+                                            let do_col = layer.channel_flags.base_color;
+                                            let do_rough = layer.channel_flags.roughness;
+                                            let do_metal = layer.channel_flags.metallic;
+                                            let do_h = layer.channel_flags.height;
+                                            let do_emis = layer.channel_flags.emission;
+                                            let do_opac = layer.channel_flags.opacity;
                                             let w = layer.base_color_buf.width;
                                             let h = layer.base_color_buf.height;
                                             for &(uv0, uv1, uv2) in &tri_uvs {
                                                 crate::mesh::Mesh::rasterize_triangle_uv(w, h, uv0, uv1, uv2, |px, py| {
-                                                    layer.base_color_buf.set_pixel(px, py, col);
-                                                    layer.roughness_buf.set_pixel(px, py, rough);
-                                                    layer.metallic_buf.set_pixel(px, py, metal);
-                                                    layer.height_buf.set_pixel(px, py, height);
+                                                    if do_col {
+                                                        layer.base_color_buf.set_pixel(px, py, col);
+                                                    } else {
+                                                        let mut cur = layer.base_color_buf.get_pixel(px, py);
+                                                        cur.w = 1.0;
+                                                        layer.base_color_buf.set_pixel(px, py, cur);
+                                                    }
+                                                    if do_rough { layer.roughness_buf.set_pixel(px, py, rough); }
+                                                    if do_metal { layer.metallic_buf.set_pixel(px, py, metal); }
+                                                    if do_h { layer.height_buf.set_pixel(px, py, height); }
+                                                    if do_emis { layer.emissive_buf.set_pixel(px, py, emis); }
+                                                    if do_opac { layer.opacity_buf.set_pixel(px, py, opac); }
                                                 });
                                             }
                                             layer.update_normal_from_height(1.0);

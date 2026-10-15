@@ -230,6 +230,8 @@ pub struct WgpuViewport {
     tex_baked_normal: wgpu::Texture,
     tex_baked_ao: wgpu::Texture,
     tex_environment: wgpu::Texture,
+    tex_emissive: wgpu::Texture,
+    tex_opacity: wgpu::Texture,
     
     material_bind_group_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
@@ -354,6 +356,16 @@ impl WgpuViewport {
                     ty: wgpu::BindingType::Texture { multisampled: false, view_dimension: wgpu::TextureViewDimension::D2, sample_type: wgpu::TextureSampleType::Float { filterable: true } },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry { // Emissive
+                    binding: 8, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture { multisampled: false, view_dimension: wgpu::TextureViewDimension::D2, sample_type: wgpu::TextureSampleType::Float { filterable: true } },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry { // Opacity
+                    binding: 9, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture { multisampled: false, view_dimension: wgpu::TextureViewDimension::D2, sample_type: wgpu::TextureSampleType::Float { filterable: true } },
+                    count: None,
+                },
             ],
         });
 
@@ -364,6 +376,8 @@ impl WgpuViewport {
         let tex_metallic = device.create_texture(&wgpu::TextureDescriptor { label: Some("Tex M"), size: tex_size, mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::R32Float, usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST, view_formats: &[] });
         let tex_baked_normal = device.create_texture(&wgpu::TextureDescriptor { label: Some("Tex BN"), size: tex_size, mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::Rgba32Float, usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST, view_formats: &[] });
         let tex_baked_ao = device.create_texture(&wgpu::TextureDescriptor { label: Some("Tex BAO"), size: tex_size, mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::Rg32Float, usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST, view_formats: &[] });
+        let tex_emissive = device.create_texture(&wgpu::TextureDescriptor { label: Some("Tex Emis"), size: tex_size, mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::Rgba32Float, usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST, view_formats: &[] });
+        let tex_opacity = device.create_texture(&wgpu::TextureDescriptor { label: Some("Tex Opac"), size: tex_size, mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::R32Float, usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST, view_formats: &[] });
         
         let env_size = wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 };
         let tex_environment = device.create_texture(&wgpu::TextureDescriptor { label: Some("Tex Env"), size: env_size, mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::Rgba32Float, usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST, view_formats: &[] });
@@ -398,6 +412,8 @@ impl WgpuViewport {
                 wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&tex_environment.create_view(&Default::default())) },
                 wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&tex_baked_normal.create_view(&Default::default())) },
                 wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&tex_baked_ao.create_view(&Default::default())) },
+                wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::TextureView(&tex_emissive.create_view(&Default::default())) },
+                wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(&tex_opacity.create_view(&Default::default())) },
             ],
         });
 
@@ -736,6 +752,8 @@ impl WgpuViewport {
             tex_baked_normal,
             tex_baked_ao,
             tex_environment,
+            tex_emissive,
+            tex_opacity,
             material_bind_group_layout,
             sampler,
             pbr_tex_width: 512,
@@ -766,6 +784,8 @@ impl WgpuViewport {
                 wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&self.tex_environment.create_view(&Default::default())) },
                 wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&self.tex_baked_normal.create_view(&Default::default())) },
                 wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&self.tex_baked_ao.create_view(&Default::default())) },
+                wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::TextureView(&self.tex_emissive.create_view(&Default::default())) },
+                wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(&self.tex_opacity.create_view(&Default::default())) },
             ],
         });
     }
@@ -782,6 +802,8 @@ impl WgpuViewport {
         self.tex_normal = self.device.create_texture(&wgpu::TextureDescriptor { label: Some("Tex N"), size: tex_size, mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::Rgba32Float, usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST, view_formats: &[] });
         self.tex_roughness = self.device.create_texture(&wgpu::TextureDescriptor { label: Some("Tex R"), size: tex_size, mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::R32Float, usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST, view_formats: &[] });
         self.tex_metallic = self.device.create_texture(&wgpu::TextureDescriptor { label: Some("Tex M"), size: tex_size, mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::R32Float, usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST, view_formats: &[] });
+        self.tex_emissive = self.device.create_texture(&wgpu::TextureDescriptor { label: Some("Tex Emis"), size: tex_size, mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::Rgba32Float, usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST, view_formats: &[] });
+        self.tex_opacity = self.device.create_texture(&wgpu::TextureDescriptor { label: Some("Tex Opac"), size: tex_size, mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::R32Float, usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST, view_formats: &[] });
 
         self.rebuild_material_bind_group();
         self.gpu_brush.resize(w, h);
@@ -825,6 +847,23 @@ impl WgpuViewport {
             size
         );
         self.queue.submit(std::iter::once(encoder.finish()));
+
+        if project.composite_textures.emissive.width == self.pbr_tex_width && project.composite_textures.emissive.height == self.pbr_tex_height {
+            self.queue.write_texture(
+                wgpu::ImageCopyTexture { texture: &self.tex_emissive, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                bytemuck::cast_slice(&project.composite_textures.emissive.data),
+                wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(self.pbr_tex_width * 16), rows_per_image: Some(self.pbr_tex_height) },
+                size,
+            );
+        }
+        if project.composite_textures.opacity.width == self.pbr_tex_width && project.composite_textures.opacity.height == self.pbr_tex_height {
+            self.queue.write_texture(
+                wgpu::ImageCopyTexture { texture: &self.tex_opacity, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                bytemuck::cast_slice(&project.composite_textures.opacity.data),
+                wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(self.pbr_tex_width * 4), rows_per_image: Some(self.pbr_tex_height) },
+                size,
+            );
+        }
     }
 
     pub fn ensure_baked_textures(&mut self, w: u32, h: u32) {
@@ -880,6 +919,23 @@ impl WgpuViewport {
         );
 
         self.queue.submit(std::iter::once(encoder.finish()));
+
+        if project.composite_textures.emissive.width == w && project.composite_textures.emissive.height == h {
+            self.queue.write_texture(
+                wgpu::ImageCopyTexture { texture: &self.tex_emissive, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                bytemuck::cast_slice(&project.composite_textures.emissive.data),
+                wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(w * 16), rows_per_image: Some(h) },
+                size,
+            );
+        }
+        if project.composite_textures.opacity.width == w && project.composite_textures.opacity.height == h {
+            self.queue.write_texture(
+                wgpu::ImageCopyTexture { texture: &self.tex_opacity, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                bytemuck::cast_slice(&project.composite_textures.opacity.data),
+                wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(w * 4), rows_per_image: Some(h) },
+                size,
+            );
+        }
     }
 
     pub fn ensure_gpu_layers(&mut self, project: &crate::project::Project) {
