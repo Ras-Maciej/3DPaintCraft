@@ -1,7 +1,5 @@
 # 3D Paintcraft 🎨
 
-**3D Paintcraft** is a clean-room recreation of Adobe Substance 3D Painter written in 100% pure, safe Rust for Linux, built using the core philosophy and techniques of the **ArtCraft** creative suite (such as *PhotoCraft* and *ArtCraft* by storytold).
-
 ---
 
 ## 🌟 Key Features
