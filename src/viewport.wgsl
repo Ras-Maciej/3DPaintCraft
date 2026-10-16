@@ -31,6 +31,10 @@ struct CameraUniform {
     tonemap_mode: u32,
     specular_mult: f32,
     roughness_bias: f32,
+    alpha_cutoff: f32,
+    transparency_mode: u32,
+    double_sided: u32,
+    pad0: f32,
 };
 @group(0) @binding(0) var<uniform> camera: CameraUniform;
 
@@ -92,6 +96,20 @@ fn pack_normal_oct(n: vec3<f32>) -> vec2<f32> {
     return oct * 0.5 + 0.5;
 }
 
+// 8x8 Bayer Ordered Dither Matrix for Screen-Door Order-Independent Transparency
+fn bayer_8x8(coord: vec2<u32>) -> f32 {
+    let x = coord.x % 8u;
+    let y = coord.y % 8u;
+    let xor_xy = x ^ y;
+    let v = (((xor_xy >> 0u) & 1u) << 5u)
+          | (((y >> 0u) & 1u) << 4u)
+          | (((xor_xy >> 1u) & 1u) << 3u)
+          | (((y >> 1u) & 1u) << 2u)
+          | (((xor_xy >> 2u) & 1u) << 1u)
+          | (((y >> 2u) & 1u) << 0u);
+    return f32(v) / 64.0;
+}
+
 // Substance 3D Painter Standard Metallic/Roughness PBR Pipeline
 
 struct FragmentOutput {
@@ -100,11 +118,30 @@ struct FragmentOutput {
 };
 
 @fragment
-fn fs_main(in: VertexOutput) -> FragmentOutput {
+fn fs_main(@builtin(front_facing) is_front: bool, in: VertexOutput) -> FragmentOutput {
     let opacity = textureSample(tex_opacity, samp_linear, in.uv).r;
-    // Substance 3D Painter Alpha Cutout for transparency (glass, visors, torn cloth, wire mesh, foliage)
-    if camera.view_mode != 12u && opacity < 0.33 {
-        discard;
+
+    // View mode 12 is raw opacity inspection map - never discard
+    if camera.view_mode != 12u {
+        if camera.transparency_mode == 0u {
+            // Mode 0: Screen-Door / Bayer 8x8 Ordered Dithering (Order-Independent Semi-Transparency)
+            let screen_coord = vec2<u32>(in.clip_position.xy);
+            let dither_threshold = bayer_8x8(screen_coord);
+            if opacity <= dither_threshold {
+                discard;
+            }
+        } else if camera.transparency_mode == 1u {
+            // Mode 1: Substance 3D Painter Alpha Cutout (Alpha Test)
+            if opacity < camera.alpha_cutoff {
+                discard;
+            }
+        } else if camera.transparency_mode == 2u {
+            // Mode 2: Alpha Blending early-out for fully transparent pixels
+            if opacity < 0.005 {
+                discard;
+            }
+        }
+        // Mode 3: Opaque (Ignore Opacity channel, render solid)
     }
 
     let emissive_sample = textureSample(tex_emissive, samp_linear, in.uv);
@@ -167,7 +204,10 @@ fn fs_main(in: VertexOutput) -> FragmentOutput {
 
     // TBN Mapping with robust degenerate tangent handling & Gram-Schmidt orthogonalization
     let n_len = length(in.world_normal);
-    let n = select(vec3<f32>(0.0, 1.0, 0.0), normalize(in.world_normal), n_len > 1e-4);
+    var n = select(vec3<f32>(0.0, 1.0, 0.0), normalize(in.world_normal), n_len > 1e-4);
+    if !is_front {
+        n = -n;
+    }
     let t_len = length(in.world_tangent.xyz);
     var t = select(vec3<f32>(1.0, 0.0, 0.0), normalize(in.world_tangent.xyz), t_len > 1e-4);
     if t_len <= 1e-4 {
@@ -334,7 +374,11 @@ fn fs_main(in: VertexOutput) -> FragmentOutput {
         return out;
     }
 
-    out.color = vec4<f32>(final_color, 1.0);
+    var out_alpha = 1.0;
+    if camera.transparency_mode == 2u {
+        out_alpha = opacity;
+    }
+    out.color = vec4<f32>(final_color, out_alpha);
     return out;
 }
 

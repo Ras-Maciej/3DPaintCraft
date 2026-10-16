@@ -25,6 +25,25 @@ impl ShaderPerformancePreset {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum TransparencyMode {
+    Dithered = 0,    // Screen-Door / Bayer 8x8 Dithering (Order Independent Semi-Transparency)
+    AlphaCutout = 1, // Substance 3D Painter Alpha Cutout (Alpha Test)
+    AlphaBlend = 2,  // Smooth Alpha Blending (Translucent Glass)
+    Opaque = 3,      // Opaque (Ignore Opacity)
+}
+
+impl TransparencyMode {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Dithered => "Dithered Transparency (Screen-Door)",
+            Self::AlphaCutout => "Alpha Cutout (Alpha Test)",
+            Self::AlphaBlend => "Alpha Blending (Translucent Glass)",
+            Self::Opaque => "Opaque (Ignore Opacity)",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ShaderSettings {
     pub sun_intensity: f32,
@@ -35,6 +54,11 @@ pub struct ShaderSettings {
     pub tonemap_mode: u32,  // 0 = Reinhard, 1 = ACES Filmic, 2 = AgX, 3 = Linear
     pub specular_mult: f32,
     pub roughness_bias: f32,
+
+    // Opacity / Transparency Settings
+    pub transparency_mode: TransparencyMode,
+    pub alpha_cutoff: f32,
+    pub double_sided: bool,
 
     // Anti-Aliasing (Off / FXAA / NVIDIA DLAA)
     pub aa_mode: crate::nvidia_dlaa::AntiAliasingMode,
@@ -154,6 +178,9 @@ impl Default for ShaderSettings {
             tonemap_mode: 1, // ACES Filmic
             specular_mult: 1.0,
             roughness_bias: 0.0,
+            transparency_mode: TransparencyMode::Dithered,
+            alpha_cutoff: 0.33,
+            double_sided: false,
             aa_mode: crate::nvidia_dlaa::AntiAliasingMode::NvidiaDlaa,
             fxaa_enabled: true,
             denoiser_enabled: true,
@@ -214,6 +241,7 @@ pub struct WgpuViewport {
     height: u32,
 
     pipeline: wgpu::RenderPipeline,
+    pipeline_double_sided: wgpu::RenderPipeline,
     skybox_pipeline: wgpu::RenderPipeline,
     wireframe_pipeline: wgpu::RenderPipeline,
     vertex_buffer: wgpu::Buffer,
@@ -284,7 +312,7 @@ impl WgpuViewport {
 
         let camera_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Camera Buffer"),
-            size: 192,
+            size: 208,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -449,7 +477,7 @@ impl WgpuViewport {
                 targets: &[
                     Some(wgpu::ColorTargetState {
                         format: wgpu::TextureFormat::Rgba8UnormSrgb,
-                        blend: Some(wgpu::BlendState::REPLACE),
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                         write_mask: wgpu::ColorWrites::ALL,
                     }),
                     Some(wgpu::ColorTargetState {
@@ -463,6 +491,48 @@ impl WgpuViewport {
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
                 cull_mode: Some(wgpu::Face::Back),
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+        });
+
+        let pipeline_double_sided = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("PBR Pipeline (Double-Sided / Cull Off)"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: "vs_main",
+                buffers: &vertex_layouts,
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: "fs_main",
+                targets: &[
+                    Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                    Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba16Float,
+                        blend: Some(wgpu::BlendState::REPLACE),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                ],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                cull_mode: None,
                 ..Default::default()
             },
             depth_stencil: Some(wgpu::DepthStencilState {
@@ -737,6 +807,7 @@ impl WgpuViewport {
             width,
             height,
             pipeline,
+            pipeline_double_sided,
             skybox_pipeline,
             wireframe_pipeline,
             vertex_buffer,
@@ -1381,7 +1452,7 @@ fn blur_equirectangular(
         let view_proj_jittered = self.dlaa_manager.jitter_projection(view_proj, is_dlaa);
 
         let t_enc = std::time::Instant::now();
-        let mut data = [0u8; 192];
+        let mut data = [0u8; 208];
         data[0..64].copy_from_slice(bytemuck::cast_slice(&[view_proj_jittered]));
         data[64..80].copy_from_slice(bytemuck::cast_slice(&[eye_pos]));
         data[80..84].copy_from_slice(bytemuck::cast_slice(&[env_rot]));
@@ -1398,6 +1469,12 @@ fn blur_equirectangular(
         data[180..184].copy_from_slice(bytemuck::cast_slice(&[shader.tonemap_mode]));
         data[184..188].copy_from_slice(bytemuck::cast_slice(&[shader.specular_mult]));
         data[188..192].copy_from_slice(bytemuck::cast_slice(&[shader.roughness_bias]));
+        data[192..196].copy_from_slice(bytemuck::cast_slice(&[shader.alpha_cutoff]));
+        let trans_mode = shader.transparency_mode as u32;
+        data[196..200].copy_from_slice(bytemuck::cast_slice(&[trans_mode]));
+        let dbl_side = if shader.double_sided { 1u32 } else { 0u32 };
+        data[200..204].copy_from_slice(bytemuck::cast_slice(&[dbl_side]));
+        data[204..208].copy_from_slice(bytemuck::cast_slice(&[0.0f32]));
         self.queue.write_buffer(&self.camera_buffer, 0, &data);
 
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -1451,7 +1528,12 @@ fn blur_equirectangular(
             }
             
             // Draw Mesh
-            pass.set_pipeline(&self.pipeline);
+            let active_pipeline = if shader.double_sided {
+                &self.pipeline_double_sided
+            } else {
+                &self.pipeline
+            };
+            pass.set_pipeline(active_pipeline);
             pass.set_bind_group(0, &self.camera_bind_group, &[]);
             pass.set_bind_group(1, &self.material_bind_group, &[]);
             pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
@@ -1625,6 +1707,14 @@ mod tests {
         assert!(settings.adaptive_resolution);
         assert_eq!(settings.tonemap_mode, 1);
         assert_eq!(settings.normal_format, 0);
+        assert_eq!(settings.transparency_mode, TransparencyMode::Dithered);
+        assert!((settings.alpha_cutoff - 0.33).abs() < 1e-4);
+        assert!(!settings.double_sided);
+
+        assert_eq!(TransparencyMode::Dithered.name(), "Dithered Transparency (Screen-Door)");
+        assert_eq!(TransparencyMode::AlphaCutout.name(), "Alpha Cutout (Alpha Test)");
+        assert_eq!(TransparencyMode::AlphaBlend.name(), "Alpha Blending (Translucent Glass)");
+        assert_eq!(TransparencyMode::Opaque.name(), "Opaque (Ignore Opacity)");
     }
 
     #[test]

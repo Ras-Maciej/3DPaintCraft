@@ -92,6 +92,30 @@ impl SmartMaterialLibrary {
                 category: "Plastic",
                 description: "Durable military tactical weapon and chassis polymer casing",
             },
+            SmartMaterialPreset {
+                id: "tinted_glass_visor",
+                name: "Tinted Glass / Visor",
+                category: "Glass",
+                description: "Semi-transparent amber/blue tinted visor with smooth specular reflections, finger smudges, and subtle surface scratches",
+            },
+            SmartMaterialPreset {
+                id: "perforated_steel_grate",
+                name: "Perforated Steel Grate",
+                category: "Metal",
+                description: "Industrial steel plate with cutout hexagonal perforations, chipped edge highlights, and crevice dirt",
+            },
+            SmartMaterialPreset {
+                id: "torn_camo_fabric",
+                name: "Torn Camo Fabric",
+                category: "Fabric",
+                description: "Military camouflage cloth with ragged frayed tear holes cut out via opacity noise",
+            },
+            SmartMaterialPreset {
+                id: "wire_chainlink_fence",
+                name: "Wire Chainlink Fence",
+                category: "Metal",
+                description: "Galvanized steel diamond wire mesh with cut-out fence openings and junction oxidation",
+            },
         ]
     }
 
@@ -1006,6 +1030,274 @@ impl SmartMaterialLibrary {
                 layers.push(details);
             }
 
+            "tinted_glass_visor" => {
+                // Layer 1: Semi-Transparent Visor Glass
+                let mut glass = Layer::new_fill_layer(
+                    1,
+                    "Visor Glass Tint".to_string(),
+                    width,
+                    height,
+                    Vec4::new(0.18, 0.28, 0.40, 1.0),
+                    0.06,
+                    0.0,
+                );
+                glass.fill_opacity = 0.52;
+                glass.channel_flags.opacity = true;
+                glass.evaluate_fill_advanced(curvature_map, position_map, world_normal_map, ao_map);
+                layers.push(glass);
+
+                // Layer 2: Fingerprint Smudges & Surface Haze
+                let mut smudges = Layer::new_fill_layer(
+                    2,
+                    "Surface Smudges & Grease".to_string(),
+                    width,
+                    height,
+                    Vec4::new(0.35, 0.42, 0.50, 1.0),
+                    0.48,
+                    0.0,
+                );
+                smudges.fill_opacity = 0.70;
+                smudges.channel_flags.opacity = true;
+                smudges.has_mask = true;
+                smudges.mask_effects.push(MaskEffect {
+                    id: 1,
+                    name: "Oil Smudges".to_string(),
+                    effect_type: MaskEffectType::Fill {
+                        generator: ProceduralGenerator::WorleyGrunge,
+                        scale: 14.0,
+                        contrast: 1.4,
+                        invert: false,
+                        balance: 0.48,
+                    },
+                    visible: true,
+                    opacity: 0.65,
+                    blend_mode: BlendMode::Normal,
+                });
+                smudges.evaluate_mask_advanced(curvature_map, ao_map, position_map, world_normal_map);
+                smudges.evaluate_fill_advanced(curvature_map, position_map, world_normal_map, ao_map);
+                layers.push(smudges);
+
+                // Layer 3: Edge Scuffs & Micro Scratches
+                let mut scuffs = Layer::new_fill_layer(
+                    3,
+                    "Edge Scuffs & Scratches".to_string(),
+                    width,
+                    height,
+                    Vec4::new(0.85, 0.88, 0.92, 1.0),
+                    0.75,
+                    0.0,
+                );
+                scuffs.fill_opacity = 0.88;
+                scuffs.channel_flags.opacity = true;
+                scuffs.has_mask = true;
+                scuffs.mask_effects.push(MaskEffect {
+                    id: 1,
+                    name: "Edge Scuffs".to_string(),
+                    effect_type: MaskEffectType::Fill {
+                        generator: ProceduralGenerator::CurvatureWear,
+                        scale: 12.0,
+                        contrast: 1.6,
+                        invert: false,
+                        balance: 0.52,
+                    },
+                    visible: true,
+                    opacity: 0.85,
+                    blend_mode: BlendMode::Normal,
+                });
+                scuffs.mask_effects.push(MaskEffect {
+                    id: 2,
+                    name: "Micro Scratches".to_string(),
+                    effect_type: MaskEffectType::Fill {
+                        generator: ProceduralGenerator::Scratches,
+                        scale: 28.0,
+                        contrast: 1.3,
+                        invert: false,
+                        balance: 0.5,
+                    },
+                    visible: true,
+                    opacity: 0.70,
+                    blend_mode: BlendMode::Add,
+                });
+                scuffs.evaluate_mask_advanced(curvature_map, ao_map, position_map, world_normal_map);
+                scuffs.evaluate_fill_advanced(curvature_map, position_map, world_normal_map, ao_map);
+                layers.push(scuffs);
+            }
+
+            "perforated_steel_grate" => {
+                // Layer 1: Cutout Holes (Transparent Substrate)
+                let mut holes = Layer::new_fill_layer(
+                    1,
+                    "Cutout Perforations".to_string(),
+                    width,
+                    height,
+                    Vec4::new(0.1, 0.1, 0.1, 1.0),
+                    0.5,
+                    0.0,
+                );
+                holes.fill_opacity = 0.0;
+                holes.channel_flags.opacity = true;
+                holes.evaluate_fill_advanced(curvature_map, position_map, world_normal_map, ao_map);
+                layers.push(holes);
+
+                // Layer 2: Perforated Steel Plate
+                let mut plate = Layer::new_fill_layer(
+                    2,
+                    "PBR Steel Grate".to_string(),
+                    width,
+                    height,
+                    Vec4::new(0.72, 0.74, 0.76, 1.0),
+                    0.34,
+                    0.96,
+                );
+                plate.fill_opacity = 1.0;
+                plate.channel_flags.opacity = true;
+                plate.has_mask = true;
+                plate.mask_effects.push(MaskEffect {
+                    id: 1,
+                    name: "Hexagonal Punch Holes".to_string(),
+                    effect_type: MaskEffectType::Fill {
+                        generator: ProceduralGenerator::PerforatedMesh,
+                        scale: 16.0,
+                        contrast: 2.0,
+                        invert: false,
+                        balance: 0.5,
+                    },
+                    visible: true,
+                    opacity: 1.0,
+                    blend_mode: BlendMode::Normal,
+                });
+                plate.evaluate_mask_advanced(curvature_map, ao_map, position_map, world_normal_map);
+                plate.evaluate_fill_advanced(curvature_map, position_map, world_normal_map, ao_map);
+                layers.push(plate);
+
+                // Layer 3: Crevice Grime & Edge Wear around holes
+                let mut grime = Layer::new_fill_layer(
+                    3,
+                    "Hole Edge Chipping & Grime".to_string(),
+                    width,
+                    height,
+                    Vec4::new(0.28, 0.20, 0.14, 1.0),
+                    0.82,
+                    0.20,
+                );
+                grime.has_mask = true;
+                grime.mask_effects.push(MaskEffect {
+                    id: 1,
+                    name: "Cavity Dirt".to_string(),
+                    effect_type: MaskEffectType::Fill {
+                        generator: ProceduralGenerator::AmbientOcclusion,
+                        scale: 8.0,
+                        contrast: 1.5,
+                        invert: false,
+                        balance: 0.55,
+                    },
+                    visible: true,
+                    opacity: 0.85,
+                    blend_mode: BlendMode::Normal,
+                });
+                grime.evaluate_mask_advanced(curvature_map, ao_map, position_map, world_normal_map);
+                grime.evaluate_fill_advanced(curvature_map, position_map, world_normal_map, ao_map);
+                layers.push(grime);
+            }
+
+            "torn_camo_fabric" => {
+                // Layer 1: Cutout Holes
+                let mut cutout = Layer::new_fill_layer(
+                    1,
+                    "Cutout Tears".to_string(),
+                    width,
+                    height,
+                    Vec4::new(0.1, 0.1, 0.1, 1.0),
+                    0.5,
+                    0.0,
+                );
+                cutout.fill_opacity = 0.0;
+                cutout.channel_flags.opacity = true;
+                cutout.evaluate_fill_advanced(curvature_map, position_map, world_normal_map, ao_map);
+                layers.push(cutout);
+
+                // Layer 2: Camo Cloth Pattern
+                let mut cloth = Layer::new_fill_layer(
+                    2,
+                    "Torn Camo Fabric".to_string(),
+                    width,
+                    height,
+                    Vec4::new(0.38, 0.42, 0.28, 1.0),
+                    0.85,
+                    0.0,
+                );
+                cloth.fill_opacity = 1.0;
+                cloth.channel_flags.opacity = true;
+                cloth.fill_generator = ProceduralGenerator::FabricWeave;
+                cloth.generator_scale = 32.0;
+                cloth.has_mask = true;
+                cloth.mask_effects.push(MaskEffect {
+                    id: 1,
+                    name: "Torn Ragged Edge".to_string(),
+                    effect_type: MaskEffectType::Fill {
+                        generator: ProceduralGenerator::TornFabricEdge,
+                        scale: 6.0,
+                        contrast: 1.8,
+                        invert: false,
+                        balance: 0.5,
+                    },
+                    visible: true,
+                    opacity: 1.0,
+                    blend_mode: BlendMode::Normal,
+                });
+                cloth.evaluate_mask_advanced(curvature_map, ao_map, position_map, world_normal_map);
+                cloth.evaluate_fill_advanced(curvature_map, position_map, world_normal_map, ao_map);
+                layers.push(cloth);
+            }
+
+            "wire_chainlink_fence" => {
+                // Layer 1: Open Space Cutout
+                let mut space = Layer::new_fill_layer(
+                    1,
+                    "Fence Cutout".to_string(),
+                    width,
+                    height,
+                    Vec4::new(0.1, 0.1, 0.1, 1.0),
+                    0.5,
+                    0.0,
+                );
+                space.fill_opacity = 0.0;
+                space.channel_flags.opacity = true;
+                space.evaluate_fill_advanced(curvature_map, position_map, world_normal_map, ao_map);
+                layers.push(space);
+
+                // Layer 2: Galvanized Zinc Wire
+                let mut wire = Layer::new_fill_layer(
+                    2,
+                    "Galvanized Steel Wire".to_string(),
+                    width,
+                    height,
+                    Vec4::new(0.80, 0.82, 0.85, 1.0),
+                    0.36,
+                    0.92,
+                );
+                wire.fill_opacity = 1.0;
+                wire.channel_flags.opacity = true;
+                wire.has_mask = true;
+                wire.mask_effects.push(MaskEffect {
+                    id: 1,
+                    name: "Diamond Wire Mesh".to_string(),
+                    effect_type: MaskEffectType::Fill {
+                        generator: ProceduralGenerator::WireFence,
+                        scale: 14.0,
+                        contrast: 2.0,
+                        invert: false,
+                        balance: 0.5,
+                    },
+                    visible: true,
+                    opacity: 1.0,
+                    blend_mode: BlendMode::Normal,
+                });
+                wire.evaluate_mask_advanced(curvature_map, ao_map, position_map, world_normal_map);
+                wire.evaluate_fill_advanced(curvature_map, position_map, world_normal_map, ao_map);
+                layers.push(wire);
+            }
+
             _ => {
                 let default_layer = Layer::new_fill_layer(
                     1,
@@ -1074,6 +1366,21 @@ impl SmartMaterialLibrary {
                 id: "patina_oxidation",
                 name: "Verdigris & Oxidation Bloom",
                 description: "Antique chemical oxidation blooming organically outward from deep crevices",
+            },
+            SmartMaskPreset {
+                id: "mask_perforated_mesh",
+                name: "Perforated Hex Holes",
+                description: "Industrial punched sheet metal hexagonal hole cutout mask",
+            },
+            SmartMaskPreset {
+                id: "mask_wire_diamond",
+                name: "Diamond Wire Fence Mesh",
+                description: "45-degree diamond crisscross wire fence mesh cutout",
+            },
+            SmartMaskPreset {
+                id: "mask_torn_edge",
+                name: "Torn Fabric Ragged Cutout",
+                description: "Organic ragged cloth tear with fine boundary fiber fringe",
             },
         ]
     }
@@ -1365,6 +1672,45 @@ impl SmartMaterialLibrary {
             "mask_invert" => {
                 layer.add_mask_filter_invert(curvature_map);
             }
+            "mask_perforated_mesh" | "mask_perforated" => {
+                let id = layer.add_mask_fill_effect_advanced(ProceduralGenerator::PerforatedMesh, curvature_map, ao_map, position_map, world_normal_map);
+                if let Some(eff) = layer.mask_effects.iter_mut().find(|e| e.id == id) {
+                    eff.name = "Perforated Hex Punch".to_string();
+                    if let MaskEffectType::Fill { ref mut scale, ref mut contrast, .. } = eff.effect_type {
+                        *scale = 16.0;
+                        *contrast = 2.0;
+                    }
+                }
+            }
+            "mask_wire_diamond" => {
+                let id = layer.add_mask_fill_effect_advanced(ProceduralGenerator::WireFence, curvature_map, ao_map, position_map, world_normal_map);
+                if let Some(eff) = layer.mask_effects.iter_mut().find(|e| e.id == id) {
+                    eff.name = "Diamond Wire Mesh".to_string();
+                    if let MaskEffectType::Fill { ref mut scale, ref mut contrast, .. } = eff.effect_type {
+                        *scale = 14.0;
+                        *contrast = 2.0;
+                    }
+                }
+            }
+            "mask_torn_edge" => {
+                let id1 = layer.add_mask_fill_effect_advanced(ProceduralGenerator::TornFabricEdge, curvature_map, ao_map, position_map, world_normal_map);
+                if let Some(eff) = layer.mask_effects.iter_mut().find(|e| e.id == id1) {
+                    eff.name = "Torn Ragged Edge".to_string();
+                    if let MaskEffectType::Fill { ref mut scale, ref mut contrast, .. } = eff.effect_type {
+                        *scale = 6.0;
+                        *contrast = 1.8;
+                    }
+                }
+                let id2 = layer.add_mask_fill_effect_advanced(ProceduralGenerator::FabricWeave, curvature_map, ao_map, position_map, world_normal_map);
+                if let Some(eff) = layer.mask_effects.iter_mut().find(|e| e.id == id2) {
+                    eff.name = "Fabric Fringe".to_string();
+                    eff.blend_mode = BlendMode::Multiply;
+                    eff.opacity = 0.45;
+                    if let MaskEffectType::Fill { ref mut scale, .. } = eff.effect_type {
+                        *scale = 32.0;
+                    }
+                }
+            }
             _ => {
                 layer.add_mask_fill_effect_advanced(ProceduralGenerator::PerlinNoise, curvature_map, ao_map, position_map, world_normal_map);
             }
@@ -1412,6 +1758,7 @@ impl SmartMaterialLibrary {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::layer::CompositeTextureSet;
 
     #[test]
     fn test_smart_material_layer_stacks() {
@@ -1455,6 +1802,65 @@ mod tests {
             SmartMaterialLibrary::apply_smart_mask(mask.id, &mut layer, None, None);
             assert!(layer.has_mask, "Mask {} should enable layer has_mask", mask.id);
             assert!(!layer.mask_effects.is_empty(), "Mask {} should add mask effects", mask.id);
+        }
+    }
+
+    #[test]
+    fn test_opacity_smart_materials_and_masks() {
+        let opacity_materials = [
+            "tinted_glass_visor",
+            "perforated_steel_grate",
+            "torn_camo_fabric",
+            "wire_chainlink_fence",
+        ];
+
+        for mat_id in opacity_materials {
+            let layers = SmartMaterialLibrary::build_layers_with_maps(
+                mat_id,
+                32,
+                32,
+                None,
+                None,
+                None,
+                None,
+            );
+            assert!(!layers.is_empty(), "Material {} should generate layers", mat_id);
+            let has_opacity_flag = layers.iter().any(|l| l.channel_flags.opacity);
+            assert!(has_opacity_flag, "Material {} must have at least one layer with opacity channel enabled", mat_id);
+
+            let mut comp = CompositeTextureSet::new(32, 32);
+            comp.composite_layers(&layers);
+
+            if mat_id == "tinted_glass_visor" {
+                let op = comp.opacity.get_pixel(16, 16);
+                assert!((op - 0.52).abs() < 1e-3, "Tinted glass visor composite opacity should be ~0.52, got {}", op);
+            }
+        }
+
+        let opacity_masks = [
+            "mask_perforated_mesh",
+            "mask_wire_diamond",
+            "mask_torn_edge",
+        ];
+
+        let mut layer = Layer::new_fill_layer(
+            1,
+            "Opacity Mask Target".to_string(),
+            32,
+            32,
+            Vec4::ONE,
+            0.5,
+            0.0,
+        );
+
+        for mask_id in opacity_masks {
+            layer.mask_effects.clear();
+            SmartMaterialLibrary::apply_smart_mask(mask_id, &mut layer, None, None);
+            assert!(layer.has_mask, "Mask {} should enable mask", mask_id);
+            assert!(!layer.mask_effects.is_empty(), "Mask {} must add mask effects", mask_id);
+
+            layer.evaluate_mask(None);
+            assert!(layer.mask_buf.data.iter().all(|&v| (0.0..=1.0).contains(&v)));
         }
     }
 }

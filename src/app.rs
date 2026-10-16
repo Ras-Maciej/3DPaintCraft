@@ -2629,6 +2629,18 @@ impl eframe::App for PaintcraftApp {
                                                 if ui.add(egui::Slider::new(&mut layer.fill_opacity, 0.0..=1.0)).changed() {
                                                     prop_changed = true;
                                                 }
+                                                if ui.small_button("Hole (0%)").clicked() {
+                                                    layer.fill_opacity = 0.0;
+                                                    prop_changed = true;
+                                                }
+                                                if ui.small_button("Glass (50%)").clicked() {
+                                                    layer.fill_opacity = 0.5;
+                                                    prop_changed = true;
+                                                }
+                                                if ui.small_button("Solid (100%)").clicked() {
+                                                    layer.fill_opacity = 1.0;
+                                                    prop_changed = true;
+                                                }
                                             });
                                         }
 
@@ -2840,7 +2852,18 @@ impl eframe::App for PaintcraftApp {
                                             ui.add(egui::Slider::new(&mut self.brush_engine.settings.paint_emissive.w, 0.0..=10.0).text("Emission Intensity"));
                                         }
                                         if self.brush_engine.settings.channels.opacity {
-                                            ui.add(egui::Slider::new(&mut self.brush_engine.settings.paint_opacity, 0.0..=1.0).text("Opacity"));
+                                            ui.horizontal(|ui| {
+                                                ui.add(egui::Slider::new(&mut self.brush_engine.settings.paint_opacity, 0.0..=1.0).text("Opacity"));
+                                                if ui.small_button("Hole (0%)").clicked() {
+                                                    self.brush_engine.settings.paint_opacity = 0.0;
+                                                }
+                                                if ui.small_button("Glass (50%)").clicked() {
+                                                    self.brush_engine.settings.paint_opacity = 0.5;
+                                                }
+                                                if ui.small_button("Solid (100%)").clicked() {
+                                                    self.brush_engine.settings.paint_opacity = 1.0;
+                                                }
+                                            });
                                         }
                                         if self.brush_engine.settings.channels.clearcoat {
                                             ui.add(egui::Slider::new(&mut self.brush_engine.settings.paint_clearcoat, 0.0..=1.0).text("Clearcoat"));
@@ -3655,6 +3678,61 @@ impl eframe::App for PaintcraftApp {
                                     ui.selectable_value(&mut self.shader_settings.tonemap_mode, 0, "Exposure / Reinhard (Neutral)");
                                     ui.selectable_value(&mut self.shader_settings.tonemap_mode, 3, "Linear / Uncompressed");
                                 });
+                        });
+
+                        ui.collapsing("Opacity & Transparency (Substance Pipeline)", |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label("Mode:");
+                                egui::ComboBox::from_id_source("transparency_mode_combo")
+                                    .selected_text(self.shader_settings.transparency_mode.name())
+                                    .show_ui(ui, |ui| {
+                                        ui.selectable_value(
+                                            &mut self.shader_settings.transparency_mode,
+                                            crate::wgpu_renderer::TransparencyMode::Dithered,
+                                            crate::wgpu_renderer::TransparencyMode::Dithered.name(),
+                                        );
+                                        ui.selectable_value(
+                                            &mut self.shader_settings.transparency_mode,
+                                            crate::wgpu_renderer::TransparencyMode::AlphaCutout,
+                                            crate::wgpu_renderer::TransparencyMode::AlphaCutout.name(),
+                                        );
+                                        ui.selectable_value(
+                                            &mut self.shader_settings.transparency_mode,
+                                            crate::wgpu_renderer::TransparencyMode::AlphaBlend,
+                                            crate::wgpu_renderer::TransparencyMode::AlphaBlend.name(),
+                                        );
+                                        ui.selectable_value(
+                                            &mut self.shader_settings.transparency_mode,
+                                            crate::wgpu_renderer::TransparencyMode::Opaque,
+                                            crate::wgpu_renderer::TransparencyMode::Opaque.name(),
+                                        );
+                                    });
+                            });
+
+                            if self.shader_settings.transparency_mode == crate::wgpu_renderer::TransparencyMode::AlphaCutout {
+                                ui.horizontal(|ui| {
+                                    ui.label("Alpha Cutoff:");
+                                    ui.add(egui::Slider::new(&mut self.shader_settings.alpha_cutoff, 0.01..=0.99));
+                                });
+                            }
+
+                            ui.checkbox(&mut self.shader_settings.double_sided, "Double-Sided Rendering (Two-Sided Shading)")
+                                .on_hover_text("Renders both front and back faces with flipped normals on backfaces. Essential for wire mesh, cloth tears, and transparent glass visors.");
+
+                            match self.shader_settings.transparency_mode {
+                                crate::wgpu_renderer::TransparencyMode::Dithered => {
+                                    ui.label(egui::RichText::new("Bayer 8x8 screen-door dithering provides order-independent gradual semi-transparency with proper depth testing and no sorting artifacts. Smooths automatically under NVIDIA DLAA and Denoiser.").small().color(Color32::from_rgb(160, 165, 175)));
+                                }
+                                crate::wgpu_renderer::TransparencyMode::AlphaCutout => {
+                                    ui.label(egui::RichText::new("Substance 3D Painter alpha cutout discarding. Fragments with opacity below the cutoff threshold are discarded.").small().color(Color32::from_rgb(160, 165, 175)));
+                                }
+                                crate::wgpu_renderer::TransparencyMode::AlphaBlend => {
+                                    ui.label(egui::RichText::new("Translucent glass alpha blending against the viewport skybox and backdrop.").small().color(Color32::from_rgb(160, 165, 175)));
+                                }
+                                crate::wgpu_renderer::TransparencyMode::Opaque => {
+                                    ui.label(egui::RichText::new("Transparency disabled in viewport. The surface is rendered fully opaque while preserving painted opacity channel maps for export.").small().color(Color32::from_rgb(160, 165, 175)));
+                                }
+                            }
                         });
 
                         ui.collapsing("Environment Specular Occlusion (PBR)", |ui| {
@@ -5794,6 +5872,10 @@ impl PaintcraftApp {
                     "gen_position" => crate::layer::ProceduralGenerator::PositionGradient,
                     "gen_checker" => crate::layer::ProceduralGenerator::Checkerboard,
                     "gen_bricks" => crate::layer::ProceduralGenerator::Bricks,
+                    "gen_perforated" => crate::layer::ProceduralGenerator::PerforatedMesh,
+                    "gen_wire_fence" => crate::layer::ProceduralGenerator::WireFence,
+                    "gen_torn_fabric" => crate::layer::ProceduralGenerator::TornFabricEdge,
+                    "gen_dots" => crate::layer::ProceduralGenerator::CircularDots,
                     _ => crate::layer::ProceduralGenerator::PerlinNoise,
                 };
                 let act_idx = self.project.active_layer_idx;

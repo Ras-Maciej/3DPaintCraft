@@ -127,6 +127,10 @@ pub enum ProceduralGenerator {
     DrippingLeaks,
     Checkerboard,
     Bricks,
+    PerforatedMesh,
+    WireFence,
+    TornFabricEdge,
+    CircularDots,
 }
 
 impl ProceduralGenerator {
@@ -149,6 +153,10 @@ impl ProceduralGenerator {
             Self::DrippingLeaks => "Dripping Leaks (Vertical Streaks)",
             Self::Checkerboard => "Checkerboard",
             Self::Bricks => "Bricks / Tiles",
+            Self::PerforatedMesh => "Perforated Mesh (Hex Holes)",
+            Self::WireFence => "Wire Fence (Diamond Mesh)",
+            Self::TornFabricEdge => "Torn Fabric (Ragged Cutout)",
+            Self::CircularDots => "Circular Dots / Holes",
         }
     }
 
@@ -170,6 +178,10 @@ impl ProceduralGenerator {
             Self::PositionGradient,
             Self::Checkerboard,
             Self::Bricks,
+            Self::PerforatedMesh,
+            Self::WireFence,
+            Self::TornFabricEdge,
+            Self::CircularDots,
         ]
     }
 }
@@ -262,6 +274,10 @@ pub struct Layer {
     pub fill_metallic_tex: Option<ScalarBuffer>,
     #[serde(skip)]
     pub fill_normal_tex: Option<RgbaBuffer>,
+    #[serde(skip)]
+    pub fill_emissive_tex: Option<RgbaBuffer>,
+    #[serde(skip)]
+    pub fill_opacity_tex: Option<ScalarBuffer>,
 
     // Raster buffers for paint layers
     pub base_color_buf: RgbaBuffer,
@@ -327,6 +343,8 @@ impl Layer {
             fill_roughness_tex: None,
             fill_metallic_tex: None,
             fill_normal_tex: None,
+            fill_emissive_tex: None,
+            fill_opacity_tex: None,
 
             // Transparent paint buffers
             base_color_buf: RgbaBuffer::new(width, height, Vec4::ZERO),
@@ -667,6 +685,38 @@ impl Layer {
                         let fx = (scaled_x - scaled_x.floor()).abs();
                         let fy = (scaled_y - scaled_y.floor()).abs();
                         if fx < 0.07 || fy < 0.07 { 0.0 } else { 1.0 }
+                    }
+                    ProceduralGenerator::PerforatedMesh => {
+                        let scaled_y = v * sc * 1.73205;
+                        let row = scaled_y.floor() as i32;
+                        let offset_x = if row % 2 != 0 { 0.5 } else { 0.0 };
+                        let scaled_x = u * sc + offset_x;
+                        let fx = (scaled_x - scaled_x.floor()) - 0.5;
+                        let fy = (scaled_y - scaled_y.floor()) - 0.5;
+                        let dist = (fx * fx + fy * fy).sqrt();
+                        if dist < 0.36 { 0.0 } else { 1.0 }
+                    }
+                    ProceduralGenerator::WireFence => {
+                        let rot_u = (u + v) * 0.7071 * sc;
+                        let rot_v = (v - u) * 0.7071 * sc;
+                        let fx = (rot_u - rot_u.floor() - 0.5).abs();
+                        let fy = (rot_v - rot_v.floor() - 0.5).abs();
+                        let wire_thickness = 0.09;
+                        let wire = (wire_thickness - fx).max(wire_thickness - fy);
+                        if wire > 0.0 { 1.0 } else { 0.0 }
+                    }
+                    ProceduralGenerator::TornFabricEdge => {
+                        let fbm = NoiseGenerator::fbm_2d(u * sc * 3.0, v * sc * 3.0, 4, 2.0, 0.5);
+                        let fibers = NoiseGenerator::ridged_fbm_2d(u * sc * 12.0, v * sc * 12.0, 3, 2.0, 0.5);
+                        let v_center = (v - 0.5).abs() * 2.0;
+                        let tear = v_center + (fbm - 0.5) * 0.7 + (fibers - 0.5) * 0.25;
+                        if tear < 0.5 { 1.0 } else { 0.0 }
+                    }
+                    ProceduralGenerator::CircularDots => {
+                        let fx = (u * sc - (u * sc).floor()) - 0.5;
+                        let fy = (v * sc - (v * sc).floor()) - 0.5;
+                        let dist = (fx * fx + fy * fy).sqrt();
+                        if dist < 0.32 { 0.0 } else { 1.0 }
                     }
                 };
                 let with_balance = (raw_val + (balance - 0.5) * 1.5).clamp(0.0, 1.0);
@@ -1290,6 +1340,44 @@ impl Layer {
                             let factor = (drip * 1.6).clamp(0.0, 1.0);
                             (1.0 - factor * 0.6, factor)
                         }
+                        ProceduralGenerator::PerforatedMesh => {
+                            let scaled_y = rv * self.generator_scale * 1.73205;
+                            let row = scaled_y.floor() as i32;
+                            let offset_x = if row % 2 != 0 { 0.5 } else { 0.0 };
+                            let scaled_x = ru * self.generator_scale + offset_x;
+                            let fx = (scaled_x - scaled_x.floor()) - 0.5;
+                            let fy = (scaled_y - scaled_y.floor()) - 0.5;
+                            let dist = (fx * fx + fy * fy).sqrt();
+                            let is_hole = dist < 0.36;
+                            let val = if is_hole { 0.1 } else { 0.95 };
+                            (val, if is_hole { 0.1 } else { 0.6 })
+                        }
+                        ProceduralGenerator::WireFence => {
+                            let rot_u = (ru + rv) * 0.7071 * self.generator_scale;
+                            let rot_v = (rv - ru) * 0.7071 * self.generator_scale;
+                            let fx = (rot_u - rot_u.floor() - 0.5).abs();
+                            let fy = (rot_v - rot_v.floor() - 0.5).abs();
+                            let wire_thickness = 0.09;
+                            let wire = (wire_thickness - fx).max(wire_thickness - fy);
+                            let is_wire = wire > 0.0;
+                            let val = if is_wire { 0.95 } else { 0.1 };
+                            (val, if is_wire { 0.7 } else { 0.2 })
+                        }
+                        ProceduralGenerator::TornFabricEdge => {
+                            let fbm = NoiseGenerator::fbm_2d(ru * self.generator_scale * 3.0, rv * self.generator_scale * 3.0, 4, 2.0, 0.5);
+                            let fibers = NoiseGenerator::ridged_fbm_2d(ru * self.generator_scale * 12.0, rv * self.generator_scale * 12.0, 3, 2.0, 0.5);
+                            let v_center = (rv - 0.5).abs() * 2.0;
+                            let tear = v_center + (fbm - 0.5) * 0.7 + (fibers - 0.5) * 0.25;
+                            let is_solid = tear >= 0.5;
+                            (if is_solid { 0.9 } else { 0.1 }, if is_solid { 0.5 + fibers * 0.2 } else { 0.1 })
+                        }
+                        ProceduralGenerator::CircularDots => {
+                            let fx = (ru * self.generator_scale - (ru * self.generator_scale).floor()) - 0.5;
+                            let fy = (rv * self.generator_scale - (rv * self.generator_scale).floor()) - 0.5;
+                            let dist = (fx * fx + fy * fy).sqrt();
+                            let is_hole = dist < 0.32;
+                            (if is_hole { 0.1 } else { 0.9 }, if is_hole { 0.1 } else { 0.55 })
+                        }
                     }
                 };
 
@@ -1355,12 +1443,30 @@ impl Layer {
                     metal
                 };
 
+                let final_emissive = if let Some(ref tex) = self.fill_emissive_tex {
+                    let t = tex.get_pixel(tx, ty);
+                    Vec4::new(
+                        t.x * self.fill_emissive.x,
+                        t.y * self.fill_emissive.y,
+                        t.z * self.fill_emissive.z,
+                        t.w * self.fill_emissive.w,
+                    )
+                } else {
+                    self.fill_emissive
+                };
+
+                let final_opacity = if let Some(ref tex) = self.fill_opacity_tex {
+                    tex.get_pixel(tx, ty) * self.fill_opacity
+                } else {
+                    self.fill_opacity
+                };
+
                 self.base_color_buf.set_pixel(x, y, final_col);
                 self.roughness_buf.set_pixel(x, y, final_rough);
                 self.metallic_buf.set_pixel(x, y, final_metal);
                 self.height_buf.set_pixel(x, y, height);
-                self.emissive_buf.set_pixel(x, y, self.fill_emissive);
-                self.opacity_buf.set_pixel(x, y, self.fill_opacity);
+                self.emissive_buf.set_pixel(x, y, final_emissive);
+                self.opacity_buf.set_pixel(x, y, final_opacity);
                 self.clearcoat_buf.set_pixel(x, y, self.fill_clearcoat);
             }
         }
@@ -2021,5 +2127,42 @@ mod tests {
             assert_eq!(buf.height, 16);
             assert!(buf.data.iter().all(|&v| v >= 0.0 && v <= 1.0));
         }
+    }
+
+    #[test]
+    fn test_opacity_channel_procedurals_and_fill() {
+        let opacity_generators = [
+            ProceduralGenerator::PerforatedMesh,
+            ProceduralGenerator::WireFence,
+            ProceduralGenerator::TornFabricEdge,
+            ProceduralGenerator::CircularDots,
+        ];
+
+        for gen in opacity_generators {
+            let buf = Layer::generate_mask_procedural(gen, 10.0, 1.5, false, 0.5, 32, 32, None, None, None, None);
+            assert_eq!(buf.width, 32);
+            assert_eq!(buf.height, 32);
+            assert!(buf.data.iter().all(|&v| (0.0..=1.0).contains(&v)), "Generator {:?} produced out-of-range values", gen);
+        }
+
+        // Test fill layer with opacity channel
+        let mut layer = Layer::new_fill_layer(
+            1,
+            "Opacity Fill".to_string(),
+            32,
+            32,
+            Vec4::ONE,
+            0.2,
+            0.0,
+        );
+        layer.fill_opacity = 0.42;
+        layer.channel_flags.opacity = true;
+        layer.evaluate_fill(None);
+
+        assert!((layer.opacity_buf.get_pixel(16, 16) - 0.42).abs() < 1e-4, "Fill opacity buffer did not reflect fill_opacity");
+
+        let mut comp = CompositeTextureSet::new(32, 32);
+        comp.composite_layers(&[layer]);
+        assert!((comp.opacity.get_pixel(16, 16) - 0.42).abs() < 1e-4, "Composite opacity did not blend layer opacity");
     }
 }

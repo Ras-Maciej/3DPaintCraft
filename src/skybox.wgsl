@@ -14,6 +14,10 @@ struct CameraUniform {
     tonemap_mode: u32,
     specular_mult: f32,
     roughness_bias: f32,
+    alpha_cutoff: f32,
+    transparency_mode: u32,
+    double_sided: u32,
+    pad0: f32,
 };
 @group(0) @binding(0) var<uniform> camera: CameraUniform;
 @group(1) @binding(5) var tex_environment: texture_2d<f32>;
