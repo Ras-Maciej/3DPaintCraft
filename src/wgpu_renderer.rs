@@ -30,7 +30,8 @@ pub enum TransparencyMode {
     Dithered = 0,    // Screen-Door / Bayer 8x8 Dithering (Order Independent Semi-Transparency)
     AlphaCutout = 1, // Substance 3D Painter Alpha Cutout (Alpha Test)
     AlphaBlend = 2,  // Smooth Alpha Blending (Translucent Glass)
-    Opaque = 3,      // Opaque (Ignore Opacity)
+    Refraction = 3,  // Physical Refraction & Translucency (Snell's Law IOR)
+    Opaque = 4,      // Opaque (Ignore Opacity)
 }
 
 impl TransparencyMode {
@@ -39,6 +40,7 @@ impl TransparencyMode {
             Self::Dithered => "Dithered Transparency (Screen-Door)",
             Self::AlphaCutout => "Alpha Cutout (Alpha Test)",
             Self::AlphaBlend => "Alpha Blending (Translucent Glass)",
+            Self::Refraction => "Physical Refraction / Translucency (IOR Glass & Gems)",
             Self::Opaque => "Opaque (Ignore Opacity)",
         }
     }
@@ -59,6 +61,9 @@ pub struct ShaderSettings {
     pub transparency_mode: TransparencyMode,
     pub alpha_cutoff: f32,
     pub double_sided: bool,
+    pub ior: f32,
+    pub refraction_dispersion: f32,
+    pub translucency_depth: f32,
 
     // Anti-Aliasing (Off / FXAA / NVIDIA DLAA)
     pub aa_mode: crate::nvidia_dlaa::AntiAliasingMode,
@@ -181,6 +186,9 @@ impl Default for ShaderSettings {
             transparency_mode: TransparencyMode::Dithered,
             alpha_cutoff: 0.33,
             double_sided: false,
+            ior: 1.52,
+            refraction_dispersion: 0.015,
+            translucency_depth: 1.0,
             aa_mode: crate::nvidia_dlaa::AntiAliasingMode::NvidiaDlaa,
             fxaa_enabled: true,
             denoiser_enabled: true,
@@ -312,7 +320,7 @@ impl WgpuViewport {
 
         let camera_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Camera Buffer"),
-            size: 208,
+            size: 224,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -1452,7 +1460,7 @@ fn blur_equirectangular(
         let view_proj_jittered = self.dlaa_manager.jitter_projection(view_proj, is_dlaa);
 
         let t_enc = std::time::Instant::now();
-        let mut data = [0u8; 208];
+        let mut data = [0u8; 224];
         data[0..64].copy_from_slice(bytemuck::cast_slice(&[view_proj_jittered]));
         data[64..80].copy_from_slice(bytemuck::cast_slice(&[eye_pos]));
         data[80..84].copy_from_slice(bytemuck::cast_slice(&[env_rot]));
@@ -1474,7 +1482,11 @@ fn blur_equirectangular(
         data[196..200].copy_from_slice(bytemuck::cast_slice(&[trans_mode]));
         let dbl_side = if shader.double_sided { 1u32 } else { 0u32 };
         data[200..204].copy_from_slice(bytemuck::cast_slice(&[dbl_side]));
-        data[204..208].copy_from_slice(bytemuck::cast_slice(&[0.0f32]));
+        data[204..208].copy_from_slice(bytemuck::cast_slice(&[shader.ior]));
+        data[208..212].copy_from_slice(bytemuck::cast_slice(&[shader.refraction_dispersion]));
+        data[212..216].copy_from_slice(bytemuck::cast_slice(&[shader.translucency_depth]));
+        data[216..220].copy_from_slice(bytemuck::cast_slice(&[0.0f32]));
+        data[220..224].copy_from_slice(bytemuck::cast_slice(&[0.0f32]));
         self.queue.write_buffer(&self.camera_buffer, 0, &data);
 
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -1710,10 +1722,14 @@ mod tests {
         assert_eq!(settings.transparency_mode, TransparencyMode::Dithered);
         assert!((settings.alpha_cutoff - 0.33).abs() < 1e-4);
         assert!(!settings.double_sided);
+        assert!((settings.ior - 1.52).abs() < 1e-4);
+        assert!((settings.refraction_dispersion - 0.015).abs() < 1e-4);
+        assert!((settings.translucency_depth - 1.0).abs() < 1e-4);
 
         assert_eq!(TransparencyMode::Dithered.name(), "Dithered Transparency (Screen-Door)");
         assert_eq!(TransparencyMode::AlphaCutout.name(), "Alpha Cutout (Alpha Test)");
         assert_eq!(TransparencyMode::AlphaBlend.name(), "Alpha Blending (Translucent Glass)");
+        assert_eq!(TransparencyMode::Refraction.name(), "Physical Refraction / Translucency (IOR Glass & Gems)");
         assert_eq!(TransparencyMode::Opaque.name(), "Opaque (Ignore Opacity)");
     }
 

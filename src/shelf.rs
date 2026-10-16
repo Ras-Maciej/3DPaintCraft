@@ -269,6 +269,33 @@ pub fn get_shelf_assets() -> Vec<ShelfAsset> {
             preview_roughness: 0.36,
             description: "Galvanized zinc steel diamond mesh fence with cut-out openings",
         },
+        ShelfAsset {
+            id: "emerald_crystal_gem",
+            name: "Emerald Crystal Gem",
+            category: ShelfCategory::SmartMaterials,
+            preview_color: [20, 195, 95],
+            preview_metallic: 0.0,
+            preview_roughness: 0.04,
+            description: "Refractive translucent green beryl crystal with physical IOR 1.58 Snell refraction and facet highlights",
+        },
+        ShelfAsset {
+            id: "amber_fossil_resin",
+            name: "Amber Fossil Resin",
+            category: ShelfCategory::SmartMaterials,
+            preview_color: [235, 145, 20],
+            preview_metallic: 0.0,
+            preview_roughness: 0.06,
+            description: "Translucent golden amber resin (IOR 1.54) with Beer-Lambert optical depth and internal inclusions",
+        },
+        ShelfAsset {
+            id: "frosted_ice_glass",
+            name: "Frosted Glacial Ice",
+            category: ShelfCategory::SmartMaterials,
+            preview_color: [180, 230, 245],
+            preview_metallic: 0.0,
+            preview_roughness: 0.38,
+            description: "Sub-zero glacial ice (IOR 1.31) with frosted microscopic microfacet transmission and fracture veins",
+        },
 
         // --- 3. SMART MASKS ---
         ShelfAsset {

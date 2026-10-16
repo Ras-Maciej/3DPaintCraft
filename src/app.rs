@@ -3680,7 +3680,7 @@ impl eframe::App for PaintcraftApp {
                                 });
                         });
 
-                        ui.collapsing("Opacity & Transparency (Substance Pipeline)", |ui| {
+                        ui.collapsing("Translucency, Refraction & Opacity (IOR)", |ui| {
                             ui.horizontal(|ui| {
                                 ui.label("Mode:");
                                 egui::ComboBox::from_id_source("transparency_mode_combo")
@@ -3703,6 +3703,11 @@ impl eframe::App for PaintcraftApp {
                                         );
                                         ui.selectable_value(
                                             &mut self.shader_settings.transparency_mode,
+                                            crate::wgpu_renderer::TransparencyMode::Refraction,
+                                            crate::wgpu_renderer::TransparencyMode::Refraction.name(),
+                                        );
+                                        ui.selectable_value(
+                                            &mut self.shader_settings.transparency_mode,
                                             crate::wgpu_renderer::TransparencyMode::Opaque,
                                             crate::wgpu_renderer::TransparencyMode::Opaque.name(),
                                         );
@@ -3716,21 +3721,56 @@ impl eframe::App for PaintcraftApp {
                                 });
                             }
 
+                            ui.separator();
+                            ui.label(egui::RichText::new("Physical Refraction & Optics (IOR):").strong());
+
+                            ui.horizontal(|ui| {
+                                ui.label("Index of Refraction:");
+                                ui.add(egui::Slider::new(&mut self.shader_settings.ior, 1.00..=3.00).step_by(0.01));
+                            });
+
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label("Presets:");
+                                if ui.small_button("Air 1.00").clicked() { self.shader_settings.ior = 1.00; }
+                                if ui.small_button("Water 1.33").clicked() { self.shader_settings.ior = 1.333; }
+                                if ui.small_button("Acrylic 1.49").clicked() { self.shader_settings.ior = 1.49; }
+                                if ui.small_button("Glass 1.52").clicked() { self.shader_settings.ior = 1.52; }
+                                if ui.small_button("Flint 1.62").clicked() { self.shader_settings.ior = 1.62; }
+                                if ui.small_button("Sapphire 1.77").clicked() { self.shader_settings.ior = 1.77; }
+                                if ui.small_button("Diamond 2.42").clicked() { self.shader_settings.ior = 2.417; }
+                            });
+
+                            ui.horizontal(|ui| {
+                                ui.label("Chromatic Dispersion:");
+                                ui.add(egui::Slider::new(&mut self.shader_settings.refraction_dispersion, 0.0..=0.08).step_by(0.005))
+                                    .on_hover_text("Wavelength-dependent ray splitting (Cauchy dispersion) creating rainbow prismatic color fringing.");
+                            });
+
+                            ui.horizontal(|ui| {
+                                ui.label("Absorption Depth (Beer-Lambert):");
+                                ui.add(egui::Slider::new(&mut self.shader_settings.translucency_depth, 0.0..=5.0).step_by(0.1))
+                                    .on_hover_text("Controls physical Beer-Lambert light attenuation through colored translucent media.");
+                            });
+
+                            ui.separator();
                             ui.checkbox(&mut self.shader_settings.double_sided, "Double-Sided Rendering (Two-Sided Shading)")
                                 .on_hover_text("Renders both front and back faces with flipped normals on backfaces. Essential for wire mesh, cloth tears, and transparent glass visors.");
 
                             match self.shader_settings.transparency_mode {
+                                crate::wgpu_renderer::TransparencyMode::Refraction => {
+                                    ui.label(egui::RichText::new("Physical Refraction & Translucency. Bends background and environment light through geometry using Snell's Law with physical IOR, chromatic dispersion, and Beer-Lambert absorption.").small().color(Color32::from_rgb(160, 165, 175)));
+                                }
                                 crate::wgpu_renderer::TransparencyMode::Dithered => {
-                                    ui.label(egui::RichText::new("Bayer 8x8 screen-door dithering provides order-independent gradual semi-transparency with proper depth testing and no sorting artifacts. Smooths automatically under NVIDIA DLAA and Denoiser.").small().color(Color32::from_rgb(160, 165, 175)));
+                                    ui.label(egui::RichText::new("Bayer 8x8 screen-door dithering provides order-independent gradual semi-transparency with physical IOR and proper depth testing.").small().color(Color32::from_rgb(160, 165, 175)));
                                 }
                                 crate::wgpu_renderer::TransparencyMode::AlphaCutout => {
                                     ui.label(egui::RichText::new("Substance 3D Painter alpha cutout discarding. Fragments with opacity below the cutoff threshold are discarded.").small().color(Color32::from_rgb(160, 165, 175)));
                                 }
                                 crate::wgpu_renderer::TransparencyMode::AlphaBlend => {
-                                    ui.label(egui::RichText::new("Translucent glass alpha blending against the viewport skybox and backdrop.").small().color(Color32::from_rgb(160, 165, 175)));
+                                    ui.label(egui::RichText::new("Translucent glass alpha blending against the viewport skybox and backdrop with physical IOR refraction.").small().color(Color32::from_rgb(160, 165, 175)));
                                 }
                                 crate::wgpu_renderer::TransparencyMode::Opaque => {
-                                    ui.label(egui::RichText::new("Transparency disabled in viewport. The surface is rendered fully opaque while preserving painted opacity channel maps for export.").small().color(Color32::from_rgb(160, 165, 175)));
+                                    ui.label(egui::RichText::new("Transparency disabled in viewport. The surface is rendered fully opaque with IOR-derived physical dielectric F0.").small().color(Color32::from_rgb(160, 165, 175)));
                                 }
                             }
                         });
@@ -5832,6 +5872,29 @@ impl PaintcraftApp {
                     self.project.layers.push(layer);
                 }
                 self.project.active_layer_idx = self.project.layers.len().saturating_sub(1);
+
+                // Auto-configure physical optical shader settings for refractive and cutout materials
+                if asset.id == "emerald_crystal_gem" {
+                    self.shader_settings.transparency_mode = crate::wgpu_renderer::TransparencyMode::Refraction;
+                    self.shader_settings.ior = 1.58;
+                    self.shader_settings.double_sided = true;
+                } else if asset.id == "amber_fossil_resin" {
+                    self.shader_settings.transparency_mode = crate::wgpu_renderer::TransparencyMode::Refraction;
+                    self.shader_settings.ior = 1.54;
+                    self.shader_settings.double_sided = true;
+                } else if asset.id == "frosted_ice_glass" {
+                    self.shader_settings.transparency_mode = crate::wgpu_renderer::TransparencyMode::Refraction;
+                    self.shader_settings.ior = 1.31;
+                    self.shader_settings.double_sided = true;
+                } else if asset.id == "tinted_glass_visor" {
+                    self.shader_settings.transparency_mode = crate::wgpu_renderer::TransparencyMode::Refraction;
+                    self.shader_settings.ior = 1.52;
+                    self.shader_settings.double_sided = true;
+                } else if asset.id == "perforated_steel_grate" || asset.id == "wire_chainlink_fence" || asset.id == "torn_camo_fabric" {
+                    self.shader_settings.transparency_mode = crate::wgpu_renderer::TransparencyMode::AlphaCutout;
+                    self.shader_settings.double_sided = true;
+                }
+
                 self.status_message = format!("Applied Smart Material: {}", asset.name);
             }
             crate::shelf::ShelfCategory::SmartMasks => {

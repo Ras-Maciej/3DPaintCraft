@@ -17,7 +17,11 @@ struct CameraUniform {
     alpha_cutoff: f32,
     transparency_mode: u32,
     double_sided: u32,
+    ior: f32,
+    refraction_dispersion: f32,
+    translucency_depth: f32,
     pad0: f32,
+    pad1: f32,
 };
 @group(0) @binding(0) var<uniform> camera: CameraUniform;
 @group(1) @binding(5) var tex_environment: texture_2d<f32>;

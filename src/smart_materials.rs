@@ -116,6 +116,24 @@ impl SmartMaterialLibrary {
                 category: "Metal",
                 description: "Galvanized steel diamond wire mesh with cut-out fence openings and junction oxidation",
             },
+            SmartMaterialPreset {
+                id: "emerald_crystal_gem",
+                name: "Emerald Crystal Gem",
+                category: "Gemstone",
+                description: "Deep green translucent beryl crystal with physical IOR 1.58 refraction brilliance, clear internal light transmission, and facet edge highlights",
+            },
+            SmartMaterialPreset {
+                id: "amber_fossil_resin",
+                name: "Amber Fossil Resin",
+                category: "Glass",
+                description: "Translucent golden-amber fossil resin (IOR 1.54) with warm honey Beer-Lambert optical depth and microscopic internal clouding",
+            },
+            SmartMaterialPreset {
+                id: "frosted_ice_glass",
+                name: "Frosted Glacial Ice",
+                category: "Glass",
+                description: "Sub-zero glacial ice (IOR 1.31) with frosted microscopic microfacet transmission, cyan tint, and sub-surface fractures",
+            },
         ]
     }
 
@@ -1298,6 +1316,225 @@ impl SmartMaterialLibrary {
                 layers.push(wire);
             }
 
+            "emerald_crystal_gem" => {
+                // Layer 1: Refractive Emerald Crystal Core (IOR 1.58 Transmission)
+                let mut gem = Layer::new_fill_layer(
+                    1,
+                    "Emerald Crystal Body".to_string(),
+                    width,
+                    height,
+                    Vec4::new(0.04, 0.72, 0.32, 1.0),
+                    0.04,
+                    0.0,
+                );
+                gem.fill_opacity = 0.15;
+                gem.channel_flags.opacity = true;
+                gem.evaluate_fill_advanced(curvature_map, position_map, world_normal_map, ao_map);
+                layers.push(gem);
+
+                // Layer 2: Facet Edge Reflection & Sheen
+                let mut edge = Layer::new_fill_layer(
+                    2,
+                    "Facet Edge Highlights".to_string(),
+                    width,
+                    height,
+                    Vec4::new(0.35, 0.95, 0.55, 1.0),
+                    0.02,
+                    0.0,
+                );
+                edge.fill_opacity = 0.25;
+                edge.channel_flags.opacity = true;
+                edge.has_mask = true;
+                edge.add_curvature_mask(curvature_map);
+                edge.evaluate_fill_advanced(curvature_map, position_map, world_normal_map, ao_map);
+                layers.push(edge);
+
+                // Layer 3: Surface Contact Micro-Scuffs
+                let mut scuffs = Layer::new_fill_layer(
+                    3,
+                    "Surface Micro-Scuffs".to_string(),
+                    width,
+                    height,
+                    Vec4::new(0.6, 0.9, 0.7, 1.0),
+                    0.38,
+                    0.0,
+                );
+                scuffs.channel_flags.base_color = false;
+                scuffs.channel_flags.roughness = true;
+                scuffs.has_mask = true;
+                scuffs.mask_effects.push(MaskEffect {
+                    id: 1,
+                    name: "Fine Scratches".to_string(),
+                    effect_type: MaskEffectType::Fill {
+                        generator: ProceduralGenerator::Scratches,
+                        scale: 24.0,
+                        contrast: 2.2,
+                        invert: false,
+                        balance: 0.45,
+                    },
+                    visible: true,
+                    opacity: 0.40,
+                    blend_mode: BlendMode::Normal,
+                });
+                scuffs.evaluate_mask_advanced(curvature_map, ao_map, position_map, world_normal_map);
+                scuffs.evaluate_fill_advanced(curvature_map, position_map, world_normal_map, ao_map);
+                layers.push(scuffs);
+            }
+
+            "amber_fossil_resin" => {
+                // Layer 1: Translucent Golden Amber Base (IOR 1.54)
+                let mut amber = Layer::new_fill_layer(
+                    1,
+                    "Golden Amber Resin".to_string(),
+                    width,
+                    height,
+                    Vec4::new(0.92, 0.55, 0.06, 1.0),
+                    0.06,
+                    0.0,
+                );
+                amber.fill_opacity = 0.22;
+                amber.channel_flags.opacity = true;
+                amber.evaluate_fill_advanced(curvature_map, position_map, world_normal_map, ao_map);
+                layers.push(amber);
+
+                // Layer 2: Internal Clouded Inclusions
+                let mut cloud = Layer::new_fill_layer(
+                    2,
+                    "Internal Clouding".to_string(),
+                    width,
+                    height,
+                    Vec4::new(0.72, 0.38, 0.04, 1.0),
+                    0.26,
+                    0.0,
+                );
+                cloud.fill_opacity = 0.52;
+                cloud.channel_flags.opacity = true;
+                cloud.has_mask = true;
+                cloud.mask_effects.push(MaskEffect {
+                    id: 1,
+                    name: "Cellular Inclusions".to_string(),
+                    effect_type: MaskEffectType::Fill {
+                        generator: ProceduralGenerator::WorleyGrunge,
+                        scale: 10.0,
+                        contrast: 1.6,
+                        invert: false,
+                        balance: 0.52,
+                    },
+                    visible: true,
+                    opacity: 0.65,
+                    blend_mode: BlendMode::Normal,
+                });
+                cloud.evaluate_mask_advanced(curvature_map, ao_map, position_map, world_normal_map);
+                cloud.evaluate_fill_advanced(curvature_map, position_map, world_normal_map, ao_map);
+                layers.push(cloud);
+
+                // Layer 3: Crevice Sediment (Cavity Grime)
+                let mut grime = Layer::new_fill_layer(
+                    3,
+                    "Cavity Dirt".to_string(),
+                    width,
+                    height,
+                    Vec4::new(0.25, 0.18, 0.12, 1.0),
+                    0.88,
+                    0.0,
+                );
+                grime.has_mask = true;
+                grime.mask_effects.push(MaskEffect {
+                    id: 1,
+                    name: "Cavity Dirt (AO)".to_string(),
+                    effect_type: MaskEffectType::Fill {
+                        generator: ProceduralGenerator::AmbientOcclusion,
+                        scale: 8.0,
+                        contrast: 1.4,
+                        invert: false,
+                        balance: 0.54,
+                    },
+                    visible: true,
+                    opacity: 0.70,
+                    blend_mode: BlendMode::Normal,
+                });
+                grime.evaluate_mask_advanced(curvature_map, ao_map, position_map, world_normal_map);
+                grime.evaluate_fill_advanced(curvature_map, position_map, world_normal_map, ao_map);
+                layers.push(grime);
+            }
+
+            "frosted_ice_glass" => {
+                // Layer 1: Frosted Glacial Ice Substrate (IOR 1.31)
+                let mut ice = Layer::new_fill_layer(
+                    1,
+                    "Glacial Ice Core".to_string(),
+                    width,
+                    height,
+                    Vec4::new(0.72, 0.90, 0.96, 1.0),
+                    0.38,
+                    0.0,
+                );
+                ice.fill_opacity = 0.28;
+                ice.channel_flags.opacity = true;
+                ice.evaluate_fill_advanced(curvature_map, position_map, world_normal_map, ao_map);
+                layers.push(ice);
+
+                // Layer 2: Sub-surface Ice Fractures & Veins
+                let mut fractures = Layer::new_fill_layer(
+                    2,
+                    "Internal Fractures".to_string(),
+                    width,
+                    height,
+                    Vec4::new(0.92, 0.98, 1.0, 1.0),
+                    0.12,
+                    0.0,
+                );
+                fractures.fill_opacity = 0.60;
+                fractures.channel_flags.opacity = true;
+                fractures.has_mask = true;
+                fractures.mask_effects.push(MaskEffect {
+                    id: 1,
+                    name: "Fracture Lines".to_string(),
+                    effect_type: MaskEffectType::Fill {
+                        generator: ProceduralGenerator::RidgedMultifractal,
+                        scale: 12.0,
+                        contrast: 2.4,
+                        invert: false,
+                        balance: 0.48,
+                    },
+                    visible: true,
+                    opacity: 0.75,
+                    blend_mode: BlendMode::Normal,
+                });
+                fractures.evaluate_mask_advanced(curvature_map, ao_map, position_map, world_normal_map);
+                fractures.evaluate_fill_advanced(curvature_map, position_map, world_normal_map, ao_map);
+                layers.push(fractures);
+
+                // Layer 3: Surface Frost Crystals
+                let mut frost = Layer::new_fill_layer(
+                    3,
+                    "Surface Frost Spores".to_string(),
+                    width,
+                    height,
+                    Vec4::new(1.0, 1.0, 1.0, 1.0),
+                    0.92,
+                    0.0,
+                );
+                frost.has_mask = true;
+                frost.mask_effects.push(MaskEffect {
+                    id: 1,
+                    name: "Frost Crystals".to_string(),
+                    effect_type: MaskEffectType::Fill {
+                        generator: ProceduralGenerator::SplatterDirt,
+                        scale: 18.0,
+                        contrast: 1.8,
+                        invert: false,
+                        balance: 0.45,
+                    },
+                    visible: true,
+                    opacity: 0.45,
+                    blend_mode: BlendMode::Normal,
+                });
+                frost.evaluate_mask_advanced(curvature_map, ao_map, position_map, world_normal_map);
+                frost.evaluate_fill_advanced(curvature_map, position_map, world_normal_map, ao_map);
+                layers.push(frost);
+            }
+
             _ => {
                 let default_layer = Layer::new_fill_layer(
                     1,
@@ -1812,6 +2049,9 @@ mod tests {
             "perforated_steel_grate",
             "torn_camo_fabric",
             "wire_chainlink_fence",
+            "emerald_crystal_gem",
+            "amber_fossil_resin",
+            "frosted_ice_glass",
         ];
 
         for mat_id in opacity_materials {

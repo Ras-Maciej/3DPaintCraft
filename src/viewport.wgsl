@@ -34,7 +34,11 @@ struct CameraUniform {
     alpha_cutoff: f32,
     transparency_mode: u32,
     double_sided: u32,
+    ior: f32,
+    refraction_dispersion: f32,
+    translucency_depth: f32,
     pad0: f32,
+    pad1: f32,
 };
 @group(0) @binding(0) var<uniform> camera: CameraUniform;
 
@@ -227,8 +231,10 @@ fn fs_main(@builtin(front_facing) is_front: bool, in: VertexOutput) -> FragmentO
     let v = normalize(camera.eye_pos.xyz - in.world_pos);
     let n_dot_v = max(dot(world_normal, v), 1e-4);
 
-    // Substance 3D Painter Standard Metallic/Roughness PBR
-    let dielectric_f0 = vec3<f32>(0.04) * specular_weight;
+    // Substance 3D Painter Standard Metallic/Roughness PBR with Physical Index of Refraction (IOR)
+    let ior = max(camera.ior, 1.0);
+    let ior_f0 = pow((ior - 1.0) / (ior + 1.0), 2.0);
+    let dielectric_f0 = vec3<f32>(ior_f0) * specular_weight;
     let f0 = mix(dielectric_f0, base_color, metallic);
     
     // Dielectrics retain 100% of their base color in diffuse; conductors have 0% diffuse.
@@ -299,7 +305,44 @@ fn fs_main(@builtin(front_facing) is_front: bool, in: VertexOutput) -> FragmentO
     let dir_specular = specular_brdf * sun_color * n_dot_l * camera.sun_intensity * matte_factor;
     let dir_diffuse = diffuse_color * (sun_color * n_dot_l / PI) * camera.sun_intensity;
 
-    let lit_color = ibl_diffuse + ibl_specular + dir_specular + dir_diffuse + emissive_radiance;
+    // Translucency & Physical Refraction (Snell's Law with Chromatic Dispersion & Beer-Lambert Absorption)
+    var transmitted_color = vec3<f32>(0.0);
+    let transmission = (1.0 - opacity) * (1.0 - metallic);
+    if transmission > 0.001 && camera.transparency_mode != 4u {
+        let disp = max(camera.refraction_dispersion, 0.0);
+        let eta = 1.0 / max(ior, 1.001);
+        let eta_r = 1.0 / max(ior - disp, 1.001);
+        let eta_g = eta;
+        let eta_b = 1.0 / (ior + disp);
+
+        let refr_r = refract(-v, world_normal, eta_r);
+        let refr_g = refract(-v, world_normal, eta_g);
+        let refr_b = refract(-v, world_normal, eta_b);
+
+        // Fallback to reflection if total internal reflection (TIR) occurs
+        let dir_r = select(reflection_dir, normalize(refr_r), length(refr_r) > 0.01);
+        let dir_g = select(reflection_dir, normalize(refr_g), length(refr_g) > 0.01);
+        let dir_b = select(reflection_dir, normalize(refr_b), length(refr_b) > 0.01);
+
+        let uv_r = dir_to_equirectangular(rot_mat * dir_r);
+        let uv_g = dir_to_equirectangular(rot_mat * dir_g);
+        let uv_b = dir_to_equirectangular(rot_mat * dir_b);
+
+        let refr_mip = clamp(roughness * 9.0, 0.0, 9.0);
+        let t_r = textureSampleLevel(tex_environment, samp_linear, uv_r, refr_mip).r;
+        let t_g = textureSampleLevel(tex_environment, samp_linear, uv_g, refr_mip).g;
+        let t_b = textureSampleLevel(tex_environment, samp_linear, uv_b, refr_mip).b;
+        let transmitted_env = vec3<f32>(t_r, t_g, t_b) * camera.env_intensity;
+
+        // Beer-Lambert physical absorption law: colored medium absorbs transmitted wavelengths
+        let absorption = exp(- max(vec3<f32>(1.0) - base_color, vec3<f32>(0.0)) * camera.translucency_depth * 2.5);
+        transmitted_color = transmitted_env * absorption;
+    }
+
+    // For dielectrics, refracted transmission replaces diffuse scattering as transmission increases
+    let total_diffuse = ibl_diffuse + dir_diffuse;
+    let final_diffuse = mix(total_diffuse, transmitted_color, transmission);
+    let lit_color = ibl_specular + dir_specular + final_diffuse + emissive_radiance;
     
     // Tone mapping modes
     var final_color = lit_color;
