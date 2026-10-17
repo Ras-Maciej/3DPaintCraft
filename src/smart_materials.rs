@@ -168,13 +168,15 @@ impl SmartMaterialLibrary {
                     "Steel Base".to_string(),
                     width,
                     height,
-                    Vec4::new(0.25, 0.26, 0.28, 1.0),
-                    0.35,
+                    Vec4::new(0.56, 0.57, 0.58, 1.0),
+                    0.32,
                     1.0,
                 );
-                steel.fill_generator = ProceduralGenerator::PerlinNoise;
-                steel.generator_scale = 24.0;
-                steel.evaluate_fill(curvature_map);
+                steel.fill_height = 0.46;
+                steel.fill_generator = ProceduralGenerator::Scratches;
+                steel.generator_scale = 28.0;
+                steel.generator_contrast = 0.8;
+                steel.evaluate_fill_advanced(curvature_map, position_map, world_normal_map, ao_map);
                 layers.push(steel);
 
                 // Layer 2: Red Oxide Primer Coat with Curvature Wear
@@ -183,18 +185,19 @@ impl SmartMaterialLibrary {
                     "Red Oxide Primer".to_string(),
                     width,
                     height,
-                    Vec4::new(0.40, 0.16, 0.12, 1.0),
-                    0.80,
+                    Vec4::new(0.38, 0.14, 0.10, 1.0),
+                    0.82,
                     0.0,
                 );
+                primer.fill_height = 0.50;
                 primer.has_mask = true;
                 primer.mask_effects.push(MaskEffect {
                     id: 1,
                     name: "Primer Edge Wear".to_string(),
                     effect_type: MaskEffectType::Fill {
                         generator: ProceduralGenerator::CurvatureWear,
-                        scale: 12.0,
-                        contrast: 1.4,
+                        scale: 10.0,
+                        contrast: 1.6,
                         invert: true,
                         balance: 0.58,
                     },
@@ -207,8 +210,8 @@ impl SmartMaterialLibrary {
                     name: "Grunge Breakup".to_string(),
                     effect_type: MaskEffectType::Fill {
                         generator: ProceduralGenerator::WorleyGrunge,
-                        scale: 16.0,
-                        contrast: 1.2,
+                        scale: 14.0,
+                        contrast: 1.3,
                         invert: false,
                         balance: 0.5,
                     },
@@ -217,7 +220,7 @@ impl SmartMaterialLibrary {
                     blend_mode: BlendMode::Multiply,
                 });
                 primer.evaluate_mask_advanced(curvature_map, ao_map, position_map, world_normal_map);
-                primer.evaluate_fill(curvature_map);
+                primer.evaluate_fill_advanced(curvature_map, position_map, world_normal_map, ao_map);
                 layers.push(primer);
 
                 // Layer 3: Machinery Yellow Paint with Chipped Edge Wear Mask
@@ -226,10 +229,14 @@ impl SmartMaterialLibrary {
                     "Machinery Yellow Paint".to_string(),
                     width,
                     height,
-                    Vec4::new(0.95, 0.68, 0.08, 1.0),
-                    0.42,
+                    Vec4::new(0.92, 0.65, 0.08, 1.0),
+                    0.36,
                     0.0,
                 );
+                paint.fill_height = 0.55;
+                paint.fill_generator = ProceduralGenerator::PerlinNoise;
+                paint.generator_scale = 40.0;
+                paint.generator_contrast = 0.25;
                 paint.has_mask = true;
                 paint.mask_effects.push(MaskEffect {
                     id: 1,
@@ -237,9 +244,9 @@ impl SmartMaterialLibrary {
                     effect_type: MaskEffectType::Fill {
                         generator: ProceduralGenerator::CurvatureWear,
                         scale: 10.0,
-                        contrast: 1.6,
+                        contrast: 1.8,
                         invert: true,
-                        balance: 0.42,
+                        balance: 0.44,
                     },
                     visible: true,
                     opacity: 1.0,
@@ -247,20 +254,34 @@ impl SmartMaterialLibrary {
                 });
                 paint.mask_effects.push(MaskEffect {
                     id: 2,
-                    name: "Chipping Grunge".to_string(),
+                    name: "Peeling Breakup".to_string(),
                     effect_type: MaskEffectType::Fill {
-                        generator: ProceduralGenerator::WorleyGrunge,
-                        scale: 14.0,
-                        contrast: 1.3,
+                        generator: ProceduralGenerator::PeelingPaint,
+                        scale: 12.0,
+                        contrast: 1.4,
                         invert: false,
-                        balance: 0.5,
+                        balance: 0.50,
                     },
                     visible: true,
-                    opacity: 0.90,
+                    opacity: 0.85,
                     blend_mode: BlendMode::Multiply,
                 });
+                paint.mask_effects.push(MaskEffect {
+                    id: 3,
+                    name: "Fine Scratches".to_string(),
+                    effect_type: MaskEffectType::Fill {
+                        generator: ProceduralGenerator::Scratches,
+                        scale: 24.0,
+                        contrast: 1.4,
+                        invert: false,
+                        balance: 0.50,
+                    },
+                    visible: true,
+                    opacity: 0.35,
+                    blend_mode: BlendMode::Subtract,
+                });
                 paint.evaluate_mask_advanced(curvature_map, ao_map, position_map, world_normal_map);
-                paint.evaluate_fill(curvature_map);
+                paint.evaluate_fill_advanced(curvature_map, position_map, world_normal_map, ao_map);
                 layers.push(paint);
 
                 // Layer 4: Cavity Grease & Dirt
@@ -269,12 +290,13 @@ impl SmartMaterialLibrary {
                     "Crevice Grease & Dirt".to_string(),
                     width,
                     height,
-                    Vec4::new(0.10, 0.09, 0.08, 1.0),
-                    0.95,
+                    Vec4::new(0.08, 0.07, 0.06, 1.0),
+                    0.88,
                     0.0,
                 );
+                dirt.fill_height = 0.52;
                 dirt.blend_mode = BlendMode::Multiply;
-                dirt.opacity = 0.80;
+                dirt.opacity = 0.85;
                 dirt.has_mask = true;
                 dirt.mask_effects.push(MaskEffect {
                     id: 1,
@@ -282,9 +304,9 @@ impl SmartMaterialLibrary {
                     effect_type: MaskEffectType::Fill {
                         generator: ProceduralGenerator::AmbientOcclusion,
                         scale: 8.0,
-                        contrast: 1.5,
+                        contrast: 1.6,
                         invert: false,
-                        balance: 0.5,
+                        balance: 0.52,
                     },
                     visible: true,
                     opacity: 1.0,
@@ -295,7 +317,7 @@ impl SmartMaterialLibrary {
                     name: "Dirt Grunge".to_string(),
                     effect_type: MaskEffectType::Fill {
                         generator: ProceduralGenerator::WorleyGrunge,
-                        scale: 20.0,
+                        scale: 18.0,
                         contrast: 1.2,
                         invert: false,
                         balance: 0.5,
@@ -304,8 +326,22 @@ impl SmartMaterialLibrary {
                     opacity: 0.75,
                     blend_mode: BlendMode::Multiply,
                 });
+                dirt.mask_effects.push(MaskEffect {
+                    id: 3,
+                    name: "Dirt Splatter".to_string(),
+                    effect_type: MaskEffectType::Fill {
+                        generator: ProceduralGenerator::SplatterDirt,
+                        scale: 24.0,
+                        contrast: 1.5,
+                        invert: false,
+                        balance: 0.50,
+                    },
+                    visible: true,
+                    opacity: 0.30,
+                    blend_mode: BlendMode::Add,
+                });
                 dirt.evaluate_mask_advanced(curvature_map, ao_map, position_map, world_normal_map);
-                dirt.evaluate_fill(curvature_map);
+                dirt.evaluate_fill_advanced(curvature_map, position_map, world_normal_map, ao_map);
                 layers.push(dirt);
             }
 
@@ -316,13 +352,15 @@ impl SmartMaterialLibrary {
                     "Cast Iron Base".to_string(),
                     width,
                     height,
-                    Vec4::new(0.18, 0.19, 0.20, 1.0),
-                    0.55,
-                    0.85,
+                    Vec4::new(0.32, 0.33, 0.35, 1.0),
+                    0.52,
+                    1.0,
                 );
+                iron.fill_height = 0.50;
                 iron.fill_generator = ProceduralGenerator::WorleyGrunge;
-                iron.generator_scale = 28.0;
-                iron.evaluate_fill(curvature_map);
+                iron.generator_scale = 24.0;
+                iron.generator_contrast = 0.5;
+                iron.evaluate_fill_advanced(curvature_map, position_map, world_normal_map, ao_map);
                 layers.push(iron);
 
                 // Layer 2: Deep Cavity Rust Layer
@@ -331,10 +369,13 @@ impl SmartMaterialLibrary {
                     "Deep Cavity Rust".to_string(),
                     width,
                     height,
-                    Vec4::new(0.42, 0.18, 0.08, 1.0),
-                    0.92,
+                    Vec4::new(0.20, 0.08, 0.04, 1.0),
+                    0.95,
                     0.0,
                 );
+                rust.fill_height = 0.42;
+                rust.fill_generator = ProceduralGenerator::RustPits;
+                rust.generator_scale = 16.0;
                 rust.has_mask = true;
                 rust.mask_effects.push(MaskEffect {
                     id: 1,
@@ -342,9 +383,9 @@ impl SmartMaterialLibrary {
                     effect_type: MaskEffectType::Fill {
                         generator: ProceduralGenerator::AmbientOcclusion,
                         scale: 10.0,
-                        contrast: 1.4,
+                        contrast: 1.5,
                         invert: false,
-                        balance: 0.55,
+                        balance: 0.54,
                     },
                     visible: true,
                     opacity: 1.0,
@@ -352,88 +393,183 @@ impl SmartMaterialLibrary {
                 });
                 rust.mask_effects.push(MaskEffect {
                     id: 2,
-                    name: "Pitting Grunge".to_string(),
+                    name: "Oxidation Craters".to_string(),
                     effect_type: MaskEffectType::Fill {
-                        generator: ProceduralGenerator::WorleyGrunge,
+                        generator: ProceduralGenerator::RustPits,
                         scale: 14.0,
-                        contrast: 1.3,
+                        contrast: 1.4,
                         invert: false,
-                        balance: 0.5,
+                        balance: 0.52,
                     },
                     visible: true,
-                    opacity: 0.85,
-                    blend_mode: BlendMode::Multiply,
+                    opacity: 0.70,
+                    blend_mode: BlendMode::Add,
                 });
                 rust.evaluate_mask_advanced(curvature_map, ao_map, position_map, world_normal_map);
-                rust.evaluate_fill(curvature_map);
+                rust.evaluate_fill_advanced(curvature_map, position_map, world_normal_map, ao_map);
                 layers.push(rust);
 
-                // Layer 3: Surface Rust Leaks & Runoffs
+                // Layer 3: Surface Rust Leaks & Bloom
                 let mut surface_rust = Layer::new_fill_layer(
                     3,
                     "Surface Rust Leaks".to_string(),
                     width,
                     height,
-                    Vec4::new(0.68, 0.28, 0.12, 1.0),
+                    Vec4::new(0.56, 0.22, 0.07, 1.0),
                     0.88,
                     0.0,
                 );
+                surface_rust.fill_height = 0.53;
                 surface_rust.has_mask = true;
                 surface_rust.mask_effects.push(MaskEffect {
                     id: 1,
                     name: "Downward Leaks".to_string(),
                     effect_type: MaskEffectType::Fill {
                         generator: ProceduralGenerator::DrippingLeaks,
-                        scale: 14.0,
-                        contrast: 1.3,
+                        scale: 12.0,
+                        contrast: 1.5,
                         invert: false,
-                        balance: 0.5,
+                        balance: 0.48,
                     },
                     visible: true,
                     opacity: 0.90,
                     blend_mode: BlendMode::Normal,
                 });
+                surface_rust.mask_effects.push(MaskEffect {
+                    id: 2,
+                    name: "Oxide Bloom".to_string(),
+                    effect_type: MaskEffectType::Fill {
+                        generator: ProceduralGenerator::DomainWarpGrunge,
+                        scale: 16.0,
+                        contrast: 1.3,
+                        invert: false,
+                        balance: 0.50,
+                    },
+                    visible: true,
+                    opacity: 0.75,
+                    blend_mode: BlendMode::Multiply,
+                });
                 surface_rust.evaluate_mask_advanced(curvature_map, ao_map, position_map, world_normal_map);
-                surface_rust.evaluate_fill(curvature_map);
+                surface_rust.evaluate_fill_advanced(curvature_map, position_map, world_normal_map, ao_map);
                 layers.push(surface_rust);
+
+                // Layer 4: Polished Contact Edge Sheen
+                let mut polish = Layer::new_fill_layer(
+                    4,
+                    "Polished Edge Sheen".to_string(),
+                    width,
+                    height,
+                    Vec4::new(0.65, 0.66, 0.68, 1.0),
+                    0.22,
+                    1.0,
+                );
+                polish.fill_height = 0.51;
+                polish.has_mask = true;
+                polish.mask_effects.push(MaskEffect {
+                    id: 1,
+                    name: "Friction Highlight".to_string(),
+                    effect_type: MaskEffectType::Fill {
+                        generator: ProceduralGenerator::MetalEdgeHighlight,
+                        scale: 14.0,
+                        contrast: 2.0,
+                        invert: false,
+                        balance: 0.52,
+                    },
+                    visible: true,
+                    opacity: 1.0,
+                    blend_mode: BlendMode::Normal,
+                });
+                polish.evaluate_mask_advanced(curvature_map, ao_map, position_map, world_normal_map);
+                polish.evaluate_fill_advanced(curvature_map, position_map, world_normal_map, ao_map);
+                layers.push(polish);
             }
 
             "smart_rusted_green" => {
-                // Layer 1: Rust Undercoat
-                let mut rust = Layer::new_fill_layer(
+                // Layer 1: Steel Undercoat
+                let mut steel = Layer::new_fill_layer(
                     1,
-                    "Pitted Rust Base".to_string(),
+                    "Steel Undercoat".to_string(),
                     width,
                     height,
-                    Vec4::new(0.38, 0.18, 0.10, 1.0),
-                    0.92,
-                    0.1,
+                    Vec4::new(0.54, 0.55, 0.56, 1.0),
+                    0.38,
+                    1.0,
                 );
-                rust.fill_generator = ProceduralGenerator::WorleyGrunge;
-                rust.generator_scale = 16.0;
-                rust.evaluate_fill(curvature_map);
+                steel.fill_height = 0.46;
+                steel.fill_generator = ProceduralGenerator::Scratches;
+                steel.generator_scale = 24.0;
+                steel.evaluate_fill_advanced(curvature_map, position_map, world_normal_map, ao_map);
+                layers.push(steel);
+
+                // Layer 2: Pitted Rust Substrate
+                let mut rust = Layer::new_fill_layer(
+                    2,
+                    "Pitted Rust Substrate".to_string(),
+                    width,
+                    height,
+                    Vec4::new(0.35, 0.16, 0.08, 1.0),
+                    0.92,
+                    0.0,
+                );
+                rust.fill_height = 0.49;
+                rust.fill_generator = ProceduralGenerator::RustPits;
+                rust.generator_scale = 18.0;
+                rust.has_mask = true;
+                rust.mask_effects.push(MaskEffect {
+                    id: 1,
+                    name: "Rust Spread".to_string(),
+                    effect_type: MaskEffectType::Fill {
+                        generator: ProceduralGenerator::CurvatureWear,
+                        scale: 10.0,
+                        contrast: 1.4,
+                        invert: false,
+                        balance: 0.52,
+                    },
+                    visible: true,
+                    opacity: 1.0,
+                    blend_mode: BlendMode::Normal,
+                });
+                rust.mask_effects.push(MaskEffect {
+                    id: 2,
+                    name: "Corrosion Grunge".to_string(),
+                    effect_type: MaskEffectType::Fill {
+                        generator: ProceduralGenerator::DomainWarpGrunge,
+                        scale: 14.0,
+                        contrast: 1.2,
+                        invert: false,
+                        balance: 0.5,
+                    },
+                    visible: true,
+                    opacity: 0.60,
+                    blend_mode: BlendMode::Screen,
+                });
+                rust.evaluate_mask_advanced(curvature_map, ao_map, position_map, world_normal_map);
+                rust.evaluate_fill_advanced(curvature_map, position_map, world_normal_map, ao_map);
                 layers.push(rust);
 
-                // Layer 2: Weathered Olive Drab Paint with Chipped Edge Mask
+                // Layer 3: Weathered Olive Drab Paint with Chipped Edge Mask
                 let mut green = Layer::new_fill_layer(
-                    2,
+                    3,
                     "Army Green Paint".to_string(),
                     width,
                     height,
-                    Vec4::new(0.26, 0.35, 0.20, 1.0),
-                    0.80,
+                    Vec4::new(0.24, 0.30, 0.18, 1.0),
+                    0.78,
                     0.0,
                 );
+                green.fill_height = 0.54;
+                green.fill_generator = ProceduralGenerator::PerlinNoise;
+                green.generator_scale = 36.0;
                 green.has_mask = true;
                 green.mask_effects.push(MaskEffect {
                     id: 1,
                     name: "Chipped Paint Edge".to_string(),
                     effect_type: MaskEffectType::Fill {
                         generator: ProceduralGenerator::CurvatureWear,
-                        scale: 12.0,
-                        contrast: 1.5,
+                        scale: 10.0,
+                        contrast: 1.8,
                         invert: true,
-                        balance: 0.45,
+                        balance: 0.44,
                     },
                     visible: true,
                     opacity: 1.0,
@@ -443,9 +579,9 @@ impl SmartMaterialLibrary {
                     id: 2,
                     name: "Peeling Grunge".to_string(),
                     effect_type: MaskEffectType::Fill {
-                        generator: ProceduralGenerator::WorleyGrunge,
-                        scale: 10.0,
-                        contrast: 1.2,
+                        generator: ProceduralGenerator::PeelingPaint,
+                        scale: 14.0,
+                        contrast: 1.5,
                         invert: false,
                         balance: 0.5,
                     },
@@ -454,8 +590,82 @@ impl SmartMaterialLibrary {
                     blend_mode: BlendMode::Multiply,
                 });
                 green.evaluate_mask_advanced(curvature_map, ao_map, position_map, world_normal_map);
-                green.evaluate_fill(curvature_map);
+                green.evaluate_fill_advanced(curvature_map, position_map, world_normal_map, ao_map);
                 layers.push(green);
+
+                // Layer 4: Chemical Rust Dripping Runs
+                let mut leaks = Layer::new_fill_layer(
+                    4,
+                    "Dripping Rust Leaks".to_string(),
+                    width,
+                    height,
+                    Vec4::new(0.52, 0.22, 0.08, 1.0),
+                    0.85,
+                    0.0,
+                );
+                leaks.fill_height = 0.52;
+                leaks.has_mask = true;
+                leaks.mask_effects.push(MaskEffect {
+                    id: 1,
+                    name: "Gravity Drips".to_string(),
+                    effect_type: MaskEffectType::Fill {
+                        generator: ProceduralGenerator::DrippingLeaks,
+                        scale: 12.0,
+                        contrast: 1.6,
+                        invert: false,
+                        balance: 0.46,
+                    },
+                    visible: true,
+                    opacity: 0.85,
+                    blend_mode: BlendMode::Normal,
+                });
+                leaks.mask_effects.push(MaskEffect {
+                    id: 2,
+                    name: "Grunge Breakup".to_string(),
+                    effect_type: MaskEffectType::Fill {
+                        generator: ProceduralGenerator::WorleyGrunge,
+                        scale: 20.0,
+                        contrast: 1.2,
+                        invert: false,
+                        balance: 0.50,
+                    },
+                    visible: true,
+                    opacity: 0.70,
+                    blend_mode: BlendMode::Multiply,
+                });
+                leaks.evaluate_mask_advanced(curvature_map, ao_map, position_map, world_normal_map);
+                leaks.evaluate_fill_advanced(curvature_map, position_map, world_normal_map, ao_map);
+                layers.push(leaks);
+
+                // Layer 5: Field Dust
+                let mut dust = Layer::new_fill_layer(
+                    5,
+                    "Field Sand & Dust".to_string(),
+                    width,
+                    height,
+                    Vec4::new(0.60, 0.54, 0.42, 1.0),
+                    0.95,
+                    0.0,
+                );
+                dust.fill_height = 0.55;
+                dust.has_mask = true;
+                dust.mask_effects.push(MaskEffect {
+                    id: 1,
+                    name: "Upward Dust".to_string(),
+                    effect_type: MaskEffectType::Fill {
+                        generator: ProceduralGenerator::DirectionalDust,
+                        scale: 8.0,
+                        contrast: 1.3,
+                        invert: false,
+                        balance: 0.50,
+                    },
+                    visible: true,
+                    opacity: 0.75,
+                    blend_mode: BlendMode::Normal,
+                });
+                dust.evaluate_mask_advanced(curvature_map, ao_map, position_map, world_normal_map);
+                dust.evaluate_fill_advanced(curvature_map, position_map, world_normal_map, ao_map);
+                layers.push(dust);
             }
 
             "bronze_statue_patina" | "smart_ancient_gold" => {
@@ -465,25 +675,27 @@ impl SmartMaterialLibrary {
                     "Polished Bronze Base".to_string(),
                     width,
                     height,
-                    Vec4::new(0.76, 0.52, 0.28, 1.0),
-                    0.30,
-                    0.95,
+                    Vec4::new(0.88, 0.62, 0.36, 1.0),
+                    0.28,
+                    1.0,
                 );
+                bronze.fill_height = 0.50;
                 bronze.fill_generator = ProceduralGenerator::Scratches;
-                bronze.generator_scale = 24.0;
-                bronze.evaluate_fill(curvature_map);
+                bronze.generator_scale = 26.0;
+                bronze.evaluate_fill_advanced(curvature_map, position_map, world_normal_map, ao_map);
                 layers.push(bronze);
 
                 // Layer 2: Oxidized Brown Crevices
                 let mut oxidized = Layer::new_fill_layer(
                     2,
-                    "Oxidized Brown".to_string(),
+                    "Oxidized Brown Crevices".to_string(),
                     width,
                     height,
-                    Vec4::new(0.32, 0.22, 0.14, 1.0),
-                    0.65,
-                    0.30,
+                    Vec4::new(0.22, 0.14, 0.09, 1.0),
+                    0.72,
+                    0.20,
                 );
+                oxidized.fill_height = 0.48;
                 oxidized.has_mask = true;
                 oxidized.mask_effects.push(MaskEffect {
                     id: 1,
@@ -491,28 +703,46 @@ impl SmartMaterialLibrary {
                     effect_type: MaskEffectType::Fill {
                         generator: ProceduralGenerator::CurvatureWear,
                         scale: 8.0,
-                        contrast: 1.3,
+                        contrast: 1.4,
                         invert: true,
-                        balance: 0.40,
+                        balance: 0.42,
                     },
                     visible: true,
                     opacity: 1.0,
                     blend_mode: BlendMode::Normal,
                 });
+                oxidized.mask_effects.push(MaskEffect {
+                    id: 2,
+                    name: "Cavity Darkening".to_string(),
+                    effect_type: MaskEffectType::Fill {
+                        generator: ProceduralGenerator::AmbientOcclusion,
+                        scale: 10.0,
+                        contrast: 1.3,
+                        invert: false,
+                        balance: 0.55,
+                    },
+                    visible: true,
+                    opacity: 0.60,
+                    blend_mode: BlendMode::Add,
+                });
                 oxidized.evaluate_mask_advanced(curvature_map, ao_map, position_map, world_normal_map);
-                oxidized.evaluate_fill(curvature_map);
+                oxidized.evaluate_fill_advanced(curvature_map, position_map, world_normal_map, ao_map);
                 layers.push(oxidized);
 
-                // Layer 3: Verdigris Turquoise Patina
+                // Layer 3: Verdigris Turquoise Patina Crust
                 let mut patina = Layer::new_fill_layer(
                     3,
                     "Verdigris Turquoise Patina".to_string(),
                     width,
                     height,
-                    Vec4::new(0.22, 0.68, 0.60, 1.0),
+                    Vec4::new(0.18, 0.68, 0.56, 1.0),
                     0.90,
                     0.0,
                 );
+                patina.fill_height = 0.54;
+                patina.fill_generator = ProceduralGenerator::PerlinNoise;
+                patina.generator_scale = 32.0;
+                patina.generator_contrast = 0.35;
                 patina.has_mask = true;
                 patina.mask_effects.push(MaskEffect {
                     id: 1,
@@ -520,9 +750,9 @@ impl SmartMaterialLibrary {
                     effect_type: MaskEffectType::Fill {
                         generator: ProceduralGenerator::AmbientOcclusion,
                         scale: 10.0,
-                        contrast: 1.4,
+                        contrast: 1.5,
                         invert: false,
-                        balance: 0.55,
+                        balance: 0.54,
                     },
                     visible: true,
                     opacity: 1.0,
@@ -530,59 +760,137 @@ impl SmartMaterialLibrary {
                 });
                 patina.mask_effects.push(MaskEffect {
                     id: 2,
-                    name: "Upward Sky Exposure".to_string(),
+                    name: "Upward Weathering".to_string(),
                     effect_type: MaskEffectType::Fill {
                         generator: ProceduralGenerator::DirectionalDust,
                         scale: 12.0,
                         contrast: 1.3,
                         invert: false,
-                        balance: 0.5,
+                        balance: 0.50,
                     },
                     visible: true,
-                    opacity: 0.85,
+                    opacity: 0.65,
                     blend_mode: BlendMode::Add,
                 });
+                patina.mask_effects.push(MaskEffect {
+                    id: 3,
+                    name: "Mineral Breakup".to_string(),
+                    effect_type: MaskEffectType::Fill {
+                        generator: ProceduralGenerator::DomainWarpGrunge,
+                        scale: 16.0,
+                        contrast: 1.2,
+                        invert: false,
+                        balance: 0.50,
+                    },
+                    visible: true,
+                    opacity: 0.80,
+                    blend_mode: BlendMode::Multiply,
+                });
                 patina.evaluate_mask_advanced(curvature_map, ao_map, position_map, world_normal_map);
-                patina.evaluate_fill(curvature_map);
+                patina.evaluate_fill_advanced(curvature_map, position_map, world_normal_map, ao_map);
                 layers.push(patina);
+
+                // Layer 4: Burnished Highlight Edge Sheen
+                let mut highlight = Layer::new_fill_layer(
+                    4,
+                    "Burnished Highlight Edge Sheen".to_string(),
+                    width,
+                    height,
+                    Vec4::new(0.96, 0.76, 0.46, 1.0),
+                    0.14,
+                    1.0,
+                );
+                highlight.fill_height = 0.51;
+                highlight.has_mask = true;
+                highlight.mask_effects.push(MaskEffect {
+                    id: 1,
+                    name: "Peak Edge Highlight".to_string(),
+                    effect_type: MaskEffectType::Fill {
+                        generator: ProceduralGenerator::MetalEdgeHighlight,
+                        scale: 16.0,
+                        contrast: 2.2,
+                        invert: false,
+                        balance: 0.52,
+                    },
+                    visible: true,
+                    opacity: 1.0,
+                    blend_mode: BlendMode::Normal,
+                });
+                highlight.evaluate_mask_advanced(curvature_map, ao_map, position_map, world_normal_map);
+                highlight.evaluate_fill_advanced(curvature_map, position_map, world_normal_map, ao_map);
+                layers.push(highlight);
             }
 
             "scifi_carbon_armor" | "scifi_hull" => {
-                // Layer 1: Dark Titanium Chassis
-                let mut chassis = Layer::new_fill_layer(
+                // Layer 1: Carbon Fiber Weave Core
+                let mut core = Layer::new_fill_layer(
                     1,
-                    "Titanium Chassis".to_string(),
+                    "Carbon Fiber Core".to_string(),
                     width,
                     height,
-                    Vec4::new(0.14, 0.15, 0.17, 1.0),
+                    Vec4::new(0.12, 0.12, 0.13, 1.0),
                     0.35,
-                    0.92,
+                    0.0,
                 );
+                core.fill_height = 0.46;
+                core.fill_generator = ProceduralGenerator::FabricWeave;
+                core.generator_scale = 36.0;
+                core.evaluate_fill_advanced(curvature_map, position_map, world_normal_map, ao_map);
+                layers.push(core);
+
+                // Layer 2: Dark Titanium Chassis Frame
+                let mut chassis = Layer::new_fill_layer(
+                    2,
+                    "Titanium Chassis Frame".to_string(),
+                    width,
+                    height,
+                    Vec4::new(0.54, 0.56, 0.58, 1.0),
+                    0.30,
+                    1.0,
+                );
+                chassis.fill_height = 0.50;
                 chassis.fill_generator = ProceduralGenerator::PerlinNoise;
                 chassis.generator_scale = 20.0;
-                chassis.evaluate_fill(curvature_map);
+                chassis.has_mask = true;
+                chassis.mask_effects.push(MaskEffect {
+                    id: 1,
+                    name: "Frame Seams".to_string(),
+                    effect_type: MaskEffectType::Fill {
+                        generator: ProceduralGenerator::CurvatureWear,
+                        scale: 10.0,
+                        contrast: 1.5,
+                        invert: false,
+                        balance: 0.50,
+                    },
+                    visible: true,
+                    opacity: 1.0,
+                    blend_mode: BlendMode::Normal,
+                });
+                chassis.evaluate_mask_advanced(curvature_map, ao_map, position_map, world_normal_map);
+                chassis.evaluate_fill_advanced(curvature_map, position_map, world_normal_map, ao_map);
                 layers.push(chassis);
 
-                // Layer 2: White Ceramic Armor Plating
+                // Layer 3: White Ceramic Armor Plating
                 let mut plating = Layer::new_fill_layer(
-                    2,
+                    3,
                     "Ceramic Armor Plating".to_string(),
                     width,
                     height,
-                    Vec4::new(0.88, 0.90, 0.92, 1.0),
-                    0.25,
-                    0.08,
+                    Vec4::new(0.90, 0.91, 0.93, 1.0),
+                    0.24,
+                    0.0,
                 );
+                plating.fill_height = 0.57;
                 plating.has_mask = true;
                 plating.mask_effects.push(MaskEffect {
                     id: 1,
-                    name: "Edge Chipping".to_string(),
+                    name: "Plate Edge Chipping".to_string(),
                     effect_type: MaskEffectType::Fill {
                         generator: ProceduralGenerator::CurvatureWear,
                         scale: 12.0,
-                        contrast: 1.5,
+                        contrast: 1.8,
                         invert: true,
-                        balance: 0.45,
+                        balance: 0.44,
                     },
                     visible: true,
                     opacity: 1.0,
@@ -593,30 +901,33 @@ impl SmartMaterialLibrary {
                     name: "Plate Flaking".to_string(),
                     effect_type: MaskEffectType::Fill {
                         generator: ProceduralGenerator::WorleyGrunge,
-                        scale: 18.0,
-                        contrast: 1.2,
+                        scale: 16.0,
+                        contrast: 1.3,
                         invert: false,
-                        balance: 0.5,
+                        balance: 0.50,
                     },
                     visible: true,
                     opacity: 0.85,
                     blend_mode: BlendMode::Multiply,
                 });
                 plating.evaluate_mask_advanced(curvature_map, ao_map, position_map, world_normal_map);
-                plating.evaluate_fill(curvature_map);
+                plating.evaluate_fill_advanced(curvature_map, position_map, world_normal_map, ao_map);
                 layers.push(plating);
 
-                // Layer 3: Cyan Energy Conduits
+                // Layer 4: Cyan Energy Conduits
                 let mut conduit = Layer::new_fill_layer(
-                    3,
+                    4,
                     "Cyan Conduit Accents".to_string(),
                     width,
                     height,
                     Vec4::new(0.0, 0.92, 1.0, 1.0),
-                    0.15,
+                    0.12,
                     0.0,
                 );
-                conduit.emissive_buf.data.fill(Vec4::new(0.0, 0.92, 1.0, 1.0));
+                conduit.fill_height = 0.44;
+                conduit.fill_emissive = Vec4::new(0.0, 1.0, 1.0, 1.0);
+                conduit.channel_flags.emission = true;
+                conduit.emissive_buf.data.fill(Vec4::new(0.0, 1.0, 1.0, 1.0));
                 conduit.has_mask = true;
                 conduit.mask_effects.push(MaskEffect {
                     id: 1,
@@ -624,31 +935,34 @@ impl SmartMaterialLibrary {
                     effect_type: MaskEffectType::Fill {
                         generator: ProceduralGenerator::AmbientOcclusion,
                         scale: 14.0,
-                        contrast: 1.6,
+                        contrast: 1.8,
                         invert: false,
-                        balance: 0.6,
+                        balance: 0.62,
                     },
                     visible: true,
                     opacity: 0.90,
                     blend_mode: BlendMode::Normal,
                 });
                 conduit.evaluate_mask_advanced(curvature_map, ao_map, position_map, world_normal_map);
-                conduit.evaluate_fill(curvature_map);
+                conduit.evaluate_fill_advanced(curvature_map, position_map, world_normal_map, ao_map);
                 layers.push(conduit);
             }
 
             "desert_tactical_camo" => {
-                // Layer 1: Dark Anodized Metal
+                // Layer 1: Dark Parkerized Gunmetal
                 let mut metal = Layer::new_fill_layer(
                     1,
-                    "Anodized Metal Base".to_string(),
+                    "Parkerized Gunmetal Base".to_string(),
                     width,
                     height,
-                    Vec4::new(0.15, 0.16, 0.17, 1.0),
-                    0.38,
-                    0.85,
+                    Vec4::new(0.42, 0.44, 0.46, 1.0),
+                    0.36,
+                    1.0,
                 );
-                metal.evaluate_fill(curvature_map);
+                metal.fill_height = 0.46;
+                metal.fill_generator = ProceduralGenerator::Scratches;
+                metal.generator_scale = 28.0;
+                metal.evaluate_fill_advanced(curvature_map, position_map, world_normal_map, ao_map);
                 layers.push(metal);
 
                 // Layer 2: Desert Tan Cerakote Coat
@@ -657,20 +971,21 @@ impl SmartMaterialLibrary {
                     "Desert Tan Cerakote".to_string(),
                     width,
                     height,
-                    Vec4::new(0.76, 0.65, 0.48, 1.0),
+                    Vec4::new(0.78, 0.66, 0.48, 1.0),
                     0.72,
                     0.0,
                 );
+                cerakote.fill_height = 0.53;
                 cerakote.has_mask = true;
                 cerakote.mask_effects.push(MaskEffect {
                     id: 1,
                     name: "Edge Wear".to_string(),
                     effect_type: MaskEffectType::Fill {
                         generator: ProceduralGenerator::CurvatureWear,
-                        scale: 10.0,
-                        contrast: 1.5,
+                        scale: 12.0,
+                        contrast: 1.7,
                         invert: true,
-                        balance: 0.46,
+                        balance: 0.45,
                     },
                     visible: true,
                     opacity: 1.0,
@@ -691,36 +1006,37 @@ impl SmartMaterialLibrary {
                     blend_mode: BlendMode::Multiply,
                 });
                 cerakote.evaluate_mask_advanced(curvature_map, ao_map, position_map, world_normal_map);
-                cerakote.evaluate_fill(curvature_map);
+                cerakote.evaluate_fill_advanced(curvature_map, position_map, world_normal_map, ao_map);
                 layers.push(cerakote);
 
-                // Layer 3: Olive Drab Camo Splotches
+                // Layer 3: Coyote Camo Splotches
                 let mut camo = Layer::new_fill_layer(
                     3,
-                    "Olive Drab Camo".to_string(),
+                    "Coyote Camo Splotches".to_string(),
                     width,
                     height,
-                    Vec4::new(0.32, 0.36, 0.22, 1.0),
+                    Vec4::new(0.44, 0.36, 0.24, 1.0),
                     0.72,
                     0.0,
                 );
+                camo.fill_height = 0.53;
                 camo.has_mask = true;
                 camo.mask_effects.push(MaskEffect {
                     id: 1,
-                    name: "Camo Splotches".to_string(),
+                    name: "Camo Patterns".to_string(),
                     effect_type: MaskEffectType::Fill {
                         generator: ProceduralGenerator::WorleyGrunge,
                         scale: 4.0,
-                        contrast: 2.0,
+                        contrast: 2.2,
                         invert: false,
-                        balance: 0.5,
+                        balance: 0.50,
                     },
                     visible: true,
                     opacity: 1.0,
                     blend_mode: BlendMode::Normal,
                 });
                 camo.evaluate_mask_advanced(curvature_map, ao_map, position_map, world_normal_map);
-                camo.evaluate_fill(curvature_map);
+                camo.evaluate_fill_advanced(curvature_map, position_map, world_normal_map, ao_map);
                 layers.push(camo);
 
                 // Layer 4: Sand & Dust Accumulation
@@ -729,20 +1045,21 @@ impl SmartMaterialLibrary {
                     "Cavity Sand & Dust".to_string(),
                     width,
                     height,
-                    Vec4::new(0.70, 0.62, 0.48, 1.0),
-                    0.95,
+                    Vec4::new(0.82, 0.74, 0.56, 1.0),
+                    0.96,
                     0.0,
                 );
+                sand.fill_height = 0.56;
                 sand.has_mask = true;
                 sand.mask_effects.push(MaskEffect {
                     id: 1,
                     name: "Crevice Sand (AO)".to_string(),
                     effect_type: MaskEffectType::Fill {
                         generator: ProceduralGenerator::AmbientOcclusion,
-                        scale: 12.0,
+                        scale: 10.0,
                         contrast: 1.4,
                         invert: false,
-                        balance: 0.55,
+                        balance: 0.54,
                     },
                     visible: true,
                     opacity: 1.0,
@@ -753,17 +1070,17 @@ impl SmartMaterialLibrary {
                     name: "Directional Settling".to_string(),
                     effect_type: MaskEffectType::Fill {
                         generator: ProceduralGenerator::DirectionalDust,
-                        scale: 16.0,
-                        contrast: 1.2,
+                        scale: 14.0,
+                        contrast: 1.3,
                         invert: false,
-                        balance: 0.5,
+                        balance: 0.50,
                     },
                     visible: true,
-                    opacity: 0.80,
+                    opacity: 0.70,
                     blend_mode: BlendMode::Add,
                 });
                 sand.evaluate_mask_advanced(curvature_map, ao_map, position_map, world_normal_map);
-                sand.evaluate_fill(curvature_map);
+                sand.evaluate_fill_advanced(curvature_map, position_map, world_normal_map, ao_map);
                 layers.push(sand);
             }
 
@@ -774,54 +1091,88 @@ impl SmartMaterialLibrary {
                     "ABS White Plastic".to_string(),
                     width,
                     height,
-                    Vec4::new(0.90, 0.91, 0.92, 1.0),
-                    0.28,
+                    Vec4::new(0.88, 0.89, 0.90, 1.0),
+                    0.35,
                     0.0,
                 );
+                plastic.fill_height = 0.50;
                 plastic.fill_generator = ProceduralGenerator::PerlinNoise;
                 plastic.generator_scale = 32.0;
-                plastic.evaluate_fill(curvature_map);
+                plastic.generator_contrast = 0.20;
+                plastic.evaluate_fill_advanced(curvature_map, position_map, world_normal_map, ao_map);
                 layers.push(plastic);
 
-                // Layer 2: Surface Scuffs & Micro Scratches
-                let mut scuffs = Layer::new_fill_layer(
+                // Layer 2: Hand Friction Polish
+                let mut polish = Layer::new_fill_layer(
                     2,
+                    "Hand Friction Polish".to_string(),
+                    width,
+                    height,
+                    Vec4::new(0.90, 0.91, 0.92, 1.0),
+                    0.16,
+                    0.0,
+                );
+                polish.fill_height = 0.50;
+                polish.has_mask = true;
+                polish.mask_effects.push(MaskEffect {
+                    id: 1,
+                    name: "Friction Zones".to_string(),
+                    effect_type: MaskEffectType::Fill {
+                        generator: ProceduralGenerator::MetalEdgeHighlight,
+                        scale: 12.0,
+                        contrast: 1.8,
+                        invert: false,
+                        balance: 0.50,
+                    },
+                    visible: true,
+                    opacity: 1.0,
+                    blend_mode: BlendMode::Normal,
+                });
+                polish.evaluate_mask_advanced(curvature_map, ao_map, position_map, world_normal_map);
+                polish.evaluate_fill_advanced(curvature_map, position_map, world_normal_map, ao_map);
+                layers.push(polish);
+
+                // Layer 3: Surface Scuffs & Micro Scratches
+                let mut scuffs = Layer::new_fill_layer(
+                    3,
                     "Surface Scuffs".to_string(),
                     width,
                     height,
-                    Vec4::new(0.75, 0.76, 0.78, 1.0),
-                    0.65,
+                    Vec4::new(0.72, 0.74, 0.76, 1.0),
+                    0.70,
                     0.0,
                 );
+                scuffs.fill_height = 0.48;
                 scuffs.has_mask = true;
                 scuffs.mask_effects.push(MaskEffect {
                     id: 1,
                     name: "Abrasions".to_string(),
                     effect_type: MaskEffectType::Fill {
                         generator: ProceduralGenerator::Scratches,
-                        scale: 20.0,
-                        contrast: 1.3,
+                        scale: 22.0,
+                        contrast: 1.4,
                         invert: false,
-                        balance: 0.5,
+                        balance: 0.50,
                     },
                     visible: true,
                     opacity: 0.80,
                     blend_mode: BlendMode::Normal,
                 });
                 scuffs.evaluate_mask_advanced(curvature_map, ao_map, position_map, world_normal_map);
-                scuffs.evaluate_fill(curvature_map);
+                scuffs.evaluate_fill_advanced(curvature_map, position_map, world_normal_map, ao_map);
                 layers.push(scuffs);
 
-                // Layer 3: Crevice Oil & Grime (AO)
+                // Layer 4: Crevice Oil & Grime (AO)
                 let mut grime = Layer::new_fill_layer(
-                    3,
+                    4,
                     "Crevice Grease & Grime".to_string(),
                     width,
                     height,
                     Vec4::new(0.12, 0.10, 0.08, 1.0),
                     0.92,
-                    0.05,
+                    0.0,
                 );
+                grime.fill_height = 0.52;
                 grime.blend_mode = BlendMode::Multiply;
                 grime.opacity = 0.85;
                 grime.has_mask = true;
@@ -831,9 +1182,9 @@ impl SmartMaterialLibrary {
                     effect_type: MaskEffectType::Fill {
                         generator: ProceduralGenerator::AmbientOcclusion,
                         scale: 8.0,
-                        contrast: 1.5,
+                        contrast: 1.6,
                         invert: false,
-                        balance: 0.55,
+                        balance: 0.54,
                     },
                     visible: true,
                     opacity: 1.0,
@@ -845,16 +1196,16 @@ impl SmartMaterialLibrary {
                     effect_type: MaskEffectType::Fill {
                         generator: ProceduralGenerator::WorleyGrunge,
                         scale: 18.0,
-                        contrast: 1.2,
+                        contrast: 1.3,
                         invert: false,
-                        balance: 0.5,
+                        balance: 0.50,
                     },
                     visible: true,
-                    opacity: 0.70,
+                    opacity: 0.75,
                     blend_mode: BlendMode::Multiply,
                 });
                 grime.evaluate_mask_advanced(curvature_map, ao_map, position_map, world_normal_map);
-                grime.evaluate_fill(curvature_map);
+                grime.evaluate_fill_advanced(curvature_map, position_map, world_normal_map, ao_map);
                 layers.push(grime);
             }
 
@@ -865,50 +1216,56 @@ impl SmartMaterialLibrary {
                     "Metallic Crimson Base".to_string(),
                     width,
                     height,
-                    Vec4::new(0.75, 0.08, 0.08, 1.0),
-                    0.28,
-                    0.55,
+                    Vec4::new(0.68, 0.04, 0.08, 1.0),
+                    0.32,
+                    0.75,
                 );
+                base.fill_height = 0.50;
                 base.fill_generator = ProceduralGenerator::PerlinNoise;
-                base.generator_scale = 40.0;
-                base.evaluate_fill(curvature_map);
+                base.generator_scale = 48.0;
+                base.generator_contrast = 0.35;
+                base.evaluate_fill_advanced(curvature_map, position_map, world_normal_map, ao_map);
                 layers.push(base);
 
-                // Layer 2: High-Gloss Clearcoat
+                // Layer 2: High-Gloss Clearcoat Top Layer
                 let mut clearcoat = Layer::new_fill_layer(
                     2,
                     "High-Gloss Clearcoat".to_string(),
                     width,
                     height,
-                    Vec4::new(1.0, 1.0, 1.0, 0.25),
-                    0.05,
+                    Vec4::new(1.0, 1.0, 1.0, 0.20),
+                    0.06,
                     0.0,
                 );
+                clearcoat.fill_height = 0.54;
+                clearcoat.fill_clearcoat = 1.0;
+                clearcoat.channel_flags.clearcoat = true;
                 clearcoat.blend_mode = BlendMode::Screen;
-                clearcoat.opacity = 0.35;
-                clearcoat.evaluate_fill(curvature_map);
+                clearcoat.opacity = 0.30;
+                clearcoat.evaluate_fill_advanced(curvature_map, position_map, world_normal_map, ao_map);
                 layers.push(clearcoat);
 
-                // Layer 3: Road Grime & Splatter
+                // Layer 3: Lower Body Road Mud & Splash
                 let mut road_grime = Layer::new_fill_layer(
                     3,
                     "Road Grime & Splatter".to_string(),
                     width,
                     height,
-                    Vec4::new(0.24, 0.20, 0.16, 1.0),
-                    0.95,
+                    Vec4::new(0.24, 0.19, 0.14, 1.0),
+                    0.94,
                     0.0,
                 );
+                road_grime.fill_height = 0.58;
                 road_grime.has_mask = true;
                 road_grime.mask_effects.push(MaskEffect {
                     id: 1,
-                    name: "Lower Mesh Gradient".to_string(),
+                    name: "Lower Mesh Splash".to_string(),
                     effect_type: MaskEffectType::Fill {
-                        generator: ProceduralGenerator::PositionGradient,
-                        scale: 1.0,
-                        contrast: 1.4,
-                        invert: true,
-                        balance: 0.45,
+                        generator: ProceduralGenerator::GroundSplash,
+                        scale: 14.0,
+                        contrast: 1.6,
+                        invert: false,
+                        balance: 0.52,
                     },
                     visible: true,
                     opacity: 1.0,
@@ -920,16 +1277,16 @@ impl SmartMaterialLibrary {
                     effect_type: MaskEffectType::Fill {
                         generator: ProceduralGenerator::WorleyGrunge,
                         scale: 24.0,
-                        contrast: 1.5,
+                        contrast: 1.4,
                         invert: false,
-                        balance: 0.5,
+                        balance: 0.50,
                     },
                     visible: true,
-                    opacity: 0.85,
+                    opacity: 0.80,
                     blend_mode: BlendMode::Multiply,
                 });
                 road_grime.evaluate_mask_advanced(curvature_map, ao_map, position_map, world_normal_map);
-                road_grime.evaluate_fill(curvature_map);
+                road_grime.evaluate_fill_advanced(curvature_map, position_map, world_normal_map, ao_map);
                 layers.push(road_grime);
             }
 
@@ -940,13 +1297,14 @@ impl SmartMaterialLibrary {
                     "Dark Timber Substrate".to_string(),
                     width,
                     height,
-                    Vec4::new(0.30, 0.19, 0.12, 1.0),
-                    0.70,
+                    Vec4::new(0.32, 0.20, 0.12, 1.0),
+                    0.72,
                     0.0,
                 );
-                substrate.fill_generator = ProceduralGenerator::PerlinNoise;
-                substrate.generator_scale = 8.0;
-                substrate.evaluate_fill(curvature_map);
+                substrate.fill_height = 0.46;
+                substrate.fill_generator = ProceduralGenerator::WoodGrain;
+                substrate.generator_scale = 10.0;
+                substrate.evaluate_fill_advanced(curvature_map, position_map, world_normal_map, ao_map);
                 layers.push(substrate);
 
                 // Layer 2: Weathered Cedar Grain
@@ -955,97 +1313,307 @@ impl SmartMaterialLibrary {
                     "Weathered Cedar Grain".to_string(),
                     width,
                     height,
-                    Vec4::new(0.50, 0.42, 0.32, 1.0),
-                    0.65,
+                    Vec4::new(0.55, 0.46, 0.36, 1.0),
+                    0.62,
                     0.0,
                 );
+                grain.fill_height = 0.54;
+                grain.fill_generator = ProceduralGenerator::PerlinNoise;
+                grain.generator_scale = 18.0;
                 grain.has_mask = true;
                 grain.mask_effects.push(MaskEffect {
                     id: 1,
                     name: "Wood Grain Mask".to_string(),
                     effect_type: MaskEffectType::Fill {
-                        generator: ProceduralGenerator::PerlinNoise,
-                        scale: 16.0,
-                        contrast: 1.3,
+                        generator: ProceduralGenerator::WoodGrain,
+                        scale: 10.0,
+                        contrast: 1.5,
                         invert: false,
-                        balance: 0.5,
+                        balance: 0.50,
                     },
                     visible: true,
                     opacity: 0.85,
                     blend_mode: BlendMode::Normal,
                 });
+                grain.mask_effects.push(MaskEffect {
+                    id: 2,
+                    name: "Weathered Ridge Bleach".to_string(),
+                    effect_type: MaskEffectType::Fill {
+                        generator: ProceduralGenerator::DirectionalDust,
+                        scale: 8.0,
+                        contrast: 1.2,
+                        invert: false,
+                        balance: 0.50,
+                    },
+                    visible: true,
+                    opacity: 0.40,
+                    blend_mode: BlendMode::Add,
+                });
                 grain.evaluate_mask_advanced(curvature_map, ao_map, position_map, world_normal_map);
-                grain.evaluate_fill(curvature_map);
+                grain.evaluate_fill_advanced(curvature_map, position_map, world_normal_map, ao_map);
                 layers.push(grain);
 
-                // Layer 3: Crevice Moss & Grime
+                // Layer 3: Crevice Moss & Damp Grime
                 let mut moss = Layer::new_fill_layer(
                     3,
                     "Crevice Moss & Grime".to_string(),
                     width,
                     height,
-                    Vec4::new(0.22, 0.28, 0.14, 1.0),
-                    0.90,
+                    Vec4::new(0.18, 0.26, 0.12, 1.0),
+                    0.94,
                     0.0,
                 );
+                moss.fill_height = 0.52;
                 moss.has_mask = true;
                 moss.mask_effects.push(MaskEffect {
                     id: 1,
                     name: "Crevice Moisture (AO)".to_string(),
                     effect_type: MaskEffectType::Fill {
                         generator: ProceduralGenerator::AmbientOcclusion,
-                        scale: 12.0,
-                        contrast: 1.4,
+                        scale: 10.0,
+                        contrast: 1.5,
                         invert: false,
-                        balance: 0.55,
+                        balance: 0.56,
                     },
                     visible: true,
                     opacity: 0.90,
                     blend_mode: BlendMode::Normal,
                 });
+                moss.mask_effects.push(MaskEffect {
+                    id: 2,
+                    name: "Moss Clumping".to_string(),
+                    effect_type: MaskEffectType::Fill {
+                        generator: ProceduralGenerator::DomainWarpGrunge,
+                        scale: 16.0,
+                        contrast: 1.2,
+                        invert: false,
+                        balance: 0.50,
+                    },
+                    visible: true,
+                    opacity: 0.75,
+                    blend_mode: BlendMode::Multiply,
+                });
                 moss.evaluate_mask_advanced(curvature_map, ao_map, position_map, world_normal_map);
-                moss.evaluate_fill(curvature_map);
+                moss.evaluate_fill_advanced(curvature_map, position_map, world_normal_map, ao_map);
                 layers.push(moss);
             }
 
             "brushed_gold" => {
+                // Layer 1: Fine 24K Brushed Gold Base
                 let mut gold = Layer::new_fill_layer(
                     1,
                     "Fine Brushed Gold".to_string(),
                     width,
                     height,
-                    Vec4::new(1.0, 0.84, 0.38, 1.0),
-                    0.20,
+                    Vec4::new(1.0, 0.76, 0.33, 1.0),
+                    0.22,
                     1.0,
                 );
+                gold.fill_height = 0.50;
                 gold.fill_generator = ProceduralGenerator::Scratches;
                 gold.generator_scale = 32.0;
-                gold.evaluate_fill(curvature_map);
+                gold.generator_contrast = 0.50;
+                gold.evaluate_fill_advanced(curvature_map, position_map, world_normal_map, ao_map);
                 layers.push(gold);
+
+                // Layer 2: Polished Edge Highlight Sheen
+                let mut sheen = Layer::new_fill_layer(
+                    2,
+                    "Polished Edge Sheen".to_string(),
+                    width,
+                    height,
+                    Vec4::new(1.0, 0.88, 0.52, 1.0),
+                    0.10,
+                    1.0,
+                );
+                sheen.fill_height = 0.51;
+                sheen.has_mask = true;
+                sheen.mask_effects.push(MaskEffect {
+                    id: 1,
+                    name: "Edge Highlight".to_string(),
+                    effect_type: MaskEffectType::Fill {
+                        generator: ProceduralGenerator::MetalEdgeHighlight,
+                        scale: 16.0,
+                        contrast: 2.2,
+                        invert: false,
+                        balance: 0.52,
+                    },
+                    visible: true,
+                    opacity: 1.0,
+                    blend_mode: BlendMode::Normal,
+                });
+                sheen.evaluate_mask_advanced(curvature_map, ao_map, position_map, world_normal_map);
+                sheen.evaluate_fill_advanced(curvature_map, position_map, world_normal_map, ao_map);
+                layers.push(sheen);
+
+                // Layer 3: Micro Hairline Scratches
+                let mut scratches = Layer::new_fill_layer(
+                    3,
+                    "Micro Hairline Scratches".to_string(),
+                    width,
+                    height,
+                    Vec4::new(0.92, 0.70, 0.28, 1.0),
+                    0.45,
+                    1.0,
+                );
+                scratches.fill_height = 0.48;
+                scratches.has_mask = true;
+                scratches.mask_effects.push(MaskEffect {
+                    id: 1,
+                    name: "Hairline Scratches".to_string(),
+                    effect_type: MaskEffectType::Fill {
+                        generator: ProceduralGenerator::Scratches,
+                        scale: 24.0,
+                        contrast: 1.6,
+                        invert: false,
+                        balance: 0.50,
+                    },
+                    visible: true,
+                    opacity: 0.60,
+                    blend_mode: BlendMode::Normal,
+                });
+                scratches.evaluate_mask_advanced(curvature_map, ao_map, position_map, world_normal_map);
+                scratches.evaluate_fill_advanced(curvature_map, position_map, world_normal_map, ao_map);
+                layers.push(scratches);
+
+                // Layer 4: Tarnished Cavity Shadows
+                let mut tarnish = Layer::new_fill_layer(
+                    4,
+                    "Tarnished Cavity Shadows".to_string(),
+                    width,
+                    height,
+                    Vec4::new(0.48, 0.32, 0.12, 1.0),
+                    0.65,
+                    0.85,
+                );
+                tarnish.fill_height = 0.49;
+                tarnish.has_mask = true;
+                tarnish.mask_effects.push(MaskEffect {
+                    id: 1,
+                    name: "Recessed Tarnish (AO)".to_string(),
+                    effect_type: MaskEffectType::Fill {
+                        generator: ProceduralGenerator::AmbientOcclusion,
+                        scale: 10.0,
+                        contrast: 1.4,
+                        invert: false,
+                        balance: 0.56,
+                    },
+                    visible: true,
+                    opacity: 0.85,
+                    blend_mode: BlendMode::Normal,
+                });
+                tarnish.evaluate_mask_advanced(curvature_map, ao_map, position_map, world_normal_map);
+                tarnish.evaluate_fill_advanced(curvature_map, position_map, world_normal_map, ao_map);
+                layers.push(tarnish);
             }
 
             "matte_polymer" => {
+                // Layer 1: Tactical Polymer Base
                 let mut polymer = Layer::new_fill_layer(
                     1,
-                    "Polymer Body".to_string(),
+                    "Tactical Polymer Base".to_string(),
                     width,
                     height,
-                    Vec4::new(0.18, 0.20, 0.22, 1.0),
-                    0.38,
+                    Vec4::new(0.18, 0.19, 0.20, 1.0),
+                    0.62,
                     0.0,
                 );
+                polymer.fill_height = 0.50;
                 polymer.fill_generator = ProceduralGenerator::PerlinNoise;
-                polymer.generator_scale = 30.0;
-                polymer.evaluate_fill(curvature_map);
+                polymer.generator_scale = 36.0;
+                polymer.generator_contrast = 0.40;
+                polymer.evaluate_fill_advanced(curvature_map, position_map, world_normal_map, ao_map);
                 layers.push(polymer);
 
-                let details = Layer::new_paint_layer(
+                // Layer 2: Convex Edge Handling Friction Wear
+                let mut wear = Layer::new_fill_layer(
                     2,
-                    "Tactical Markings".to_string(),
+                    "Edge Friction Wear".to_string(),
                     width,
                     height,
+                    Vec4::new(0.24, 0.25, 0.26, 1.0),
+                    0.26,
+                    0.0,
                 );
-                layers.push(details);
+                wear.fill_height = 0.49;
+                wear.has_mask = true;
+                wear.mask_effects.push(MaskEffect {
+                    id: 1,
+                    name: "Edge Rub Wear".to_string(),
+                    effect_type: MaskEffectType::Fill {
+                        generator: ProceduralGenerator::CurvatureWear,
+                        scale: 12.0,
+                        contrast: 1.6,
+                        invert: false,
+                        balance: 0.50,
+                    },
+                    visible: true,
+                    opacity: 0.85,
+                    blend_mode: BlendMode::Normal,
+                });
+                wear.evaluate_mask_advanced(curvature_map, ao_map, position_map, world_normal_map);
+                wear.evaluate_fill_advanced(curvature_map, position_map, world_normal_map, ao_map);
+                layers.push(wear);
+
+                // Layer 3: Field Scratches & Holster Scuffs
+                let mut scuffs = Layer::new_fill_layer(
+                    3,
+                    "Field Scratches".to_string(),
+                    width,
+                    height,
+                    Vec4::new(0.14, 0.15, 0.16, 1.0),
+                    0.80,
+                    0.0,
+                );
+                scuffs.fill_height = 0.47;
+                scuffs.has_mask = true;
+                scuffs.mask_effects.push(MaskEffect {
+                    id: 1,
+                    name: "Scuffs".to_string(),
+                    effect_type: MaskEffectType::Fill {
+                        generator: ProceduralGenerator::Scratches,
+                        scale: 22.0,
+                        contrast: 1.5,
+                        invert: false,
+                        balance: 0.50,
+                    },
+                    visible: true,
+                    opacity: 0.70,
+                    blend_mode: BlendMode::Normal,
+                });
+                scuffs.evaluate_mask_advanced(curvature_map, ao_map, position_map, world_normal_map);
+                scuffs.evaluate_fill_advanced(curvature_map, position_map, world_normal_map, ao_map);
+                layers.push(scuffs);
+
+                // Layer 4: Cavity Field Dust
+                let mut dust = Layer::new_fill_layer(
+                    4,
+                    "Cavity Field Dust".to_string(),
+                    width,
+                    height,
+                    Vec4::new(0.68, 0.62, 0.50, 1.0),
+                    0.94,
+                    0.0,
+                );
+                dust.fill_height = 0.52;
+                dust.has_mask = true;
+                dust.mask_effects.push(MaskEffect {
+                    id: 1,
+                    name: "Recessed Dust (AO)".to_string(),
+                    effect_type: MaskEffectType::Fill {
+                        generator: ProceduralGenerator::AmbientOcclusion,
+                        scale: 10.0,
+                        contrast: 1.5,
+                        invert: false,
+                        balance: 0.55,
+                    },
+                    visible: true,
+                    opacity: 0.65,
+                    blend_mode: BlendMode::Normal,
+                });
+                dust.evaluate_mask_advanced(curvature_map, ao_map, position_map, world_normal_map);
+                dust.evaluate_fill_advanced(curvature_map, position_map, world_normal_map, ao_map);
+                layers.push(dust);
             }
 
             "tinted_glass_visor" => {
@@ -1075,7 +1643,7 @@ impl SmartMaterialLibrary {
                     0.0,
                 );
                 smudges.fill_opacity = 0.70;
-                smudges.channel_flags.opacity = true;
+                smudges.channel_flags.opacity = false;
                 smudges.has_mask = true;
                 smudges.mask_effects.push(MaskEffect {
                     id: 1,
@@ -1106,7 +1674,7 @@ impl SmartMaterialLibrary {
                     0.0,
                 );
                 scuffs.fill_opacity = 0.88;
-                scuffs.channel_flags.opacity = true;
+                scuffs.channel_flags.opacity = false;
                 scuffs.has_mask = true;
                 scuffs.mask_effects.push(MaskEffect {
                     id: 1,
@@ -1152,6 +1720,7 @@ impl SmartMaterialLibrary {
                     0.5,
                     0.0,
                 );
+                holes.fill_height = 0.0;
                 holes.fill_opacity = 0.0;
                 holes.channel_flags.opacity = true;
                 holes.evaluate_fill_advanced(curvature_map, position_map, world_normal_map, ao_map);
@@ -1167,6 +1736,7 @@ impl SmartMaterialLibrary {
                     0.34,
                     0.96,
                 );
+                plate.fill_height = 0.54;
                 plate.fill_opacity = 1.0;
                 plate.channel_flags.opacity = true;
                 plate.has_mask = true;
@@ -1196,8 +1766,9 @@ impl SmartMaterialLibrary {
                     height,
                     Vec4::new(0.28, 0.20, 0.14, 1.0),
                     0.82,
-                    0.20,
+                    0.10,
                 );
+                grime.fill_height = 0.49;
                 grime.has_mask = true;
                 grime.mask_effects.push(MaskEffect {
                     id: 1,
@@ -1212,6 +1783,20 @@ impl SmartMaterialLibrary {
                     visible: true,
                     opacity: 0.85,
                     blend_mode: BlendMode::Normal,
+                });
+                grime.mask_effects.push(MaskEffect {
+                    id: 2,
+                    name: "Oxidation Pits".to_string(),
+                    effect_type: MaskEffectType::Fill {
+                        generator: ProceduralGenerator::RustPits,
+                        scale: 16.0,
+                        contrast: 1.4,
+                        invert: false,
+                        balance: 0.50,
+                    },
+                    visible: true,
+                    opacity: 0.50,
+                    blend_mode: BlendMode::Add,
                 });
                 grime.evaluate_mask_advanced(curvature_map, ao_map, position_map, world_normal_map);
                 grime.evaluate_fill_advanced(curvature_map, position_map, world_normal_map, ao_map);
@@ -1229,6 +1814,7 @@ impl SmartMaterialLibrary {
                     0.5,
                     0.0,
                 );
+                cutout.fill_height = 0.0;
                 cutout.fill_opacity = 0.0;
                 cutout.channel_flags.opacity = true;
                 cutout.evaluate_fill_advanced(curvature_map, position_map, world_normal_map, ao_map);
@@ -1244,6 +1830,7 @@ impl SmartMaterialLibrary {
                     0.85,
                     0.0,
                 );
+                cloth.fill_height = 0.52;
                 cloth.fill_opacity = 1.0;
                 cloth.channel_flags.opacity = true;
                 cloth.fill_generator = ProceduralGenerator::FabricWeave;
@@ -1266,6 +1853,50 @@ impl SmartMaterialLibrary {
                 cloth.evaluate_mask_advanced(curvature_map, ao_map, position_map, world_normal_map);
                 cloth.evaluate_fill_advanced(curvature_map, position_map, world_normal_map, ao_map);
                 layers.push(cloth);
+
+                // Layer 3: Frayed Edge Threads
+                let mut fringe = Layer::new_fill_layer(
+                    3,
+                    "Frayed Thread Fringe".to_string(),
+                    width,
+                    height,
+                    Vec4::new(0.55, 0.58, 0.44, 1.0),
+                    0.95,
+                    0.0,
+                );
+                fringe.fill_height = 0.54;
+                fringe.has_mask = true;
+                fringe.mask_effects.push(MaskEffect {
+                    id: 1,
+                    name: "Tear Fringe".to_string(),
+                    effect_type: MaskEffectType::Fill {
+                        generator: ProceduralGenerator::TornFabricEdge,
+                        scale: 6.0,
+                        contrast: 2.2,
+                        invert: false,
+                        balance: 0.48,
+                    },
+                    visible: true,
+                    opacity: 1.0,
+                    blend_mode: BlendMode::Normal,
+                });
+                fringe.mask_effects.push(MaskEffect {
+                    id: 2,
+                    name: "Weave Threads".to_string(),
+                    effect_type: MaskEffectType::Fill {
+                        generator: ProceduralGenerator::FabricWeave,
+                        scale: 40.0,
+                        contrast: 1.6,
+                        invert: false,
+                        balance: 0.50,
+                    },
+                    visible: true,
+                    opacity: 0.85,
+                    blend_mode: BlendMode::Multiply,
+                });
+                fringe.evaluate_mask_advanced(curvature_map, ao_map, position_map, world_normal_map);
+                fringe.evaluate_fill_advanced(curvature_map, position_map, world_normal_map, ao_map);
+                layers.push(fringe);
             }
 
             "wire_chainlink_fence" => {
@@ -1279,6 +1910,7 @@ impl SmartMaterialLibrary {
                     0.5,
                     0.0,
                 );
+                space.fill_height = 0.0;
                 space.fill_opacity = 0.0;
                 space.channel_flags.opacity = true;
                 space.evaluate_fill_advanced(curvature_map, position_map, world_normal_map, ao_map);
@@ -1294,6 +1926,7 @@ impl SmartMaterialLibrary {
                     0.36,
                     0.92,
                 );
+                wire.fill_height = 0.56;
                 wire.fill_opacity = 1.0;
                 wire.channel_flags.opacity = true;
                 wire.has_mask = true;
@@ -1314,6 +1947,50 @@ impl SmartMaterialLibrary {
                 wire.evaluate_mask_advanced(curvature_map, ao_map, position_map, world_normal_map);
                 wire.evaluate_fill_advanced(curvature_map, position_map, world_normal_map, ao_map);
                 layers.push(wire);
+
+                // Layer 3: Junction Oxidation Rust
+                let mut rust = Layer::new_fill_layer(
+                    3,
+                    "Junction Oxidation Rust".to_string(),
+                    width,
+                    height,
+                    Vec4::new(0.48, 0.20, 0.08, 1.0),
+                    0.88,
+                    0.0,
+                );
+                rust.fill_height = 0.54;
+                rust.has_mask = true;
+                rust.mask_effects.push(MaskEffect {
+                    id: 1,
+                    name: "Junction Crevice (AO)".to_string(),
+                    effect_type: MaskEffectType::Fill {
+                        generator: ProceduralGenerator::AmbientOcclusion,
+                        scale: 10.0,
+                        contrast: 1.6,
+                        invert: false,
+                        balance: 0.55,
+                    },
+                    visible: true,
+                    opacity: 0.85,
+                    blend_mode: BlendMode::Normal,
+                });
+                rust.mask_effects.push(MaskEffect {
+                    id: 2,
+                    name: "Rust Pits".to_string(),
+                    effect_type: MaskEffectType::Fill {
+                        generator: ProceduralGenerator::RustPits,
+                        scale: 16.0,
+                        contrast: 1.3,
+                        invert: false,
+                        balance: 0.50,
+                    },
+                    visible: true,
+                    opacity: 0.60,
+                    blend_mode: BlendMode::Add,
+                });
+                rust.evaluate_mask_advanced(curvature_map, ao_map, position_map, world_normal_map);
+                rust.evaluate_fill_advanced(curvature_map, position_map, world_normal_map, ao_map);
+                layers.push(rust);
             }
 
             "emerald_crystal_gem" => {
@@ -1327,6 +2004,7 @@ impl SmartMaterialLibrary {
                     0.04,
                     0.0,
                 );
+                gem.fill_height = 0.50;
                 gem.fill_opacity = 0.15;
                 gem.channel_flags.opacity = true;
                 gem.evaluate_fill_advanced(curvature_map, position_map, world_normal_map, ao_map);
@@ -1342,10 +2020,25 @@ impl SmartMaterialLibrary {
                     0.02,
                     0.0,
                 );
+                edge.fill_height = 0.52;
                 edge.fill_opacity = 0.25;
                 edge.channel_flags.opacity = true;
                 edge.has_mask = true;
-                edge.add_curvature_mask(curvature_map);
+                edge.mask_effects.push(MaskEffect {
+                    id: 1,
+                    name: "Facet Edges".to_string(),
+                    effect_type: MaskEffectType::Fill {
+                        generator: ProceduralGenerator::MetalEdgeHighlight,
+                        scale: 14.0,
+                        contrast: 2.0,
+                        invert: false,
+                        balance: 0.52,
+                    },
+                    visible: true,
+                    opacity: 1.0,
+                    blend_mode: BlendMode::Normal,
+                });
+                edge.evaluate_mask_advanced(curvature_map, ao_map, position_map, world_normal_map);
                 edge.evaluate_fill_advanced(curvature_map, position_map, world_normal_map, ao_map);
                 layers.push(edge);
 
@@ -1359,6 +2052,7 @@ impl SmartMaterialLibrary {
                     0.38,
                     0.0,
                 );
+                scuffs.fill_height = 0.49;
                 scuffs.channel_flags.base_color = false;
                 scuffs.channel_flags.roughness = true;
                 scuffs.has_mask = true;
@@ -1392,6 +2086,7 @@ impl SmartMaterialLibrary {
                     0.06,
                     0.0,
                 );
+                amber.fill_height = 0.50;
                 amber.fill_opacity = 0.22;
                 amber.channel_flags.opacity = true;
                 amber.evaluate_fill_advanced(curvature_map, position_map, world_normal_map, ao_map);
@@ -1407,6 +2102,7 @@ impl SmartMaterialLibrary {
                     0.26,
                     0.0,
                 );
+                cloud.fill_height = 0.50;
                 cloud.fill_opacity = 0.52;
                 cloud.channel_flags.opacity = true;
                 cloud.has_mask = true;
@@ -1438,6 +2134,7 @@ impl SmartMaterialLibrary {
                     0.88,
                     0.0,
                 );
+                grime.fill_height = 0.52;
                 grime.has_mask = true;
                 grime.mask_effects.push(MaskEffect {
                     id: 1,
@@ -1469,6 +2166,7 @@ impl SmartMaterialLibrary {
                     0.38,
                     0.0,
                 );
+                ice.fill_height = 0.50;
                 ice.fill_opacity = 0.28;
                 ice.channel_flags.opacity = true;
                 ice.evaluate_fill_advanced(curvature_map, position_map, world_normal_map, ao_map);
@@ -1484,6 +2182,7 @@ impl SmartMaterialLibrary {
                     0.12,
                     0.0,
                 );
+                fractures.fill_height = 0.48;
                 fractures.fill_opacity = 0.60;
                 fractures.channel_flags.opacity = true;
                 fractures.has_mask = true;
@@ -1515,6 +2214,7 @@ impl SmartMaterialLibrary {
                     0.92,
                     0.0,
                 );
+                frost.fill_height = 0.53;
                 frost.has_mask = true;
                 frost.mask_effects.push(MaskEffect {
                     id: 1,
@@ -1583,6 +2283,11 @@ impl SmartMaterialLibrary {
                 id: "peeling_paint",
                 name: "Peeling & Flaking Paint",
                 description: "Organic cellular blisters with sharp jagged chipped paint perimeter lines",
+            },
+            SmartMaskPreset {
+                id: "rust_crater_pits",
+                name: "Oxidation Rust Pits",
+                description: "Corrosion crater clusters with porous oxidation cores and micro pitting",
             },
             SmartMaskPreset {
                 id: "ground_dirt_mud",
@@ -1788,18 +2493,18 @@ impl SmartMaterialLibrary {
                 }
             }
             "peeling_paint" | "mask_peeling_paint" => {
-                let id1 = layer.add_mask_fill_effect_advanced(ProceduralGenerator::WorleyGrunge, curvature_map, ao_map, position_map, world_normal_map);
+                let id1 = layer.add_mask_fill_effect_advanced(ProceduralGenerator::PeelingPaint, curvature_map, ao_map, position_map, world_normal_map);
                 if let Some(eff) = layer.mask_effects.iter_mut().find(|e| e.id == id1) {
                     if let MaskEffectType::Fill { ref mut scale, ref mut contrast, ref mut balance, .. } = eff.effect_type {
-                        *scale = 10.0;
-                        *contrast = 2.0;
-                        *balance = 0.54;
+                        *scale = 12.0;
+                        *contrast = 1.8;
+                        *balance = 0.50;
                     }
                 }
                 let id2 = layer.add_mask_fill_effect_advanced(ProceduralGenerator::RidgedMultifractal, curvature_map, ao_map, position_map, world_normal_map);
                 if let Some(eff) = layer.mask_effects.iter_mut().find(|e| e.id == id2) {
                     eff.blend_mode = BlendMode::Screen;
-                    eff.opacity = 0.55;
+                    eff.opacity = 0.45;
                     if let MaskEffectType::Fill { ref mut scale, .. } = eff.effect_type {
                         *scale = 14.0;
                     }
@@ -1820,13 +2525,27 @@ impl SmartMaterialLibrary {
                     blend_mode: BlendMode::Normal,
                 });
             }
-            "ground_dirt_mud" | "mask_ground_dirt" => {
-                let id1 = layer.add_mask_fill_effect_advanced(ProceduralGenerator::PositionGradient, curvature_map, ao_map, position_map, world_normal_map);
+            "rust_crater_pits" | "mask_rust_pits" => {
+                let id1 = layer.add_mask_fill_effect_advanced(ProceduralGenerator::RustPits, curvature_map, ao_map, position_map, world_normal_map);
                 if let Some(eff) = layer.mask_effects.iter_mut().find(|e| e.id == id1) {
-                    if let MaskEffectType::Fill { ref mut invert, ref mut contrast, ref mut balance, .. } = eff.effect_type {
-                        *invert = true;
+                    if let MaskEffectType::Fill { ref mut scale, ref mut contrast, ref mut balance, .. } = eff.effect_type {
+                        *scale = 14.0;
                         *contrast = 1.6;
-                        *balance = 0.58;
+                        *balance = 0.52;
+                    }
+                }
+                let id2 = layer.add_mask_fill_effect_advanced(ProceduralGenerator::AmbientOcclusion, curvature_map, ao_map, position_map, world_normal_map);
+                if let Some(eff) = layer.mask_effects.iter_mut().find(|e| e.id == id2) {
+                    eff.blend_mode = BlendMode::Multiply;
+                    eff.opacity = 0.70;
+                }
+            }
+            "ground_dirt_mud" | "mask_ground_dirt" => {
+                let id1 = layer.add_mask_fill_effect_advanced(ProceduralGenerator::GroundSplash, curvature_map, ao_map, position_map, world_normal_map);
+                if let Some(eff) = layer.mask_effects.iter_mut().find(|e| e.id == id1) {
+                    if let MaskEffectType::Fill { ref mut contrast, ref mut balance, .. } = eff.effect_type {
+                        *contrast = 1.6;
+                        *balance = 0.52;
                     }
                 }
                 let id2 = layer.add_mask_fill_effect_advanced(ProceduralGenerator::SplatterDirt, curvature_map, ao_map, position_map, world_normal_map);
@@ -1866,12 +2585,12 @@ impl SmartMaterialLibrary {
                 }
             }
             "gun_metal_edge" | "mask_gun_metal" => {
-                let id1 = layer.add_mask_fill_effect_advanced(ProceduralGenerator::CurvatureWear, curvature_map, ao_map, position_map, world_normal_map);
+                let id1 = layer.add_mask_fill_effect_advanced(ProceduralGenerator::MetalEdgeHighlight, curvature_map, ao_map, position_map, world_normal_map);
                 if let Some(eff) = layer.mask_effects.iter_mut().find(|e| e.id == id1) {
                     if let MaskEffectType::Fill { ref mut scale, ref mut contrast, ref mut balance, .. } = eff.effect_type {
-                        *scale = 24.0;
-                        *contrast = 2.4;
-                        *balance = 0.48;
+                        *scale = 16.0;
+                        *contrast = 2.2;
+                        *balance = 0.50;
                     }
                 }
                 let id2 = layer.add_mask_fill_effect_advanced(ProceduralGenerator::Scratches, curvature_map, ao_map, position_map, world_normal_map);

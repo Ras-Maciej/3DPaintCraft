@@ -131,6 +131,10 @@ pub enum ProceduralGenerator {
     WireFence,
     TornFabricEdge,
     CircularDots,
+    PeelingPaint,
+    RustPits,
+    MetalEdgeHighlight,
+    GroundSplash,
 }
 
 impl ProceduralGenerator {
@@ -157,6 +161,10 @@ impl ProceduralGenerator {
             Self::WireFence => "Wire Fence (Diamond Mesh)",
             Self::TornFabricEdge => "Torn Fabric (Ragged Cutout)",
             Self::CircularDots => "Circular Dots / Holes",
+            Self::PeelingPaint => "Peeling Paint (Chipped Flakes)",
+            Self::RustPits => "Rust Pits & Oxidation Craters",
+            Self::MetalEdgeHighlight => "Metal Edge Highlight (Polished)",
+            Self::GroundSplash => "Ground Dirt & Mud Splash",
         }
     }
 
@@ -182,6 +190,10 @@ impl ProceduralGenerator {
             Self::WireFence,
             Self::TornFabricEdge,
             Self::CircularDots,
+            Self::PeelingPaint,
+            Self::RustPits,
+            Self::MetalEdgeHighlight,
+            Self::GroundSplash,
         ]
     }
 }
@@ -689,58 +701,62 @@ impl Layer {
                         NoiseGenerator::fabric_weave_2d(u * sc, v * sc)
                     }
                     ProceduralGenerator::Scratches => {
-                        let (d1, _) = NoiseGenerator::voronoi_2d(u * sc * 6.0, v * sc * 0.3);
-                        let (d2, _) = NoiseGenerator::voronoi_2d(u * sc * 0.4 + v * sc * 4.0, v * sc * 4.0 - u * sc * 0.4);
-                        let scratch1 = if d1 < 0.08 { 1.0 - d1 / 0.08 } else { 0.0 };
-                        let scratch2 = if d2 < 0.08 { 1.0 - d2 / 0.08 } else { 0.0 };
-                        let fine = NoiseGenerator::fbm_2d(u * sc * 16.0, v * sc * 1.5, 2, 2.0, 0.5);
-                        (scratch1 * 0.6 + scratch2 * 0.4 + fine * 0.15).clamp(0.0, 1.0)
+                        let raw = NoiseGenerator::scratches_2d(u * sc, v * sc);
+                        let fine = NoiseGenerator::fbm_2d(u * sc * 8.0, v * sc * 8.0, 2, 2.0, 0.5) * 0.15;
+                        (raw * 1.25 + fine * raw).clamp(0.0, 1.0)
                     }
                     ProceduralGenerator::CurvatureWear => {
-                        let curv = curvature_map
-                            .map(|cm| cm.sample_bilinear(uv_mesh))
-                            .unwrap_or(0.5);
-                        let ao = ao_map.map(|am| am.sample_bilinear(uv_mesh)).unwrap_or(1.0);
-                        let ao_gate = ((ao - 0.18) * 1.6).clamp(0.0, 1.0);
-
                         let noise = NoiseGenerator::fbm_perlin_2d(u * sc, v * sc, 4, 2.0, 0.5);
                         let (w1, w2) = NoiseGenerator::voronoi_2d(u * sc * 2.5, v * sc * 2.5);
                         let chip = (w2 - w1).clamp(0.0, 1.0);
-                        let ridge = NoiseGenerator::ridged_fbm_2d(u * sc * 3.0, v * sc * 3.0, 3, 2.0, 0.5);
+                        let ridge = NoiseGenerator::ridged_fbm_2d(u * sc * 3.5, v * sc * 3.5, 3, 2.0, 0.5);
 
-                        let raw_edge = if curv > 0.505 {
-                            let t = (curv - 0.505) * 5.0;
-                            t.clamp(0.0, 1.0)
+                        let raw_edge = if let Some(cm) = curvature_map {
+                            let curv = cm.sample_bilinear(uv_mesh);
+                            if curv > 0.505 {
+                                let t = (curv - 0.505) * 6.0;
+                                t.clamp(0.0, 1.0).powf(0.7)
+                            } else {
+                                0.0
+                            }
                         } else {
-                            0.0
+                            let edge_synth = (ridge * 0.7 + chip * 0.3).powf(2.0);
+                            edge_synth * 0.85
                         };
-                        let breakup = (0.25 + 0.45 * noise + 0.3 * chip) * (0.6 + 0.4 * ridge);
-                        (raw_edge * breakup * ao_gate * 2.2).clamp(0.0, 1.0)
+
+                        let ao = ao_map.map(|am| am.sample_bilinear(uv_mesh)).unwrap_or(1.0);
+                        let ao_gate = (ao * 1.3 - 0.15).clamp(0.1, 1.0);
+
+                        let wear_core = (raw_edge * 1.8).clamp(0.0, 1.0);
+                        let wear_fringe = (raw_edge * 2.5 - 0.3).clamp(0.0, 1.0) * (0.35 * noise + 0.45 * chip + 0.20 * ridge);
+                        ((wear_core * 0.65 + wear_fringe * 1.3) * ao_gate).clamp(0.0, 1.0)
                     }
                     ProceduralGenerator::AmbientOcclusion => {
-                        let ao_val = ao_map.map(|am| am.sample_bilinear(uv_mesh)).unwrap_or(1.0);
+                        let ao_val = ao_map.map(|am| am.sample_bilinear(uv_mesh)).unwrap_or(0.85);
                         let curv_val = curvature_map.map(|cm| cm.sample_bilinear(uv_mesh)).unwrap_or(0.5);
-                        let grunge = NoiseGenerator::domain_warp_2d(u * sc * 0.8, v * sc * 0.8);
-                        let splatter = NoiseGenerator::splatter_spots_2d(u * sc * 2.0, v * sc * 2.0);
+                        let grunge = NoiseGenerator::domain_warp_2d(u * sc * 1.2, v * sc * 1.2);
+                        let splatter = NoiseGenerator::splatter_spots_2d(u * sc * 2.5, v * sc * 2.5);
+                        let fine_fbm = NoiseGenerator::fbm_2d(u * sc * 4.0, v * sc * 4.0, 3, 2.0, 0.5);
 
-                        let crevice_ao = (1.0 - ao_val).clamp(0.0, 1.0);
-                        let crevice_curv = if curv_val < 0.49 { (0.49 - curv_val) * 3.5 } else { 0.0 };
-                        let crevice = (crevice_ao * 1.6 + crevice_curv).clamp(0.0, 1.0);
+                        let crevice_ao = (1.0 - ao_val).clamp(0.0, 1.0).powf(0.8);
+                        let crevice_curv = if curv_val < 0.495 { ((0.495 - curv_val) * 4.5).clamp(0.0, 1.0).powf(0.7) } else { 0.0 };
+                        let crevice = (crevice_ao * 1.5 + crevice_curv * 1.2).clamp(0.0, 1.0);
 
-                        let sediment = 0.35 + 0.45 * grunge + 0.2 * splatter;
-                        (crevice * sediment * 1.4).clamp(0.0, 1.0)
+                        let sediment = 0.40 + 0.35 * grunge + 0.15 * splatter + 0.10 * fine_fbm;
+                        (crevice * sediment * 1.6).clamp(0.0, 1.0)
                     }
                     ProceduralGenerator::DirectionalDust => {
                         let norm_y = world_normal_map
                             .map(|nm| nm.sample_bilinear(uv_mesh).y * 2.0 - 1.0)
-                            .unwrap_or(0.8);
+                            .unwrap_or(0.85);
                         let ao = ao_map.map(|am| am.sample_bilinear(uv_mesh)).unwrap_or(1.0);
-                        let billow = NoiseGenerator::billow_2d(u * sc, v * sc, 3, 2.0, 0.5);
-                        let fine_dust = NoiseGenerator::splatter_spots_2d(u * sc * 3.0, v * sc * 3.0);
+                        let billow = NoiseGenerator::billow_2d(u * sc * 1.5, v * sc * 1.5, 3, 2.0, 0.5);
+                        let fine_dust = NoiseGenerator::splatter_spots_2d(u * sc * 4.0, v * sc * 4.0);
+                        let perlin = NoiseGenerator::fbm_perlin_2d(u * sc * 2.0, v * sc * 2.0, 3, 2.0, 0.5);
 
-                        let facing_up = (norm_y + 0.15).clamp(0.0, 1.0);
-                        let pocket_boost = 1.0 + (1.0 - ao) * 0.5;
-                        (facing_up * (0.4 + 0.45 * billow + 0.15 * fine_dust) * pocket_boost).clamp(0.0, 1.0)
+                        let facing_up = (norm_y - 0.1).max(0.0).powf(0.6).clamp(0.0, 1.0);
+                        let pocket_boost = 0.7 + (1.0 - ao) * 0.6;
+                        (facing_up * (0.35 + 0.40 * billow + 0.15 * fine_dust + 0.10 * perlin) * pocket_boost).clamp(0.0, 1.0)
                     }
                     ProceduralGenerator::PositionGradient => {
                         let pos_y = position_map
@@ -749,11 +765,37 @@ impl Layer {
                         pos_y.clamp(0.0, 1.0)
                     }
                     ProceduralGenerator::DrippingLeaks => {
-                        let streak = NoiseGenerator::fbm_2d(u * sc * 8.0, v * sc * 0.4, 4, 2.0, 0.5);
-                        let warp = NoiseGenerator::domain_warp_2d(u * sc * 2.0, v * sc * 0.5);
-                        let (d1, _) = NoiseGenerator::voronoi_2d(u * sc * 10.0 + warp * 0.5, v * sc * 1.0);
-                        let drip = if d1 < 0.20 { (1.0 - d1 / 0.20) * streak } else { 0.0 };
-                        (drip * 1.6).clamp(0.0, 1.0)
+                        let drip = NoiseGenerator::dripping_leaks_2d(u * sc, v * sc);
+                        let ao = ao_map.map(|am| am.sample_bilinear(uv_mesh)).unwrap_or(0.8);
+                        let source_boost = 1.0 + (1.0 - ao) * 0.8;
+                        (drip * source_boost).clamp(0.0, 1.0)
+                    }
+                    ProceduralGenerator::PeelingPaint => {
+                        NoiseGenerator::peeling_paint_2d(u * sc, v * sc)
+                    }
+                    ProceduralGenerator::RustPits => {
+                        let pit = NoiseGenerator::rust_crater_2d(u * sc, v * sc);
+                        let ao = ao_map.map(|am| am.sample_bilinear(uv_mesh)).unwrap_or(0.85);
+                        let crevice_boost = 0.8 + (1.0 - ao) * 0.8;
+                        (pit * crevice_boost).clamp(0.0, 1.0)
+                    }
+                    ProceduralGenerator::MetalEdgeHighlight => {
+                        let curv = curvature_map.map(|cm| cm.sample_bilinear(uv_mesh)).unwrap_or(0.5);
+                        let fine_noise = NoiseGenerator::fbm_perlin_2d(u * sc * 3.0, v * sc * 3.0, 3, 2.0, 0.5);
+                        let edge = if curv > 0.515 {
+                            ((curv - 0.515) * 8.0).clamp(0.0, 1.0).powf(1.4)
+                        } else {
+                            0.0
+                        };
+                        (edge * (0.8 + 0.2 * fine_noise)).clamp(0.0, 1.0)
+                    }
+                    ProceduralGenerator::GroundSplash => {
+                        let pos_y = position_map.map(|pm| pm.sample_bilinear(uv_mesh).y).unwrap_or(v);
+                        let height_gradient = (1.0 - pos_y).clamp(0.0, 1.0).powf(1.8);
+                        let splatter = NoiseGenerator::splatter_spots_2d(u * sc * 2.0, v * sc * 2.0);
+                        let warp = NoiseGenerator::domain_warp_2d(u * sc * 0.8, v * sc * 0.8);
+                        let splash = height_gradient * (0.5 + 0.35 * splatter + 0.15 * warp);
+                        (splash * 1.5).clamp(0.0, 1.0)
                     }
                     ProceduralGenerator::Checkerboard => {
                         let cx = (u * sc).floor() as i32;
@@ -1337,33 +1379,26 @@ impl Layer {
                             (n, n)
                         }
                         ProceduralGenerator::Scratches => {
-                            let (d1, _) = NoiseGenerator::voronoi_2d(ru * self.generator_scale * 6.0, rv * self.generator_scale * 0.3);
-                            let (d2, _) = NoiseGenerator::voronoi_2d(ru * self.generator_scale * 0.4 + rv * self.generator_scale * 4.0, rv * self.generator_scale * 4.0 - ru * self.generator_scale * 0.4);
-                            let scratch1 = if d1 < 0.08 { 1.0 - d1 / 0.08 } else { 0.0 };
-                            let scratch2 = if d2 < 0.08 { 1.0 - d2 / 0.08 } else { 0.0 };
-                            let scratch = (scratch1 * 0.6 + scratch2 * 0.4).clamp(0.0, 1.0);
-                            (1.0 - scratch * 0.75, scratch)
+                            let s = NoiseGenerator::scratches_2d(ru * self.generator_scale, rv * self.generator_scale);
+                            (1.0 - s * 0.75, 0.5 - s * 0.35)
                         }
                         ProceduralGenerator::CurvatureWear => {
-                            let curv = curvature_map
-                                .map(|cm| cm.sample_bilinear(uv_mesh))
-                                .unwrap_or(0.5);
-                            let ao = ao_map.map(|am| am.sample_bilinear(uv_mesh)).unwrap_or(1.0);
-                            let ao_gate = ((ao - 0.18) * 1.6).clamp(0.0, 1.0);
-
                             let noise = NoiseGenerator::fbm_perlin_2d(ru * self.generator_scale, rv * self.generator_scale, 4, 2.0, 0.5);
                             let (w1, w2) = NoiseGenerator::voronoi_2d(ru * self.generator_scale * 2.5, rv * self.generator_scale * 2.5);
                             let chip = (w2 - w1).clamp(0.0, 1.0);
-                            let ridge = NoiseGenerator::ridged_fbm_2d(ru * self.generator_scale * 3.0, rv * self.generator_scale * 3.0, 3, 2.0, 0.5);
+                            let ridge = NoiseGenerator::ridged_fbm_2d(ru * self.generator_scale * 3.5, rv * self.generator_scale * 3.5, 3, 2.0, 0.5);
 
-                            let raw_edge = if curv > 0.505 {
-                                ((curv - 0.505) * 5.0).clamp(0.0, 1.0)
+                            let raw_edge = if let Some(cm) = curvature_map {
+                                let curv = cm.sample_bilinear(uv_mesh);
+                                if curv > 0.505 { ((curv - 0.505) * 6.0).clamp(0.0, 1.0).powf(0.7) } else { 0.0 }
                             } else {
-                                0.0
+                                (ridge * 0.7 + chip * 0.3).powf(2.0) * 0.85
                             };
-                            let breakup = (0.25 + 0.45 * noise + 0.3 * chip) * (0.6 + 0.4 * ridge);
-                            let wear = (raw_edge * breakup * ao_gate * 2.2).clamp(0.0, 1.0);
-                            (1.0 - wear * 0.75, wear)
+
+                            let wear_core = (raw_edge * 1.8).clamp(0.0, 1.0);
+                            let wear_fringe = (raw_edge * 2.5 - 0.3).clamp(0.0, 1.0) * (0.35 * noise + 0.45 * chip + 0.20 * ridge);
+                            let wear = (wear_core * 0.65 + wear_fringe * 1.3).clamp(0.0, 1.0);
+                            (1.0 - wear * 0.75, 0.5 + wear * 0.3)
                         }
                         ProceduralGenerator::PositionGradient => {
                             let pos_y = position_map
@@ -1374,15 +1409,15 @@ impl Layer {
                         ProceduralGenerator::DirectionalDust => {
                             let norm_y = normal_map
                                 .map(|nm| nm.sample_bilinear(uv_mesh).y * 2.0 - 1.0)
-                                .unwrap_or(0.7);
+                                .unwrap_or(0.85);
                             let ao = ao_map.map(|am| am.sample_bilinear(uv_mesh)).unwrap_or(1.0);
-                            let billow = NoiseGenerator::billow_2d(ru * self.generator_scale, rv * self.generator_scale, 3, 2.0, 0.5);
-                            let fine_dust = NoiseGenerator::splatter_spots_2d(ru * self.generator_scale * 3.0, rv * self.generator_scale * 3.0);
+                            let billow = NoiseGenerator::billow_2d(ru * self.generator_scale * 1.5, rv * self.generator_scale * 1.5, 3, 2.0, 0.5);
+                            let fine_dust = NoiseGenerator::splatter_spots_2d(ru * self.generator_scale * 4.0, rv * self.generator_scale * 4.0);
 
-                            let facing_up = (norm_y + 0.15).clamp(0.0, 1.0);
-                            let pocket_boost = 1.0 + (1.0 - ao) * 0.5;
-                            let dust = (facing_up * (0.4 + 0.45 * billow + 0.15 * fine_dust) * pocket_boost).clamp(0.0, 1.0);
-                            (dust, dust * 0.5)
+                            let facing_up = (norm_y - 0.1).max(0.0).powf(0.6).clamp(0.0, 1.0);
+                            let pocket_boost = 0.7 + (1.0 - ao) * 0.6;
+                            let dust = (facing_up * (0.35 + 0.40 * billow + 0.25 * fine_dust) * pocket_boost).clamp(0.0, 1.0);
+                            (1.0 - dust * 0.4, 0.5 + dust * 0.1)
                         }
                         ProceduralGenerator::Checkerboard => {
                             let cx = (ru * self.generator_scale).floor() as i32;
@@ -1402,26 +1437,40 @@ impl Layer {
                             (val, if is_mortar { 0.1 } else { 0.6 })
                         }
                         ProceduralGenerator::AmbientOcclusion => {
-                            let ao_val = ao_map.map(|am| am.sample_bilinear(uv_mesh)).unwrap_or(1.0);
+                            let ao_val = ao_map.map(|am| am.sample_bilinear(uv_mesh)).unwrap_or(0.85);
                             let curv_val = curvature_map.map(|cm| cm.sample_bilinear(uv_mesh)).unwrap_or(0.5);
-                            let grunge = NoiseGenerator::domain_warp_2d(ru * self.generator_scale * 0.8, rv * self.generator_scale * 0.8);
-                            let splatter = NoiseGenerator::splatter_spots_2d(ru * self.generator_scale * 2.0, rv * self.generator_scale * 2.0);
+                            let grunge = NoiseGenerator::domain_warp_2d(ru * self.generator_scale * 1.2, rv * self.generator_scale * 1.2);
+                            let splatter = NoiseGenerator::splatter_spots_2d(ru * self.generator_scale * 2.5, rv * self.generator_scale * 2.5);
 
-                            let crevice_ao = (1.0 - ao_val).clamp(0.0, 1.0);
-                            let crevice_curv = if curv_val < 0.49 { (0.49 - curv_val) * 3.5 } else { 0.0 };
-                            let crevice = (crevice_ao * 1.6 + crevice_curv).clamp(0.0, 1.0);
+                            let crevice_ao = (1.0 - ao_val).clamp(0.0, 1.0).powf(0.8);
+                            let crevice_curv = if curv_val < 0.495 { ((0.495 - curv_val) * 4.5).clamp(0.0, 1.0).powf(0.7) } else { 0.0 };
+                            let crevice = (crevice_ao * 1.5 + crevice_curv * 1.2).clamp(0.0, 1.0);
 
-                            let sediment = 0.35 + 0.45 * grunge + 0.2 * splatter;
-                            let factor = (crevice * sediment * 1.4).clamp(0.0, 1.0);
-                            (1.0 - factor * 0.7, factor)
+                            let sediment = 0.40 + 0.35 * grunge + 0.25 * splatter;
+                            let factor = (crevice * sediment * 1.6).clamp(0.0, 1.0);
+                            (1.0 - factor * 0.7, 0.5 + factor * 0.2)
                         }
                         ProceduralGenerator::DrippingLeaks => {
-                            let streak = NoiseGenerator::fbm_2d(ru * self.generator_scale * 8.0, rv * self.generator_scale * 0.4, 4, 2.0, 0.5);
-                            let warp = NoiseGenerator::domain_warp_2d(ru * self.generator_scale * 2.0, rv * self.generator_scale * 0.5);
-                            let (d1, _) = NoiseGenerator::voronoi_2d(ru * self.generator_scale * 10.0 + warp * 0.5, rv * self.generator_scale * 1.0);
-                            let drip = if d1 < 0.20 { (1.0 - d1 / 0.20) * streak } else { 0.0 };
-                            let factor = (drip * 1.6).clamp(0.0, 1.0);
-                            (1.0 - factor * 0.6, factor)
+                            let drip = NoiseGenerator::dripping_leaks_2d(ru * self.generator_scale, rv * self.generator_scale);
+                            (1.0 - drip * 0.6, 0.5 - drip * 0.1)
+                        }
+                        ProceduralGenerator::PeelingPaint => {
+                            let peel = NoiseGenerator::peeling_paint_2d(ru * self.generator_scale, rv * self.generator_scale);
+                            (1.0 - peel * 0.35, 0.5 + peel * 0.25)
+                        }
+                        ProceduralGenerator::RustPits => {
+                            let pit = NoiseGenerator::rust_crater_2d(ru * self.generator_scale, rv * self.generator_scale);
+                            (1.0 - pit * 0.5, (0.5 - pit * 0.35).clamp(0.0, 1.0))
+                        }
+                        ProceduralGenerator::MetalEdgeHighlight => {
+                            let curv = curvature_map.map(|cm| cm.sample_bilinear(uv_mesh)).unwrap_or(0.5);
+                            let edge = if curv > 0.515 { ((curv - 0.515) * 8.0).clamp(0.0, 1.0).powf(1.4) } else { 0.0 };
+                            (1.0 + edge * 0.3, 0.5 + edge * 0.15)
+                        }
+                        ProceduralGenerator::GroundSplash => {
+                            let pos_y = position_map.map(|pm| pm.sample_bilinear(uv_mesh).y).unwrap_or(rv);
+                            let splash = (1.0 - pos_y).clamp(0.0, 1.0).powf(1.8) * NoiseGenerator::splatter_spots_2d(ru * self.generator_scale, rv * self.generator_scale);
+                            (1.0 - splash * 0.4, 0.5 + splash * 0.2)
                         }
                         ProceduralGenerator::PerforatedMesh => {
                             let scaled_y = rv * self.generator_scale * 1.73205;

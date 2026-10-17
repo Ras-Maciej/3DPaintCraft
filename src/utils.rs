@@ -273,6 +273,79 @@ impl NoiseGenerator {
         let micro = Self::value_noise_2d(x * 32.0, y * 32.0) * 0.15;
         (weave * 0.85 + micro).clamp(0.0, 1.0)
     }
+
+    /// Hairline multi-angle scratches: sharp crisp scratches with random angles and lengths
+    pub fn scratches_2d(x: f32, y: f32) -> f32 {
+        let mut max_scratch = 0.0f32;
+        let angles = [0.38f32, 1.45, 2.62];
+        for (i, &ang) in angles.iter().enumerate() {
+            let cos_a = ang.cos();
+            let sin_a = ang.sin();
+            let rx = x * cos_a - y * sin_a;
+            let ry = x * sin_a + y * cos_a;
+            
+            let (d1, _) = Self::voronoi_2d(rx * 14.0 + (i as f32 * 8.3), ry * 0.5);
+            if d1 < 0.045 {
+                let falloff = 1.0 - (d1 / 0.045);
+                let s = falloff * falloff;
+                if s > max_scratch {
+                    max_scratch = s;
+                }
+            }
+        }
+        max_scratch.clamp(0.0, 1.0)
+    }
+
+    /// Gravity-directed fluid leaks with teardrop heads and tapered flow trails
+    pub fn dripping_leaks_2d(x: f32, y: f32) -> f32 {
+        let warp = Self::domain_warp_2d(x * 2.0, y * 0.4) * 0.2;
+        let wx = x + warp;
+        let cell_x = (wx * 10.0).floor();
+        let fx = (wx * 10.0) - cell_x - 0.5;
+        
+        let streak_h = Self::hash_2d(cell_x as i32, 137);
+        if streak_h > 0.4 {
+            let width = 0.12 * (streak_h - 0.4) * 2.2;
+            if fx.abs() < width {
+                let falloff = 1.0 - (fx.abs() / width);
+                let streak_noise = Self::fbm_2d(cell_x * 7.1, y * 0.8, 3, 2.0, 0.5);
+                let vertical_taper = (y * 0.9 + streak_h * 4.0).fract();
+                let drip = falloff * (0.5 + 0.5 * vertical_taper) * streak_noise;
+                return drip.clamp(0.0, 1.0);
+            }
+        }
+        0.0
+    }
+
+    /// Organic peeling and flaking paint blisters with jagged perimeter lines
+    pub fn peeling_paint_2d(x: f32, y: f32) -> f32 {
+        let (d1, d2) = Self::voronoi_2d(x * 2.5, y * 2.5);
+        let cell_border = (d2 - d1).clamp(0.0, 1.0);
+        let noise = Self::fbm_perlin_2d(x * 4.0, y * 4.0, 3, 2.0, 0.5);
+        let ridge = Self::ridged_fbm_2d(x * 6.0, y * 6.0, 3, 2.0, 0.5);
+        
+        let curl = if cell_border < 0.25 {
+            (1.0 - cell_border / 0.25).powf(1.8)
+        } else {
+            0.0
+        };
+        (curl * (0.6 + 0.4 * noise) + ridge * 0.15).clamp(0.0, 1.0)
+    }
+
+    /// Clustered pitted oxidation craters for heavy rust and corrosion
+    pub fn rust_crater_2d(x: f32, y: f32) -> f32 {
+        let (d1, _) = Self::voronoi_2d(x * 6.0, y * 6.0);
+        let spots = Self::splatter_spots_2d(x * 4.0, y * 4.0);
+        let fbm = Self::fbm_2d(x * 8.0, y * 8.0, 4, 2.0, 0.5);
+        
+        let pit = if d1 < 0.22 {
+            let p = 1.0 - (d1 / 0.22);
+            p * p
+        } else {
+            0.0
+        };
+        (pit * 0.65 + spots * 0.35 + fbm * 0.15).clamp(0.0, 1.0)
+    }
 }
 
 /// Convert sRGB [0.0, 1.0] to Linear RGB [0.0, 1.0]
