@@ -536,6 +536,36 @@ impl Mesh {
         None
     }
 
+    /// Convert a 2D UV coordinate to a 3D position and surface normal on the mesh
+    pub fn uv_to_3d_point(&self, uv: Vec2) -> Option<(Vec3, Vec3)> {
+        let tri_count = self.indices.len() / 3;
+        for t in 0..tri_count {
+            let i0 = self.indices[t * 3] as usize;
+            let i1 = self.indices[t * 3 + 1] as usize;
+            let i2 = self.indices[t * 3 + 2] as usize;
+            let v0 = &self.vertices[i0];
+            let v1 = &self.vertices[i1];
+            let v2 = &self.vertices[i2];
+            let uv0 = v0.uv;
+            let uv1 = v1.uv;
+            let uv2 = v2.uv;
+            let denom = (uv1.y - uv2.y) * (uv0.x - uv2.x) + (uv2.x - uv1.x) * (uv0.y - uv2.y);
+            if denom.abs() < 1e-7 {
+                continue;
+            }
+            let inv = 1.0 / denom;
+            let w0 = ((uv1.y - uv2.y) * (uv.x - uv2.x) + (uv2.x - uv1.x) * (uv.y - uv2.y)) * inv;
+            let w1 = ((uv2.y - uv0.y) * (uv.x - uv2.x) + (uv0.x - uv2.x) * (uv.y - uv2.y)) * inv;
+            let w2 = 1.0 - w0 - w1;
+            if w0 >= -1e-4 && w1 >= -1e-4 && w2 >= -1e-4 {
+                let p = v0.position * w0 + v1.position * w1 + v2.position * w2;
+                let n = (v0.normal * w0 + v1.normal * w1 + v2.normal * w2).normalize_or_zero();
+                return Some((p, n));
+            }
+        }
+        None
+    }
+
     /// Flood fill all triangles connected within the same UV island (no crossing UV seams)
     pub fn get_connected_uv_island(&self, start_tri: usize) -> Vec<usize> {
         let tri_count = self.indices.len() / 3;
@@ -1987,6 +2017,30 @@ f 1/1/1 3/3/1 4/4/1
         mesh.submeshes[0].visible = false;
         assert!(!mesh.is_triangle_visible(0));
         assert!(mesh.is_triangle_visible(1));
+    }
+
+    #[test]
+    fn test_uv_to_3d_point() {
+        let obj_content = r#"
+v -1.0 -1.0 0.0
+v 1.0 -1.0 0.0
+v 1.0 1.0 0.0
+v -1.0 1.0 0.0
+vt 0.0 0.0
+vt 1.0 0.0
+vt 1.0 1.0
+vt 0.0 1.0
+vn 0.0 0.0 1.0
+f 1/1/1 2/2/1 3/3/1
+f 1/1/1 3/3/1 4/4/1
+"#;
+        let mesh = Mesh::from_obj_str(obj_content, "UvLookupTest").expect("Failed to parse OBJ");
+        let pt = mesh.uv_to_3d_point(glam::Vec2::new(0.5, 0.5));
+        assert!(pt.is_some(), "Expected UV (0.5, 0.5) to hit mesh quad");
+        let (pos, norm) = pt.unwrap();
+        assert!(pos.x.abs() < 0.1, "Expected center x ~ 0.0, got {}", pos.x);
+        assert!(pos.y.abs() < 0.1, "Expected center y ~ 0.0, got {}", pos.y);
+        assert!((norm.z - 1.0).abs() < 1e-3, "Expected normal pointing +Z, got {}", norm.z);
     }
 }
 

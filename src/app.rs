@@ -12,6 +12,8 @@ use crate::renderer::{Camera, ViewportChannelMode, ViewportRenderer};
 use eframe::egui::{self, Color32, ColorImage, TextureHandle, TextureOptions, Vec2};
 use glam::Vec4;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::sync::mpsc::{Receiver, channel};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ViewLayout {
@@ -20,11 +22,29 @@ pub enum ViewLayout {
     SplitDualView,
 }
 
-
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum RightPanelTab {
     Layers,
     MeshMaps,
+}
+
+#[derive(Clone, Debug)]
+pub struct BakeProgressState {
+    pub progress: f32,
+    pub step_name: String,
+    pub is_done: bool,
+    pub cancelled: bool,
+    pub elapsed_secs: f32,
+}
+
+pub struct BakeResultPayload {
+    pub tangent_normal: Option<crate::channel::RgbaBuffer>,
+    pub world_space_normal: Option<crate::channel::RgbaBuffer>,
+    pub ao: Option<crate::channel::ScalarBuffer>,
+    pub curvature: Option<crate::channel::ScalarBuffer>,
+    pub position: Option<crate::channel::RgbaBuffer>,
+    pub thickness: Option<crate::channel::ScalarBuffer>,
+    pub elapsed_secs: f32,
 }
 
 pub struct PaintcraftApp {
@@ -143,6 +163,21 @@ pub struct PaintcraftApp {
 
     // Real-Time Hardware Performance & Diagnostics Metrics
     pub perf_metrics: PerformanceMetrics,
+
+    // Synchronized 2D/3D Viewport Hover State
+    pub last_hovered_hit_3d: Option<(glam::Vec3, glam::Vec3, glam::Vec2)>,
+    pub last_hovered_uv_2d: Option<glam::Vec2>,
+
+    // Dedicated Baking Screen & Background Worker State
+    pub bake_worker_state: Option<Arc<Mutex<BakeProgressState>>>,
+    pub bake_receiver: Option<Receiver<BakeResultPayload>>,
+    pub bake_selected_texture_sets: Vec<bool>,
+    pub bake_preview_normal: Option<TextureHandle>,
+    pub bake_preview_ao: Option<TextureHandle>,
+    pub bake_preview_curv: Option<TextureHandle>,
+    pub bake_preview_pos: Option<TextureHandle>,
+    pub bake_preview_thick: Option<TextureHandle>,
+    pub bake_success_message: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -355,8 +390,8 @@ impl PaintcraftApp {
             bake_opt_curvature: true,
             bake_opt_position: true,
             bake_opt_thickness: true,
-            bake_denoise: true,
-            bake_denoise_iterations: 2,
+            bake_denoise: false,
+            bake_denoise_iterations: 1,
             bg_blur: 0.0,
             bg_opacity: 1.0,
             right_panel_tab: RightPanelTab::Layers,
@@ -379,6 +414,17 @@ impl PaintcraftApp {
                 is_cpu_fallback,
                 ..Default::default()
             },
+            last_hovered_hit_3d: None,
+            last_hovered_uv_2d: None,
+            bake_worker_state: None,
+            bake_receiver: None,
+            bake_selected_texture_sets: Vec::new(),
+            bake_preview_normal: None,
+            bake_preview_ao: None,
+            bake_preview_curv: None,
+            bake_preview_pos: None,
+            bake_preview_thick: None,
+            bake_success_message: None,
         }
     }
 
@@ -578,6 +624,45 @@ impl PaintcraftApp {
         }
     }
 
+    /// Create small preview thumbnail texture for baked RGBA maps
+    pub fn create_rgba_thumbnail(ctx: &egui::Context, id: &str, buf: &crate::channel::RgbaBuffer, thumb_w: u32, thumb_h: u32) -> TextureHandle {
+        let mut pixels = vec![0u8; (thumb_w * thumb_h * 4) as usize];
+        for y in 0..thumb_h {
+            let v = y as f32 / thumb_h as f32;
+            for x in 0..thumb_w {
+                let u = x as f32 / thumb_w as f32;
+                let col = buf.sample_bilinear(glam::Vec2::new(u, v));
+                let idx = ((y * thumb_w + x) * 4) as usize;
+                pixels[idx] = (col.x.clamp(0.0, 1.0) * 255.0) as u8;
+                pixels[idx + 1] = (col.y.clamp(0.0, 1.0) * 255.0) as u8;
+                pixels[idx + 2] = (col.z.clamp(0.0, 1.0) * 255.0) as u8;
+                pixels[idx + 3] = 255;
+            }
+        }
+        let img = ColorImage::from_rgba_unmultiplied([thumb_w as usize, thumb_h as usize], &pixels);
+        ctx.load_texture(id, img, TextureOptions::LINEAR)
+    }
+
+    /// Create small preview thumbnail texture for baked scalar maps
+    pub fn create_scalar_thumbnail(ctx: &egui::Context, id: &str, buf: &crate::channel::ScalarBuffer, thumb_w: u32, thumb_h: u32) -> TextureHandle {
+        let mut pixels = vec![0u8; (thumb_w * thumb_h * 4) as usize];
+        for y in 0..thumb_h {
+            let v = y as f32 / thumb_h as f32;
+            for x in 0..thumb_w {
+                let u = x as f32 / thumb_w as f32;
+                let val = buf.sample_bilinear(glam::Vec2::new(u, v));
+                let byte_val = (val.clamp(0.0, 1.0) * 255.0) as u8;
+                let idx = ((y * thumb_w + x) * 4) as usize;
+                pixels[idx] = byte_val;
+                pixels[idx + 1] = byte_val;
+                pixels[idx + 2] = byte_val;
+                pixels[idx + 3] = 255;
+            }
+        }
+        let img = ColorImage::from_rgba_unmultiplied([thumb_w as usize, thumb_h as usize], &pixels);
+        ctx.load_texture(id, img, TextureOptions::LINEAR)
+    }
+
     /// Cycle through material channels (Substance standard shortcut 'C' / 'Shift+C')
     pub fn cycle_material_channel(&mut self, forward: bool) {
         let order = [
@@ -742,6 +827,51 @@ impl eframe::App for PaintcraftApp {
         if !self.updater.auto_checked_startup {
             self.updater.auto_checked_startup = true;
             self.updater.check_for_updates(false);
+        }
+
+        // --- POLL BACKGROUND BAKE WORKER ---
+        if let Some(rx) = &self.bake_receiver {
+            if let Ok(res) = rx.try_recv() {
+                if let Some(wn) = res.tangent_normal {
+                    self.bake_preview_normal = Some(Self::create_rgba_thumbnail(ctx, "prev_wn", &wn, 64, 64));
+                    self.project.world_normal_map = Some(wn);
+                }
+                if let Some(wsn) = res.world_space_normal {
+                    self.project.world_space_normal_map = Some(wsn);
+                }
+                if let Some(ao) = res.ao {
+                    self.bake_preview_ao = Some(Self::create_scalar_thumbnail(ctx, "prev_ao", &ao, 64, 64));
+                    self.project.ao_map = Some(ao);
+                }
+                if let Some(curv) = res.curvature {
+                    self.bake_preview_curv = Some(Self::create_scalar_thumbnail(ctx, "prev_curv", &curv, 64, 64));
+                    self.project.curvature_map = Some(curv);
+                }
+                if let Some(pos) = res.position {
+                    self.bake_preview_pos = Some(Self::create_rgba_thumbnail(ctx, "prev_pos", &pos, 64, 64));
+                    self.project.position_map = Some(pos);
+                }
+                if let Some(th) = res.thickness {
+                    self.bake_preview_thick = Some(Self::create_scalar_thumbnail(ctx, "prev_th", &th, 64, 64));
+                    self.project.thickness_map = Some(th);
+                }
+
+                self.project.gpu_mesh_maps_sync_needed = true;
+                for layer in &mut self.project.layers {
+                    layer.evaluate_fill(self.project.curvature_map.as_ref());
+                }
+                self.project.rebuild_composite();
+                self.update_uv_texture(ctx);
+                if let Some(wgpu) = &mut self.wgpu_viewport {
+                    wgpu.sync_mesh_maps(&self.project);
+                    wgpu.sync_textures(&mut self.project);
+                }
+                self.bake_success_message = Some(format!("Baking completed successfully in {:.2}s!", res.elapsed_secs));
+                self.status_message = format!("Mesh maps baked in {:.2}s", res.elapsed_secs);
+                self.bake_receiver = None;
+            } else if self.bake_worker_state.as_ref().map(|s| !s.lock().unwrap().is_done).unwrap_or(false) {
+                ctx.request_repaint();
+            }
         }
 
         // --- GLOBAL KEYBOARD SHORTCUTS ---
@@ -3385,138 +3515,8 @@ impl eframe::App for PaintcraftApp {
                 });
         }
 
-        // --- BAKING MODAL (Substance 3D Painter Style) ---
-        if self.show_bake_modal {
-            let mut close_modal = false;
-            egui::Window::new("Bake Mesh Maps")
-                .collapsible(false)
-                .resizable(false)
-                .default_width(600.0)
-                .show(ctx, |ui| {
-                    ui.horizontal(|ui| {
-                        // Left Panel: Map list
-                        ui.vertical(|ui| {
-                            ui.set_width(200.0);
-                            ui.heading("Texture Maps");
-                            ui.checkbox(&mut self.bake_opt_tangent_normal, "Normal (Tangent Space)");
-                            ui.checkbox(&mut self.bake_opt_world_normal, "World Space Normal");
-                            ui.checkbox(&mut self.bake_opt_ao, "Ambient Occlusion");
-                            ui.checkbox(&mut self.bake_opt_curvature, "Curvature");
-                            ui.checkbox(&mut self.bake_opt_position, "Position (WPO)");
-                            ui.checkbox(&mut self.bake_opt_thickness, "Thickness");
-                        });
-                        
-                        ui.separator();
-                        
-                        // Right Panel: Settings
-                        ui.vertical(|ui| {
-                            ui.heading("Common Parameters");
-                            ui.horizontal(|ui| {
-                                ui.label("Output Size:");
-                                egui::ComboBox::from_id_source("bake_size")
-                                    .selected_text(format!("{} x {}", self.bake_res, self.bake_res))
-                                    .show_ui(ui, |ui| {
-                                        ui.selectable_value(&mut self.bake_res, 512, "512 x 512");
-                                        ui.selectable_value(&mut self.bake_res, 1024, "1024 x 1024");
-                                        ui.selectable_value(&mut self.bake_res, 2048, "2048 x 2048");
-                                        ui.selectable_value(&mut self.bake_res, 4096, "4096 x 4096");
-                                    });
-                            });
-                            ui.horizontal(|ui| {
-                                ui.label("Dilation Width:");
-                                let mut dilation = 32.0;
-                                ui.add(egui::Slider::new(&mut dilation, 0.0..=128.0));
-                            });
-
-                            ui.separator();
-                            ui.heading("High Definition Meshes");
-                            ui.horizontal(|ui| {
-                                ui.text_edit_singleline(&mut self.bake_highpoly_path);
-                                if ui.button("Browse...").clicked() {
-                                    if let Some(path) = rfd::FileDialog::new().add_filter("3D Models (OBJ, glTF, GLB)", &["obj", "gltf", "glb"]).pick_file() {
-                                        self.bake_highpoly_path = path.to_string_lossy().to_string();
-                                        if let Ok(mesh) = crate::mesh::Mesh::load_file(&path) {
-                                            self.project.high_poly_mesh = Some(mesh);
-                                            self.status_message = format!("Loaded High-Poly Mesh: {:?}", path.file_name().unwrap_or_default());
-                                        } else {
-                                            self.status_message = "Failed to load High-Poly mesh".to_string();
-                                        }
-                                    }
-                                }
-                                if ui.button("Load").clicked() && !self.bake_highpoly_path.trim().is_empty() {
-                                    let p = std::path::Path::new(&self.bake_highpoly_path);
-                                    if let Ok(mesh) = crate::mesh::Mesh::load_file(p) {
-                                        self.project.high_poly_mesh = Some(mesh);
-                                        self.status_message = format!("Loaded High-Poly Mesh: {:?}", p.file_name().unwrap_or_default());
-                                    } else {
-                                        self.status_message = "Failed to load High-Poly mesh from path".to_string();
-                                    }
-                                }
-                                if self.project.high_poly_mesh.is_some() {
-                                    if ui.button("Clear").clicked() {
-                                        self.project.high_poly_mesh = None;
-                                        self.bake_highpoly_path.clear();
-                                    }
-                                }
-                            });
-                            if let Some(ref hp) = self.project.high_poly_mesh {
-                                ui.label(format!("Loaded: {} ({} tris)", hp.name, hp.indices.len() / 3));
-                            } else {
-                                ui.label("No High-Poly mesh loaded (uses low-poly base).");
-                            }
-                            
-                            ui.separator();
-                            ui.heading("Parameters");
-                            ui.horizontal(|ui| {
-                                ui.label("Max Frontal Distance:");
-                                ui.add(egui::Slider::new(&mut self.bake_frontal, 0.0..=1.0));
-                            });
-                            ui.horizontal(|ui| {
-                                ui.label("Max Rear Distance:");
-                                ui.add(egui::Slider::new(&mut self.bake_rear, 0.0..=1.0));
-                            });
-                            ui.checkbox(&mut true, "Antialiasing (Subsampling 4x4)");
-                            ui.separator();
-                            ui.checkbox(&mut self.bake_denoise, "Denoise Mesh Maps (Bilateral Edge-Preserving)");
-                            if self.bake_denoise {
-                                ui.horizontal(|ui| {
-                                    ui.label("Denoise Passes:");
-                                    ui.add(egui::Slider::new(&mut self.bake_denoise_iterations, 1..=4));
-                                });
-                            }
-                            ui.label(egui::RichText::new("Multi-pass normal-guided bilateral filtering removes ray-marched Monte Carlo noise on AO, Curvature, and Thickness while keeping geometry bevels sharp.").small().color(Color32::from_rgb(160, 165, 175)));
-                        });
-                    });
-                    
-                    ui.separator();
-                    ui.horizontal(|ui| {
-                        if ui.button("Bake selected textures").clicked() {
-                            self.project.bake_mesh_maps_advanced_denoised(
-                                self.bake_res,
-                                self.bake_frontal,
-                                self.bake_rear,
-                                self.bake_opt_tangent_normal,
-                                self.bake_opt_world_normal,
-                                self.bake_opt_ao,
-                                self.bake_opt_curvature,
-                                self.bake_opt_position,
-                                self.bake_opt_thickness,
-                                self.bake_denoise,
-                                self.bake_denoise_iterations,
-                            );
-                            self.project.rebuild_composite();
-                            self.status_message = "Mesh maps baked and denoised successfully!".to_string();
-                            close_modal = true;
-                        }
-                        if ui.button("Cancel").clicked() {
-                            close_modal = true;
-                        }
-                    });
-                });
-            if close_modal {
-                self.show_bake_modal = false;
-            }
-        }
+        // --- DEDICATED BAKING SCREEN (Substance 3D Painter Style) ---
+        self.render_dedicated_baking_screen_ui(ctx);
 
         // --- PROCEDURAL FILTERS MODAL (Substance Adjustments Stack) ---
         if self.show_filter_modal {
@@ -4727,6 +4727,11 @@ impl PaintcraftApp {
                                         }
                                         layer.mark_dirty_full();
                                         self.project.rebuild_composite();
+                                        self.update_uv_texture(ctx);
+                                        if let Some(wgpu) = &mut self.wgpu_viewport {
+                                            wgpu.sync_textures(&mut self.project);
+                                        }
+                                        ctx.request_repaint();
                                         self.status_message = format!("Polygon Fill ({}) filled {} triangles on mask", mode.name(), tris.len());
                                     } else {
                                         self.status_message = "Active layer does not have a mask. Add a mask to use Polygon Fill on mask.".to_string();
@@ -4767,6 +4772,11 @@ impl PaintcraftApp {
                                         layer.update_normal_from_height(1.0);
                                         layer.mark_dirty_full();
                                         self.project.rebuild_composite();
+                                        self.update_uv_texture(ctx);
+                                        if let Some(wgpu) = &mut self.wgpu_viewport {
+                                            wgpu.sync_textures(&mut self.project);
+                                        }
+                                        ctx.request_repaint();
                                         self.status_message = format!("Polygon Fill ({}) filled {} triangles with material", mode.name(), tris.len());
                                     } else {
                                         self.status_message = "Cannot fill material on Fill layer. Switch target to Mask or add a Paint layer.".to_string();
@@ -4841,7 +4851,9 @@ impl PaintcraftApp {
                                     }
                                     self.project.is_dirty = true;
                                     self.last_painted_uv = Some(hit.uv);
+                                    self.last_hovered_hit_3d = Some((hit.point, hit.normal, hit.uv));
                                     self.status_message = format!("3D Projection Painting at ({:.2}, {:.2}, {:.2})", hit.point.x, hit.point.y, hit.point.z);
+                                    ctx.request_repaint();
                                 }
                             }
                         }
@@ -4947,8 +4959,24 @@ impl PaintcraftApp {
 
         // --- INTERACTIVE BRUSH CURSOR, LAZY LEASH & 3D SYMMETRY GHOST CURSORS ---
         if response.hovered() && !input.modifiers.alt {
+            ctx.request_repaint();
             if let Some(mouse_pos) = input.pointer.hover_pos() {
                 let brush_rad = self.brush_engine.settings.radius;
+
+                let c_pos = if self.brush_engine.settings.lazy_mouse_enabled {
+                    self.brush_engine.lazy_screen_pos.map(|p| egui::pos2(p[0], p[1])).unwrap_or(mouse_pos)
+                } else {
+                    mouse_pos
+                };
+                let local_x = c_pos.x - rect.min.x;
+                let local_y = c_pos.y - rect.min.y;
+                let ray = self.camera.screen_to_ray(local_x, local_y, vp_w, vp_h);
+                let hit_opt = self.project.mesh.raycast(&ray);
+                if let Some(hit) = &hit_opt {
+                    self.last_hovered_hit_3d = Some((hit.point, hit.normal, hit.uv));
+                } else {
+                    self.last_hovered_hit_3d = None;
+                }
 
                 if self.brush_engine.settings.lazy_mouse_enabled {
                     if let Some(l_pos) = self.brush_engine.lazy_screen_pos {
@@ -4990,16 +5018,7 @@ impl PaintcraftApp {
 
                 // Mirrored ghost cursors (Electric Blue)
                 if sym_x || sym_y || sym_z {
-                    let c_pos = if self.brush_engine.settings.lazy_mouse_enabled {
-                        self.brush_engine.lazy_screen_pos.map(|p| egui::pos2(p[0], p[1])).unwrap_or(mouse_pos)
-                    } else {
-                        mouse_pos
-                    };
-                    let local_x = c_pos.x - rect.min.x;
-                    let local_y = c_pos.y - rect.min.y;
-                    let ray = self.camera.screen_to_ray(local_x, local_y, vp_w, vp_h);
-
-                    if let Some(hit) = self.project.mesh.raycast(&ray) {
+                    if let Some(hit) = &hit_opt {
                         let sym_points = self.brush_engine.get_symmetry_points(hit.point, hit.normal);
                         for (sym_p, _) in sym_points.iter().skip(1) {
                             if let Some(screen_p) = self.camera.world_to_screen(*sym_p, vp_w, vp_h) {
@@ -5015,6 +5034,31 @@ impl PaintcraftApp {
                                     egui::Color32::from_rgba_unmultiplied(60, 180, 255, 255),
                                 );
                             }
+                        }
+                    }
+                }
+            }
+        } else {
+            self.last_hovered_hit_3d = None;
+        }
+
+        // Synchronized 2D-to-3D cross-viewport cursor indicator
+        if !response.hovered() {
+            if let Some(uv) = self.last_hovered_uv_2d {
+                if let Some((pos_3d, _norm_3d)) = self.project.mesh.uv_to_3d_point(uv) {
+                    if let Some(screen_p) = self.camera.world_to_screen(pos_3d, vp_w, vp_h) {
+                        let p = rect.min + egui::vec2(screen_p.x, screen_p.y);
+                        if rect.contains(p) {
+                            ui.painter().circle_stroke(
+                                p,
+                                7.0,
+                                egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(0, 220, 255)),
+                            );
+                            ui.painter().circle_filled(
+                                p,
+                                2.0,
+                                egui::Color32::from_rgb(0, 220, 255),
+                            );
                         }
                     }
                 }
@@ -5065,7 +5109,7 @@ impl PaintcraftApp {
 
     /// Render 2D UV Canvas Viewport in egui panel
     fn render_2d_uv_viewport_ui(&mut self, ui: &mut egui::Ui, size: Vec2, ctx: &egui::Context) {
-        if (!self.is_stroke_active && self.project.is_dirty) || self.uv_canvas_texture.is_none() {
+        if self.project.is_dirty || self.uv_canvas_texture.is_none() {
             self.project.composite_textures.composite_layers(&self.project.layers);
             self.update_uv_texture(ctx);
             self.project.is_dirty = false;
@@ -5241,6 +5285,11 @@ impl PaintcraftApp {
                                             }
                                             layer.mark_dirty_full();
                                             self.project.rebuild_composite();
+                                            self.update_uv_texture(ctx);
+                                            if let Some(wgpu) = &mut self.wgpu_viewport {
+                                                wgpu.sync_textures(&mut self.project);
+                                            }
+                                            ctx.request_repaint();
                                             self.status_message = format!("2D Polygon Fill ({}) filled {} triangles on mask", mode.name(), tris.len());
                                         } else {
                                             self.status_message = "Active layer does not have a mask. Add a mask to use Polygon Fill on mask.".to_string();
@@ -5281,6 +5330,11 @@ impl PaintcraftApp {
                                             layer.update_normal_from_height(1.0);
                                             layer.mark_dirty_full();
                                             self.project.rebuild_composite();
+                                            self.update_uv_texture(ctx);
+                                            if let Some(wgpu) = &mut self.wgpu_viewport {
+                                                wgpu.sync_textures(&mut self.project);
+                                            }
+                                            ctx.request_repaint();
                                             self.status_message = format!("2D Polygon Fill ({}) filled {} triangles with material", mode.name(), tris.len());
                                         } else {
                                             self.status_message = "Cannot fill material on Fill layer. Switch target to Mask or add a Paint layer.".to_string();
@@ -5313,10 +5367,17 @@ impl PaintcraftApp {
                                 self.perf_metrics.paint_stroke_ms = t_stroke.elapsed().as_secs_f32() * 1000.0;
                                 self.brush_engine.settings.radius = orig_rad;
                                 self.brush_engine.settings.flow = orig_flow;
-                                self.project.gpu_sync_needed = true;
-                                self.project.is_dirty = true;
+                                self.project.composite_textures.composite_layers(&self.project.layers);
+                                self.update_uv_texture(ctx);
+                                if let Some(wgpu) = &mut self.wgpu_viewport {
+                                    wgpu.sync_textures(&mut self.project);
+                                }
+                                self.project.gpu_sync_needed = false;
+                                self.project.is_dirty = false;
                                 self.last_painted_uv = Some(glam::Vec2::new(u, v));
+                                self.last_hovered_uv_2d = Some(glam::Vec2::new(u, v));
                                 self.status_message = format!("2D UV Painting at ({:.3}, {:.3})", u, v);
+                                ctx.request_repaint();
                             }
                         }
                     }
@@ -5344,6 +5405,10 @@ impl PaintcraftApp {
             if response.hovered() && !is_panning {
                 ctx.request_repaint();
                 if let Some(mouse_pos) = ui.input(|i| i.pointer.hover_pos()) {
+                    let u = ((mouse_pos.x - canvas_rect.min.x) / canvas_rect.width()).clamp(0.0, 1.0);
+                    let v = ((mouse_pos.y - canvas_rect.min.y) / canvas_rect.height()).clamp(0.0, 1.0);
+                    self.last_hovered_uv_2d = Some(glam::Vec2::new(u, v));
+
                     let screen_rad = (self.brush_engine.settings.radius / self.project.texture_width as f32 * canvas_rect.width()).max(2.0);
 
                     // Primary brush ring
@@ -5360,8 +5425,6 @@ impl PaintcraftApp {
 
                     // Mirrored symmetry ghost cursors in 2D
                     if self.brush_engine.settings.symmetry_x || self.brush_engine.settings.symmetry_y {
-                        let u = (mouse_pos.x - canvas_rect.min.x) / canvas_rect.width();
-                        let v = (mouse_pos.y - canvas_rect.min.y) / canvas_rect.height();
                         let sym_stroke = egui::Stroke::new(1.2_f32, egui::Color32::from_rgba_unmultiplied(60, 180, 255, 220));
 
                         if self.brush_engine.settings.symmetry_x {
@@ -5374,6 +5437,29 @@ impl PaintcraftApp {
                             ui.painter().circle_stroke(sym_pos, screen_rad, sym_stroke);
                             ui.painter().circle_filled(sym_pos, 1.5, egui::Color32::from_rgba_unmultiplied(60, 180, 255, 255));
                         }
+                    }
+                }
+            } else {
+                self.last_hovered_uv_2d = None;
+            }
+
+            // Synchronized 3D-to-2D cross-viewport cursor indicator
+            if !response.hovered() {
+                if let Some((_pos_3d, _norm_3d, uv)) = self.last_hovered_hit_3d {
+                    let screen_x = canvas_rect.min.x + uv.x * canvas_rect.width();
+                    let screen_y = canvas_rect.min.y + uv.y * canvas_rect.height();
+                    let p = egui::pos2(screen_x, screen_y);
+                    if canvas_rect.contains(p) {
+                        ui.painter().circle_stroke(
+                            p,
+                            7.0,
+                            egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(0, 220, 255)),
+                        );
+                        ui.painter().circle_filled(
+                            p,
+                            2.0,
+                            egui::Color32::from_rgb(0, 220, 255),
+                        );
                     }
                 }
             }
@@ -6196,4 +6282,476 @@ pub(crate) fn draw_hdri_thumbnail(painter: &egui::Painter, rect: egui::Rect, id:
         painter.circle_filled(center - egui::vec2(radius * 0.3, radius * 0.3), radius * 0.3, egui::Color32::WHITE);
     }
 }
+
+impl PaintcraftApp {
+    /// Launch background multi-threaded baking pipeline with real-time progress reporting
+    pub fn start_background_bake(&mut self) {
+        if self.bake_worker_state.as_ref().map(|s| !s.lock().unwrap().is_done).unwrap_or(false) {
+            return;
+        }
+
+        let res = self.bake_res;
+        let frontal = self.bake_frontal;
+        let rear = self.bake_rear;
+        let bake_tangent_normal = self.bake_opt_tangent_normal;
+        let bake_ws_normal = self.bake_opt_world_normal;
+        let bake_ao = self.bake_opt_ao;
+        let bake_curvature = self.bake_opt_curvature;
+        let bake_position = self.bake_opt_position;
+        let bake_thickness = self.bake_opt_thickness;
+        let denoise = self.bake_denoise;
+
+        let mesh = self.project.mesh.clone();
+        let high_poly = self.project.high_poly_mesh.clone();
+
+        let progress_state = Arc::new(Mutex::new(BakeProgressState {
+            progress: 0.0,
+            step_name: "Initializing Baker...".to_string(),
+            is_done: false,
+            cancelled: false,
+            elapsed_secs: 0.0,
+        }));
+
+        let state_clone = Arc::clone(&progress_state);
+        let (tx, rx) = channel();
+
+        self.bake_worker_state = Some(progress_state);
+        self.bake_receiver = Some(rx);
+        self.bake_success_message = None;
+
+        std::thread::spawn(move || {
+            let start = std::time::Instant::now();
+            let mut result = BakeResultPayload {
+                tangent_normal: None,
+                world_space_normal: None,
+                ao: None,
+                curvature: None,
+                position: None,
+                thickness: None,
+                elapsed_secs: 0.0,
+            };
+
+            let total_tasks = (bake_tangent_normal as usize)
+                + (bake_ws_normal as usize)
+                + (bake_ao as usize)
+                + (bake_curvature as usize)
+                + (bake_position as usize)
+                + (bake_thickness as usize);
+            let mut completed_tasks = 0;
+
+            if bake_tangent_normal {
+                if state_clone.lock().unwrap().cancelled { return; }
+                {
+                    let mut st = state_clone.lock().unwrap();
+                    st.step_name = format!("[{}/{}] Baking Tangent Space Normal Map...", completed_tasks + 1, total_tasks);
+                    st.progress = (completed_tasks as f32) / (total_tasks as f32).max(1.0);
+                }
+                result.tangent_normal = Some(crate::baker::Baker::bake_tangent_normals(&mesh, high_poly.as_ref(), frontal, rear, res, res));
+                completed_tasks += 1;
+            }
+
+            if bake_ws_normal {
+                if state_clone.lock().unwrap().cancelled { return; }
+                {
+                    let mut st = state_clone.lock().unwrap();
+                    st.step_name = format!("[{}/{}] Baking World Space Normal Map...", completed_tasks + 1, total_tasks);
+                    st.progress = (completed_tasks as f32) / (total_tasks as f32).max(1.0);
+                }
+                result.world_space_normal = Some(crate::baker::Baker::bake_world_space_normal(&mesh, res, res));
+                completed_tasks += 1;
+            }
+
+            if bake_ao {
+                if state_clone.lock().unwrap().cancelled { return; }
+                {
+                    let mut st = state_clone.lock().unwrap();
+                    st.step_name = format!("[{}/{}] Baking Ambient Occlusion (Raycasting)...", completed_tasks + 1, total_tasks);
+                    st.progress = (completed_tasks as f32) / (total_tasks as f32).max(1.0);
+                }
+                let mut ao = crate::baker::Baker::bake_ao(&mesh, res, res);
+                if denoise {
+                    {
+                        let mut st = state_clone.lock().unwrap();
+                        st.step_name = "Denoising Ambient Occlusion (Bilateral)...".to_string();
+                    }
+                    crate::baker::Baker::denoise_scalar_buffer(&mut ao, result.world_space_normal.as_ref(), 1, 2, 1.2, 24.0);
+                }
+                result.ao = Some(ao);
+                completed_tasks += 1;
+            }
+
+            if bake_curvature {
+                if state_clone.lock().unwrap().cancelled { return; }
+                {
+                    let mut st = state_clone.lock().unwrap();
+                    st.step_name = format!("[{}/{}] Baking Curvature Map...", completed_tasks + 1, total_tasks);
+                    st.progress = (completed_tasks as f32) / (total_tasks as f32).max(1.0);
+                }
+                let mut curv = crate::baker::Baker::bake_curvature(&mesh, res, res);
+                if denoise {
+                    {
+                        let mut st = state_clone.lock().unwrap();
+                        st.step_name = "Denoising Curvature Map (Sharpening Edges)...".to_string();
+                    }
+                    crate::baker::Baker::denoise_scalar_buffer(&mut curv, result.world_space_normal.as_ref(), 1, 1, 0.8, 24.0);
+                }
+                result.curvature = Some(curv);
+                completed_tasks += 1;
+            }
+
+            if bake_position {
+                if state_clone.lock().unwrap().cancelled { return; }
+                {
+                    let mut st = state_clone.lock().unwrap();
+                    st.step_name = format!("[{}/{}] Baking World Position (WPO)...", completed_tasks + 1, total_tasks);
+                    st.progress = (completed_tasks as f32) / (total_tasks as f32).max(1.0);
+                }
+                result.position = Some(crate::baker::Baker::bake_position(&mesh, res, res));
+                completed_tasks += 1;
+            }
+
+            if bake_thickness {
+                if state_clone.lock().unwrap().cancelled { return; }
+                {
+                    let mut st = state_clone.lock().unwrap();
+                    st.step_name = format!("[{}/{}] Baking Thickness Map...", completed_tasks + 1, total_tasks);
+                    st.progress = (completed_tasks as f32) / (total_tasks as f32).max(1.0);
+                }
+                let mut th = crate::baker::Baker::bake_thickness(&mesh, res, res);
+                if denoise {
+                    crate::baker::Baker::denoise_scalar_buffer(&mut th, result.world_space_normal.as_ref(), 1, 2, 1.2, 24.0);
+                }
+                result.thickness = Some(th);
+            }
+
+            result.elapsed_secs = start.elapsed().as_secs_f32();
+            {
+                let mut st = state_clone.lock().unwrap();
+                st.progress = 1.0;
+                st.step_name = format!("Bake Complete in {:.2}s!", result.elapsed_secs);
+                st.is_done = true;
+                st.elapsed_secs = result.elapsed_secs;
+            }
+            let _ = tx.send(result);
+        });
+    }
+
+    /// Render Dedicated Substance 3D Painter Baking Screen
+    pub fn render_dedicated_baking_screen_ui(&mut self, ctx: &egui::Context) {
+        if !self.show_bake_modal {
+            return;
+        }
+
+        let is_baking = self.bake_worker_state.as_ref().map(|s| !s.lock().unwrap().is_done).unwrap_or(false);
+        let mut close_modal = false;
+
+        egui::Window::new("Bake Mesh Maps")
+            .collapsible(false)
+            .resizable(true)
+            .default_width(880.0)
+            .default_height(600.0)
+            .show(ctx, |ui| {
+                // Header Banner
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        ui.heading(egui::RichText::new("BAKE MESH MAPS").size(16.0).strong().color(Color32::WHITE));
+                        ui.label(egui::RichText::new("Bake geometric curvature, ambient occlusion, normal, and position maps from 3D geometry").small().color(Color32::from_rgb(160, 165, 175)));
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button(" X ").clicked() && !is_baking {
+                            close_modal = true;
+                        }
+                    });
+                });
+                ui.add_space(4.0);
+                ui.separator();
+                ui.add_space(4.0);
+
+                // 3-Column Substance 3D Painter Layout
+                let avail_h = (ui.available_height() - 110.0).max(280.0);
+                ui.horizontal(|ui| {
+                    // Column 1: Texture Sets
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(210.0, avail_h),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            ui.strong(egui::RichText::new("Texture Sets").color(Color32::from_rgb(220, 225, 235)));
+                            ui.add_space(2.0);
+
+                            if self.bake_selected_texture_sets.len() != self.project.texture_sets.len() {
+                                self.bake_selected_texture_sets = vec![true; self.project.texture_sets.len()];
+                            }
+
+                            ui.horizontal(|ui| {
+                                if ui.small_button("All").clicked() {
+                                    for b in &mut self.bake_selected_texture_sets { *b = true; }
+                                }
+                                if ui.small_button("None").clicked() {
+                                    for b in &mut self.bake_selected_texture_sets { *b = false; }
+                                }
+                            });
+                            ui.separator();
+
+                            egui::ScrollArea::vertical().id_source("bake_ts_scroll").show(ui, |ui| {
+                                for (i, ts) in self.project.texture_sets.iter().enumerate() {
+                                    let mut sel = self.bake_selected_texture_sets.get(i).copied().unwrap_or(true);
+                                    let is_active = i == self.project.active_texture_set_idx;
+                                    let label = format!("{} ({}x{})", ts.name, ts.width, ts.height);
+                                    if ui.checkbox(&mut sel, label).changed() {
+                                        if let Some(b) = self.bake_selected_texture_sets.get_mut(i) {
+                                            *b = sel;
+                                        }
+                                    }
+                                    if is_active {
+                                        ui.label(egui::RichText::new("  (Active Set)").small().color(Color32::from_rgb(243, 94, 24)));
+                                    }
+                                }
+                            });
+                        },
+                    );
+
+                    ui.separator();
+
+                    // Column 2: Mesh Maps Selection
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(250.0, avail_h),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            ui.strong(egui::RichText::new("Mesh Maps").color(Color32::from_rgb(220, 225, 235)));
+                            ui.add_space(4.0);
+
+                            ui.checkbox(&mut self.bake_opt_tangent_normal, "Normal (Tangent Space)")
+                                .on_hover_text("Bakes high-poly surface detail and bevels into tangent space normal map");
+                            ui.checkbox(&mut self.bake_opt_world_normal, "World Space Normal")
+                                .on_hover_text("Used for directional dust, weathering, and vertical gradients");
+                            ui.checkbox(&mut self.bake_opt_ao, "Ambient Occlusion")
+                                .on_hover_text("Ray-marched cavity contact shadows, powers Crevice Dirt generator");
+                            ui.checkbox(&mut self.bake_opt_curvature, "Curvature")
+                                .on_hover_text("Convex edges and concave seams, powers Smart Edge Wear generator");
+                            ui.checkbox(&mut self.bake_opt_position, "Position (World Space)")
+                                .on_hover_text("World position gradient, powers Position Gradient generator");
+                            ui.checkbox(&mut self.bake_opt_thickness, "Thickness")
+                                .on_hover_text("Subsurface light penetration for translucency and skin");
+
+                            ui.add_space(8.0);
+                            ui.separator();
+                            ui.strong(egui::RichText::new("Map Quality").color(Color32::from_rgb(180, 185, 195)));
+                            ui.add_space(2.0);
+                            ui.checkbox(&mut self.bake_denoise, "Denoise Mesh Maps")
+                                .on_hover_text("Edge-preserving bilateral filter cleans ray-march noise on AO and Curvature while preserving sharp bevels");
+                            if self.bake_denoise {
+                                ui.horizontal(|ui| {
+                                    ui.label("Passes:");
+                                    ui.add(egui::Slider::new(&mut self.bake_denoise_iterations, 1..=3));
+                                });
+                            }
+                        },
+                    );
+
+                    ui.separator();
+
+                    // Column 3: Common Parameters & High-Poly Mesh
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(360.0, avail_h),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            ui.strong(egui::RichText::new("Common Parameters").color(Color32::from_rgb(220, 225, 235)));
+                            ui.add_space(4.0);
+
+                            ui.horizontal(|ui| {
+                                ui.label("Output Size:");
+                                egui::ComboBox::from_id_source("bake_size_combo")
+                                    .selected_text(format!("{} x {}", self.bake_res, self.bake_res))
+                                    .show_ui(ui, |ui| {
+                                        ui.selectable_value(&mut self.bake_res, 512, "512 x 512");
+                                        ui.selectable_value(&mut self.bake_res, 1024, "1024 x 1024 (1K)");
+                                        ui.selectable_value(&mut self.bake_res, 2048, "2048 x 2048 (2K)");
+                                        ui.selectable_value(&mut self.bake_res, 4096, "4096 x 4096 (4K)");
+                                    });
+                            });
+
+                            ui.add_space(6.0);
+                            ui.separator();
+                            ui.strong("High Definition Meshes:");
+                            ui.horizontal(|ui| {
+                                ui.text_edit_singleline(&mut self.bake_highpoly_path);
+                                if ui.button("Browse...").clicked() {
+                                    if let Some(path) = rfd::FileDialog::new().add_filter("3D Models (OBJ, glTF, GLB)", &["obj", "gltf", "glb"]).pick_file() {
+                                        self.bake_highpoly_path = path.to_string_lossy().to_string();
+                                        if let Ok(mesh) = crate::mesh::Mesh::load_file(&path) {
+                                            self.project.high_poly_mesh = Some(mesh);
+                                            self.status_message = format!("Loaded High-Poly Mesh: {:?}", path.file_name().unwrap_or_default());
+                                        }
+                                    }
+                                }
+                                if self.project.high_poly_mesh.is_some() && ui.button("Clear").clicked() {
+                                    self.project.high_poly_mesh = None;
+                                    self.bake_highpoly_path.clear();
+                                }
+                            });
+                            if let Some(ref hp) = self.project.high_poly_mesh {
+                                ui.colored_label(Color32::from_rgb(100, 220, 140), format!("Loaded: {} ({} tris)", hp.name, hp.indices.len() / 3));
+                            } else {
+                                ui.label(egui::RichText::new("Using low-poly base mesh as high-definition geometry").small().color(Color32::from_rgb(150, 155, 165)));
+                            }
+
+                            ui.add_space(6.0);
+                            ui.separator();
+                            ui.strong("Ray Distances:");
+                            ui.horizontal(|ui| {
+                                ui.label("Max Frontal Distance:");
+                                ui.add(egui::Slider::new(&mut self.bake_frontal, 0.001..=0.5).logarithmic(true));
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label("Max Rear Distance:");
+                                ui.add(egui::Slider::new(&mut self.bake_rear, 0.001..=0.5).logarithmic(true));
+                            });
+                        },
+                    );
+                });
+
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(4.0);
+
+                // Bottom Panel: Real-Time Progress Bar, Previews & Action Buttons
+                let mut cancel_requested = false;
+                let mut trigger_bake = false;
+
+                if let Some(state_arc) = &self.bake_worker_state {
+                    let st = state_arc.lock().unwrap();
+                    let prog = st.progress;
+                    let step = st.step_name.clone();
+                    let done = st.is_done;
+                    drop(st);
+
+                    if !done {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.strong(&step);
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.button("Cancel Bake").clicked() {
+                                    state_arc.lock().unwrap().cancelled = true;
+                                    cancel_requested = true;
+                                }
+                            });
+                        });
+                        ui.add_space(4.0);
+                        ui.add(egui::ProgressBar::new(prog).show_percentage().animate(true));
+                    } else {
+                        // Completed view
+                        if let Some(msg) = &self.bake_success_message {
+                            ui.horizontal(|ui| {
+                                ui.colored_label(Color32::from_rgb(100, 220, 140), format!("✓ {}", msg));
+                            });
+                        }
+                        // Live Thumbnails Strip
+                        ui.horizontal(|ui| {
+                            if let Some(tex) = &self.bake_preview_normal {
+                                ui.vertical(|ui| {
+                                    ui.image((tex.id(), egui::vec2(44.0, 44.0)));
+                                    ui.label(egui::RichText::new("Normal").small());
+                                });
+                            }
+                            if let Some(tex) = &self.bake_preview_ao {
+                                ui.vertical(|ui| {
+                                    ui.image((tex.id(), egui::vec2(44.0, 44.0)));
+                                    ui.label(egui::RichText::new("AO").small());
+                                });
+                            }
+                            if let Some(tex) = &self.bake_preview_curv {
+                                ui.vertical(|ui| {
+                                    ui.image((tex.id(), egui::vec2(44.0, 44.0)));
+                                    ui.label(egui::RichText::new("Curvature").small());
+                                });
+                            }
+                            if let Some(tex) = &self.bake_preview_pos {
+                                ui.vertical(|ui| {
+                                    ui.image((tex.id(), egui::vec2(44.0, 44.0)));
+                                    ui.label(egui::RichText::new("Position").small());
+                                });
+                            }
+                            if let Some(tex) = &self.bake_preview_thick {
+                                ui.vertical(|ui| {
+                                    ui.image((tex.id(), egui::vec2(44.0, 44.0)));
+                                    ui.label(egui::RichText::new("Thickness").small());
+                                });
+                            }
+
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.button("Close").clicked() {
+                                    close_modal = true;
+                                }
+                                let bake_btn = egui::Button::new(egui::RichText::new("Bake Again").strong().color(Color32::WHITE))
+                                    .fill(Color32::from_rgb(226, 91, 16))
+                                    .min_size(egui::vec2(160.0, 32.0));
+                                if ui.add(bake_btn).clicked() {
+                                    trigger_bake = true;
+                                }
+                            });
+                        });
+                    }
+                } else {
+                    // Idle state
+                    ui.horizontal(|ui| {
+                        let bake_btn = egui::Button::new(egui::RichText::new("Bake Selected Textures").strong().color(Color32::WHITE))
+                            .fill(Color32::from_rgb(226, 91, 16))
+                            .min_size(egui::vec2(200.0, 34.0));
+                        if ui.add(bake_btn).clicked() {
+                            trigger_bake = true;
+                        }
+
+                        if ui.button("Cancel").clicked() {
+                            close_modal = true;
+                        }
+                    });
+                }
+
+                if cancel_requested {
+                    self.bake_worker_state = None;
+                    self.bake_receiver = None;
+                }
+                if trigger_bake {
+                    self.start_background_bake();
+                }
+            });
+
+        if close_modal {
+            self.show_bake_modal = false;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_bake_progress_state_cancellation() {
+        let state = std::sync::Arc::new(std::sync::Mutex::new(BakeProgressState {
+            progress: 0.25,
+            step_name: "Baking AO...".to_string(),
+            is_done: false,
+            cancelled: false,
+            elapsed_secs: 1.2,
+        }));
+
+        assert!(!state.lock().unwrap().cancelled);
+        state.lock().unwrap().cancelled = true;
+        assert!(state.lock().unwrap().cancelled);
+    }
+
+    #[test]
+    fn test_viewport_live_synchronization_dirty_flow() {
+        let mut proj = Project::new_default(64, 64);
+        proj.is_dirty = false;
+        proj.gpu_sync_needed = false;
+
+        // When a dab or fill occurs, rebuild_composite sets both is_dirty and gpu_sync_needed
+        proj.rebuild_composite();
+        assert!(proj.is_dirty);
+        assert!(proj.gpu_sync_needed);
+    }
+}
+
 

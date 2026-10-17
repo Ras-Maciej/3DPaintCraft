@@ -202,14 +202,14 @@ impl Project {
         if bake_curvature {
             let mut curv = Baker::bake_curvature(&self.mesh, w, h);
             if denoise && denoise_iterations > 0 {
-                Baker::denoise_scalar_buffer(&mut curv, self.world_normal_map.as_ref(), denoise_iterations.min(2), 2, 1.5, 8.0);
+                Baker::denoise_scalar_buffer(&mut curv, self.world_normal_map.as_ref(), 1, 1, 0.8, 24.0);
             }
             self.curvature_map = Some(curv);
         }
         if bake_ao {
             let mut ao = Baker::bake_ao(&self.mesh, w, h);
             if denoise && denoise_iterations > 0 {
-                Baker::denoise_scalar_buffer(&mut ao, self.world_normal_map.as_ref(), denoise_iterations, 3, 2.0, 16.0);
+                Baker::denoise_scalar_buffer(&mut ao, self.world_normal_map.as_ref(), denoise_iterations.min(2), 2, 1.2, 24.0);
             }
             self.ao_map = Some(ao);
         }
@@ -220,7 +220,7 @@ impl Project {
         if bake_thickness {
             let mut th = Baker::bake_thickness(&self.mesh, w, h);
             if denoise && denoise_iterations > 0 {
-                Baker::denoise_scalar_buffer(&mut th, self.world_normal_map.as_ref(), denoise_iterations, 3, 2.0, 16.0);
+                Baker::denoise_scalar_buffer(&mut th, self.world_normal_map.as_ref(), denoise_iterations.min(2), 2, 1.2, 24.0);
             }
             self.thickness_map = Some(th);
         }

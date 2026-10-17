@@ -372,9 +372,13 @@ fn denoise_joint_bilateral(uv: vec2<f32>, center_col: vec3<f32>) -> vec3<f32> {
         let depth_diff = abs(center_z - sample_z);
         let w_depth = exp(-depth_diff / depth_sens);
 
-        let weight = w_normal * w_depth;
+        let s_col = textureSample(tex_scene_color, samp_linear, sample_uv).rgb;
+        // Color difference / photometric weight (strictly preserves painted brush strokes, decals, and texture details)
+        let col_diff = length(center_col - s_col);
+        let w_color = exp(-(col_diff * col_diff) / 0.03);
+
+        let weight = w_normal * w_depth * w_color;
         if weight > 0.001 {
-            let s_col = textureSample(tex_scene_color, samp_linear, sample_uv).rgb;
             total_col = total_col + s_col * weight;
             total_weight = total_weight + weight;
         }

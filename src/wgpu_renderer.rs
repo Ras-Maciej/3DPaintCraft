@@ -119,10 +119,10 @@ impl ShaderSettings {
                 self.ssao_radius = 0.55;
                 self.aa_mode = crate::nvidia_dlaa::AntiAliasingMode::NvidiaDlaa;
                 self.fxaa_enabled = false;
-                self.denoiser_enabled = true;
-                self.denoiser_radius = 2.5;
-                self.denoiser_normal_weight = 16.0;
-                self.denoiser_depth_weight = 0.08;
+                self.denoiser_enabled = false;
+                self.denoiser_radius = 0.8;
+                self.denoiser_normal_weight = 24.0;
+                self.denoiser_depth_weight = 0.04;
                 self.history_blend_weight = 0.90;
                 self.adaptive_resolution = false;
             }
@@ -133,10 +133,10 @@ impl ShaderSettings {
                 self.ssao_radius = 0.45;
                 self.aa_mode = crate::nvidia_dlaa::AntiAliasingMode::NvidiaDlaa;
                 self.fxaa_enabled = false;
-                self.denoiser_enabled = true;
-                self.denoiser_radius = 2.0;
-                self.denoiser_normal_weight = 16.0;
-                self.denoiser_depth_weight = 0.08;
+                self.denoiser_enabled = false;
+                self.denoiser_radius = 0.8;
+                self.denoiser_normal_weight = 24.0;
+                self.denoiser_depth_weight = 0.04;
                 self.history_blend_weight = 0.90;
                 self.adaptive_resolution = true;
                 self.adaptive_scale = 0.5;
@@ -148,10 +148,10 @@ impl ShaderSettings {
                 self.ssao_radius = 0.35;
                 self.aa_mode = crate::nvidia_dlaa::AntiAliasingMode::NvidiaDlaa;
                 self.fxaa_enabled = false;
-                self.denoiser_enabled = true;
-                self.denoiser_radius = 2.0;
-                self.denoiser_normal_weight = 16.0;
-                self.denoiser_depth_weight = 0.08;
+                self.denoiser_enabled = false;
+                self.denoiser_radius = 0.8;
+                self.denoiser_normal_weight = 24.0;
+                self.denoiser_depth_weight = 0.04;
                 self.history_blend_weight = 0.90;
                 self.bloom_enabled = false;
                 self.dof_enabled = false;
@@ -191,10 +191,10 @@ impl Default for ShaderSettings {
             translucency_depth: 1.0,
             aa_mode: crate::nvidia_dlaa::AntiAliasingMode::NvidiaDlaa,
             fxaa_enabled: true,
-            denoiser_enabled: true,
-            denoiser_radius: 2.0,
-            denoiser_normal_weight: 16.0,
-            denoiser_depth_weight: 0.08,
+            denoiser_enabled: false,
+            denoiser_radius: 0.8,
+            denoiser_normal_weight: 24.0,
+            denoiser_depth_weight: 0.04,
             history_blend_weight: 0.90,
             bloom_enabled: false,
             bloom_intensity: 0.8,
@@ -1710,8 +1710,8 @@ mod tests {
     fn test_shader_settings_defaults_and_postprocess() {
         let settings = ShaderSettings::default();
         assert_eq!(settings.aa_mode, crate::nvidia_dlaa::AntiAliasingMode::NvidiaDlaa);
-        assert!(settings.denoiser_enabled);
-        assert_eq!(settings.denoiser_radius, 2.0);
+        assert!(!settings.denoiser_enabled);
+        assert_eq!(settings.denoiser_radius, 0.8);
         assert!(!settings.bloom_enabled);
         assert!(!settings.dof_enabled);
         assert!(!settings.ssr_enabled);
