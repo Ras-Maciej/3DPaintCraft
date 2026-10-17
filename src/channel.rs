@@ -322,6 +322,12 @@ impl ScalarBuffer {
         }
     }
 
+    pub fn invert(&mut self) {
+        for v in &mut self.data {
+            *v = (1.0 - *v).clamp(0.0, 1.0);
+        }
+    }
+
     pub fn sample_bilinear(&self, uv: Vec2) -> f32 {
         let u = (uv.x.rem_euclid(1.0)) * (self.width as f32);
         let v = (uv.y.rem_euclid(1.0)) * (self.height as f32);
@@ -461,5 +467,22 @@ impl ScalarBuffer {
             let diff = (*orig - *blur) + 0.5;
             *orig = diff.clamp(0.0, 1.0);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_scalar_buffer_invert() {
+        let mut buf = ScalarBuffer::new(2, 2, 0.25);
+        buf.set_pixel(1, 0, 0.0);
+        buf.set_pixel(0, 1, 1.0);
+        buf.invert();
+
+        assert!((buf.get_pixel(0, 0) - 0.75).abs() < 1e-5);
+        assert!((buf.get_pixel(1, 0) - 1.0).abs() < 1e-5);
+        assert!((buf.get_pixel(0, 1) - 0.0).abs() < 1e-5);
     }
 }

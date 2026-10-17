@@ -202,9 +202,10 @@ fn fs_main(@builtin(front_facing) is_front: bool, in: VertexOutput) -> FragmentO
     let roughness_raw = textureSample(tex_roughness, samp_linear, in.uv).r;
     let roughness = clamp(roughness_raw + camera.roughness_bias, 0.02, 1.0);
     let metallic   = clamp(textureSample(tex_metallic, samp_linear, in.uv).r, 0.0, 1.0);
-    let ao_curv    = textureSample(tex_baked_ao, samp_linear, in.uv).rg;
-    let ao         = pow(max(ao_curv.r, 0.001), max(camera.ao_intensity, 0.01));
-    let curvature  = ao_curv.g;
+    let baked_maps = textureSample(tex_baked_ao, samp_linear, in.uv);
+    let ao         = pow(max(baked_maps.r, 0.001), max(camera.ao_intensity, 0.01));
+    let curvature  = baked_maps.g;
+    let thickness  = baked_maps.b;
 
     // TBN Mapping with robust degenerate tangent handling & Gram-Schmidt orthogonalization
     let n_len = length(in.world_normal);
@@ -399,9 +400,8 @@ fn fs_main(@builtin(front_facing) is_front: bool, in: VertexOutput) -> FragmentO
         out.color = vec4<f32>(world_normal * 0.5 + 0.5, 1.0);
         return out;
     } else if camera.view_mode == 9u {
-        // Thickness placeholder / visualization (inverted normal distance)
-        let thick_val = clamp(dot(world_normal, vec3<f32>(0.0, 1.0, 0.0)) * 0.5 + 0.5, 0.0, 1.0);
-        out.color = vec4<f32>(vec3<f32>(thick_val), 1.0);
+        // Real baked thickness map inspection
+        out.color = vec4<f32>(vec3<f32>(thickness), 1.0);
         return out;
     } else if camera.view_mode == 10u {
         // Height / Bump channel

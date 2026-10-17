@@ -134,6 +134,7 @@ pub struct PaintcraftApp {
     pub bake_opt_curvature: bool,
     pub bake_opt_position: bool,
     pub bake_opt_thickness: bool,
+    pub bake_opt_thickness_invert: bool,
     pub bake_denoise: bool,
     pub bake_denoise_iterations: usize,
     pub bg_blur: f32,
@@ -391,6 +392,7 @@ impl PaintcraftApp {
             bake_opt_curvature: true,
             bake_opt_position: true,
             bake_opt_thickness: true,
+            bake_opt_thickness_invert: false,
             bake_denoise: false,
             bake_denoise_iterations: 1,
             bg_blur: 0.0,
@@ -492,6 +494,7 @@ impl PaintcraftApp {
             &self.project.mesh,
             &self.project.composite_textures,
             self.view_mode,
+            self.project.thickness_map.as_ref(),
         );
 
         let w = self.renderer.width as usize;
@@ -3431,8 +3434,17 @@ impl eframe::App for PaintcraftApp {
                                             }
                                         }
                                         if self.project.thickness_map.is_some() {
+                                            if ui.button("Invert").on_hover_text("Invert thickness map (toggle between White=Thick and White=Thin)").clicked() {
+                                                if let Some(th) = &mut self.project.thickness_map {
+                                                    th.invert();
+                                                    self.project.gpu_mesh_maps_sync_needed = true;
+                                                    self.project.gpu_sync_needed = true;
+                                                    self.status_message = "Inverted thickness map".to_string();
+                                                }
+                                            }
                                             if ui.button("Remove").clicked() {
                                                 self.project.thickness_map = None;
+                                                self.project.gpu_mesh_maps_sync_needed = true;
                                                 self.project.gpu_sync_needed = true;
                                             }
                                             if ui.button("View").clicked() {
@@ -6338,6 +6350,7 @@ impl PaintcraftApp {
         let bake_curvature = self.bake_opt_curvature;
         let bake_position = self.bake_opt_position;
         let bake_thickness = self.bake_opt_thickness;
+        let bake_thickness_invert = self.bake_opt_thickness_invert;
         let denoise = self.bake_denoise;
 
         let mesh = self.project.mesh.clone();
@@ -6460,6 +6473,9 @@ impl PaintcraftApp {
                 if denoise {
                     crate::baker::Baker::denoise_scalar_buffer(&mut th, result.world_space_normal.as_ref(), 1, 2, 1.2, 24.0);
                 }
+                if bake_thickness_invert {
+                    th.invert();
+                }
                 result.thickness = Some(th);
             }
 
@@ -6571,6 +6587,13 @@ impl PaintcraftApp {
                                 .on_hover_text("World position gradient, powers Position Gradient generator");
                             ui.checkbox(&mut self.bake_opt_thickness, "Thickness")
                                 .on_hover_text("Subsurface light penetration for translucency and skin");
+                            if self.bake_opt_thickness {
+                                ui.horizontal(|ui| {
+                                    ui.add_space(16.0);
+                                    ui.checkbox(&mut self.bake_opt_thickness_invert, "Invert (White = Thin)")
+                                        .on_hover_text("Invert values so thin areas are white (high transmission) and thick areas are black");
+                                });
+                            }
 
                             ui.add_space(8.0);
                             ui.separator();

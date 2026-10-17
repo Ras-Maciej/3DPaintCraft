@@ -618,61 +618,89 @@ impl Baker {
     pub fn bake_thickness(mesh: &Mesh, width: u32, height: u32) -> ScalarBuffer {
         let mut buffer = ScalarBuffer::new(width, height, 1.0);
         let tri_count = mesh.indices.len() / 3;
-
-        let mut min_bound = Vec3::splat(f32::MAX);
-        let mut max_bound = Vec3::splat(f32::MIN);
-        for v in &mesh.vertices {
-            min_bound = min_bound.min(v.position);
-            max_bound = max_bound.max(v.position);
+        if tri_count == 0 || mesh.vertices.is_empty() {
+            return buffer;
         }
-        let max_dist = ((max_bound - min_bound).length() * 0.35).max(0.1);
-        let spatial_hash = SpatialHash::new(mesh);
 
-        let mut pos_buf = vec![None; (width * height) as usize];
-        let mut norm_buf = vec![None; (width * height) as usize];
-        let mut tan_buf = vec![None; (width * height) as usize];
+        // 16 sample directions via Fibonacci spiral in inward hemisphere
+        let sample_count = 16usize;
+        let mut hemisphere_samples = Vec::with_capacity(sample_count);
+        for i in 0..sample_count {
+            let u1 = (i as f32 + 0.5) / sample_count as f32;
+            let u2 = (i as f32 * 0.6180339887).fract();
+            let cos_theta = (1.0 - u1).sqrt();
+            let sin_theta = (1.0 - cos_theta * cos_theta).max(0.0).sqrt();
+            let phi = u2 * 2.0 * std::f32::consts::PI;
+            // Pointing inward into the mesh (negative z along -normal)
+            let dir = Vec3::new(sin_theta * phi.cos(), sin_theta * phi.sin(), -cos_theta);
+            hemisphere_samples.push(dir);
+        }
 
+        let extents = mesh.aabb_max - mesh.aabb_min;
+        let diag = extents.length();
+        let max_dist = (diag * 0.6).max(0.1);
+        let min_self_dist = (diag * 0.01).max(0.005);
+        let ray_offset = (diag * 0.005).max(0.002);
+
+        // Rayon parallel computation of vertex thickness
+        let vert_thickness: Vec<f32> = mesh.vertices.par_iter().map(|v| {
+            let normal = if v.normal.length_squared() > 1e-4 {
+                v.normal.normalize()
+            } else {
+                Vec3::Y
+            };
+
+            // Build orthonormal basis (tangent, bitangent, normal)
+            let up = if normal.y.abs() < 0.95 { Vec3::Y } else { Vec3::X };
+            let tangent = normal.cross(up).normalize();
+            let bitangent = normal.cross(tangent);
+
+            // Start slightly inside the surface along -normal
+            let origin = v.position - normal * ray_offset;
+            let mut accum_dist = 0.0f32;
+
+            for sample in &hemisphere_samples {
+                let inward_dir = (tangent * sample.x + bitangent * sample.y + normal * sample.z).normalize();
+                let ray = Ray {
+                    origin,
+                    direction: inward_dir,
+                };
+
+                if let Some(hit) = mesh.raycast(&ray) {
+                    if hit.t > min_self_dist && hit.t < max_dist {
+                        accum_dist += hit.t;
+                    } else if hit.t >= max_dist {
+                        accum_dist += max_dist;
+                    } else {
+                        // Very close hit rejected as self-intersection
+                        accum_dist += max_dist;
+                    }
+                } else {
+                    // No exit hit found within BVH; volume is at least max_dist thick
+                    accum_dist += max_dist;
+                }
+            }
+
+            let avg_dist = accum_dist / (sample_count as f32);
+            (avg_dist / max_dist).clamp(0.0, 1.0)
+        }).collect();
+
+        let mut written_mask = vec![false; (width * height) as usize];
         for t in 0..tri_count {
             let i0 = mesh.indices[t * 3] as usize;
             let i1 = mesh.indices[t * 3 + 1] as usize;
             let i2 = mesh.indices[t * 3 + 2] as usize;
 
-            let v0 = &mesh.vertices[i0];
-            let v1 = &mesh.vertices[i1];
-            let v2 = &mesh.vertices[i2];
+            let uv0 = mesh.vertices[i0].uv;
+            let uv1 = mesh.vertices[i1].uv;
+            let uv2 = mesh.vertices[i2].uv;
 
-            Self::rasterize_pos_norm_tan_triangle(
-                &mut pos_buf,
-                &mut norm_buf,
-                &mut tan_buf,
-                width,
-                height,
-                v0.uv, v1.uv, v2.uv,
-                v0.position, v1.position, v2.position,
-                v0.normal, v1.normal, v2.normal,
-                v0.tangent, v1.tangent, v2.tangent,
+            Self::rasterize_scalar_triangle_masked(
+                &mut buffer,
+                &mut written_mask,
+                uv0, uv1, uv2,
+                vert_thickness[i0], vert_thickness[i1], vert_thickness[i2],
             );
-        }
-
-        let mut written_mask = vec![false; (width * height) as usize];
-        for y in 0..height {
-            for x in 0..width {
-                let idx = (y * width + x) as usize;
-                if let (Some(pos), Some(norm)) = (pos_buf[idx], norm_buf[idx]) {
-                    let n = norm.normalize_or_zero();
-                    let ray_orig = pos - n * 0.001;
-                    let ray_dir = -n;
-
-                    let thick = if let Some((hit_dist, _)) = spatial_hash.query_ray_closest(ray_orig, ray_dir, max_dist, mesh) {
-                        (hit_dist / max_dist).clamp(0.0, 1.0)
-                    } else {
-                        1.0
-                    };
-
-                    buffer.set_pixel(x, y, thick);
-                    written_mask[idx] = true;
-                }
-            }
         }
 
         Self::dilate_scalar(&mut buffer, &mut written_mask, 16);
@@ -1108,10 +1136,17 @@ mod tests {
         let sphere = Mesh::create_sphere(1.0, 16, 12);
         let thick_map = Baker::bake_thickness(&sphere, 32, 32);
 
+        let torus = Mesh::create_torus();
+        let torus_thick = Baker::bake_thickness(&torus, 32, 32);
+
         for &val in &thick_map.data {
             assert!(!val.is_nan() && !val.is_infinite());
             assert!(val >= 0.0 && val <= 1.0, "Thickness must be normalized in [0, 1]");
         }
+
+        let sphere_avg = thick_map.data.iter().sum::<f32>() / thick_map.data.len() as f32;
+        let torus_avg = torus_thick.data.iter().sum::<f32>() / torus_thick.data.len() as f32;
+        assert!(torus_avg < sphere_avg, "Thin torus tube must have lower thickness than solid sphere: torus={}, sphere={}", torus_avg, sphere_avg);
     }
 
     #[test]

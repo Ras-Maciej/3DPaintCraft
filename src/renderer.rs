@@ -1,6 +1,7 @@
 // 3D Paintcraft - 3D PBR Viewport Renderer, Camera & HDRI Lighting
 // Pure safe Rust with perspective-correct interpolation and image-based lighting
 
+use crate::channel::ScalarBuffer;
 use crate::hdri::{HdriEnvironment, HdriPreset};
 use crate::layer::CompositeTextureSet;
 use crate::mesh::{Mesh, Ray};
@@ -198,6 +199,7 @@ impl ViewportRenderer {
         mesh: &Mesh,
         textures: &CompositeTextureSet,
         mode: ViewportChannelMode,
+        thickness_map: Option<&ScalarBuffer>,
     ) {
         let w = self.width;
         let h = self.height;
@@ -350,7 +352,10 @@ impl ViewportRenderer {
                         ViewportChannelMode::Curvature => Vec3::splat(0.5),
                         ViewportChannelMode::Position => (world_pos * 0.5 + Vec3::splat(0.5)).clamp(Vec3::ZERO, Vec3::ONE),
                         ViewportChannelMode::WorldNormal => perturbed_normal * 0.5 + Vec3::splat(0.5),
-                        ViewportChannelMode::Thickness => Vec3::splat(ao),
+                        ViewportChannelMode::Thickness => {
+                            let t = thickness_map.map(|m| m.sample_bilinear(uv)).unwrap_or(1.0);
+                            Vec3::splat(t)
+                        }
                         ViewportChannelMode::Emissive => emissive,
                         ViewportChannelMode::Opacity => Vec3::splat(opacity),
                         ViewportChannelMode::Material => {

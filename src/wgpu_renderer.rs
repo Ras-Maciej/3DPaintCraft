@@ -411,7 +411,7 @@ impl WgpuViewport {
         let tex_roughness = device.create_texture(&wgpu::TextureDescriptor { label: Some("Tex R"), size: tex_size, mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::R32Float, usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST, view_formats: &[] });
         let tex_metallic = device.create_texture(&wgpu::TextureDescriptor { label: Some("Tex M"), size: tex_size, mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::R32Float, usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST, view_formats: &[] });
         let tex_baked_normal = device.create_texture(&wgpu::TextureDescriptor { label: Some("Tex BN"), size: tex_size, mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::Rgba32Float, usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST, view_formats: &[] });
-        let tex_baked_ao = device.create_texture(&wgpu::TextureDescriptor { label: Some("Tex BAO"), size: tex_size, mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::Rg32Float, usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST, view_formats: &[] });
+        let tex_baked_ao = device.create_texture(&wgpu::TextureDescriptor { label: Some("Tex BAO"), size: tex_size, mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::Rgba32Float, usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST, view_formats: &[] });
         let tex_emissive = device.create_texture(&wgpu::TextureDescriptor { label: Some("Tex Emis"), size: tex_size, mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::Rgba32Float, usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST, view_formats: &[] });
         let tex_opacity = device.create_texture(&wgpu::TextureDescriptor { label: Some("Tex Opac"), size: tex_size, mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::R32Float, usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST, view_formats: &[] });
         
@@ -938,7 +938,7 @@ impl WgpuViewport {
 
         let tex_size = wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 };
         self.tex_baked_normal = self.device.create_texture(&wgpu::TextureDescriptor { label: Some("Tex BN"), size: tex_size, mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::Rgba32Float, usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST, view_formats: &[] });
-        self.tex_baked_ao = self.device.create_texture(&wgpu::TextureDescriptor { label: Some("Tex BAO"), size: tex_size, mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::Rg32Float, usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST, view_formats: &[] });
+        self.tex_baked_ao = self.device.create_texture(&wgpu::TextureDescriptor { label: Some("Tex BAO"), size: tex_size, mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::Rgba32Float, usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST, view_formats: &[] });
 
         self.rebuild_material_bind_group();
     }
@@ -1031,11 +1031,13 @@ impl WgpuViewport {
         let w = project.world_normal_map.as_ref().map(|m| m.width)
             .or_else(|| project.ao_map.as_ref().map(|m| m.width))
             .or_else(|| project.curvature_map.as_ref().map(|m| m.width))
+            .or_else(|| project.thickness_map.as_ref().map(|m| m.width))
             .unwrap_or(project.texture_width);
 
         let h = project.world_normal_map.as_ref().map(|m| m.height)
             .or_else(|| project.ao_map.as_ref().map(|m| m.height))
             .or_else(|| project.curvature_map.as_ref().map(|m| m.height))
+            .or_else(|| project.thickness_map.as_ref().map(|m| m.height))
             .unwrap_or(project.texture_height);
 
         self.ensure_baked_textures(w, h);
@@ -1043,16 +1045,19 @@ impl WgpuViewport {
         let size = wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 };
         
         let total_pixels = (w * h) as usize;
-        let mut ao_curv_data = vec![1.0f32; total_pixels * 2];
+        let mut ao_curv_data = vec![1.0f32; total_pixels * 4];
         for i in 0..total_pixels {
-            ao_curv_data[i * 2 + 1] = 0.5f32; // Default flat curvature = 0.5
+            ao_curv_data[i * 4 + 0] = 1.0f32; // Default AO = 1.0
+            ao_curv_data[i * 4 + 1] = 0.5f32; // Default flat curvature = 0.5
+            ao_curv_data[i * 4 + 2] = 1.0f32; // Default thickness = 1.0 (solid)
+            ao_curv_data[i * 4 + 3] = 1.0f32; // Alpha
         }
 
         if let Some(ao) = &project.ao_map {
             if ao.width == w && ao.height == h {
                 for (i, &val) in ao.data.iter().enumerate() {
                     if i < total_pixels {
-                        ao_curv_data[i * 2] = val;
+                        ao_curv_data[i * 4 + 0] = val;
                     }
                 }
             } else {
@@ -1062,7 +1067,7 @@ impl WgpuViewport {
                         let val = ao.sample_bilinear(uv);
                         let idx = (y * w + x) as usize;
                         if idx < total_pixels {
-                            ao_curv_data[idx * 2] = val;
+                            ao_curv_data[idx * 4 + 0] = val;
                         }
                     }
                 }
@@ -1073,7 +1078,7 @@ impl WgpuViewport {
             if curv.width == w && curv.height == h {
                 for (i, &val) in curv.data.iter().enumerate() {
                     if i < total_pixels {
-                        ao_curv_data[i * 2 + 1] = val;
+                        ao_curv_data[i * 4 + 1] = val;
                     }
                 }
             } else {
@@ -1083,7 +1088,28 @@ impl WgpuViewport {
                         let val = curv.sample_bilinear(uv);
                         let idx = (y * w + x) as usize;
                         if idx < total_pixels {
-                            ao_curv_data[idx * 2 + 1] = val;
+                            ao_curv_data[idx * 4 + 1] = val;
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(th) = &project.thickness_map {
+            if th.width == w && th.height == h {
+                for (i, &val) in th.data.iter().enumerate() {
+                    if i < total_pixels {
+                        ao_curv_data[i * 4 + 2] = val;
+                    }
+                }
+            } else {
+                for y in 0..h {
+                    for x in 0..w {
+                        let uv = glam::Vec2::new((x as f32 + 0.5) / w as f32, (y as f32 + 0.5) / h as f32);
+                        let val = th.sample_bilinear(uv);
+                        let idx = (y * w + x) as usize;
+                        if idx < total_pixels {
+                            ao_curv_data[idx * 4 + 2] = val;
                         }
                     }
                 }
@@ -1093,7 +1119,7 @@ impl WgpuViewport {
         self.queue.write_texture(
             wgpu::ImageCopyTexture { texture: &self.tex_baked_ao, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
             bytemuck::cast_slice(&ao_curv_data),
-            wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(8 * size.width), rows_per_image: Some(size.height) },
+            wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(4 * 4 * size.width), rows_per_image: Some(size.height) },
             size
         );
 
