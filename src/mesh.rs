@@ -304,6 +304,19 @@ fn default_mesh_scale() -> f32 {
     1.0
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubMeshRange {
+    pub material_name: String,
+    pub start_index: usize,
+    pub index_count: usize,
+    #[serde(default = "default_submesh_visible")]
+    pub visible: bool,
+}
+
+fn default_submesh_visible() -> bool {
+    true
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Mesh {
     pub name: String,
@@ -316,10 +329,19 @@ pub struct Mesh {
     pub original_center: Vec3,
     #[serde(default = "default_mesh_scale")]
     pub original_scale: f32,
+    #[serde(default)]
+    pub submeshes: Vec<SubMeshRange>,
 }
 
 impl Mesh {
     pub fn new(name: String, vertices: Vec<Vertex>, indices: Vec<u32>) -> Self {
+        let tri_count = indices.len();
+        let submeshes = vec![SubMeshRange {
+            material_name: "Material".to_string(),
+            start_index: 0,
+            index_count: tri_count,
+            visible: true,
+        }];
         let mut mesh = Self {
             name,
             vertices,
@@ -329,11 +351,26 @@ impl Mesh {
             bvh: Bvh { nodes: Vec::new() },
             original_center: Vec3::ZERO,
             original_scale: 1.0,
+            submeshes,
         };
         mesh.recompute_bounds();
         mesh.ensure_tangents();
         mesh.rebuild_bvh();
         mesh
+    }
+
+    pub fn submesh_index_for_triangle(&self, tri_idx: usize) -> Option<usize> {
+        let idx = tri_idx * 3;
+        self.submeshes.iter().position(|sm| idx >= sm.start_index && idx < sm.start_index + sm.index_count)
+    }
+
+    pub fn is_triangle_visible(&self, tri_idx: usize) -> bool {
+        if self.submeshes.is_empty() {
+            return true;
+        }
+        self.submesh_index_for_triangle(tri_idx)
+            .map(|sm_idx| self.submeshes[sm_idx].visible)
+            .unwrap_or(true)
     }
 
     pub fn rebuild_bvh(&mut self) {
@@ -669,11 +706,27 @@ impl Mesh {
         let mut normals = Vec::new();
         let mut vertices = Vec::new();
         let mut indices = Vec::new();
+        let mut submeshes = Vec::new();
+        let mut current_mat = "Material".to_string();
+        let mut current_submesh_start = 0usize;
 
         for line in content.lines() {
             let parts: Vec<&str> = line.split_whitespace().collect();
             if parts.is_empty() { continue; }
             match parts[0] {
+                "usemtl" => {
+                    let new_mat = parts.get(1).unwrap_or(&"Material").to_string();
+                    if indices.len() > current_submesh_start {
+                        submeshes.push(SubMeshRange {
+                            material_name: current_mat.clone(),
+                            start_index: current_submesh_start,
+                            index_count: indices.len() - current_submesh_start,
+                            visible: true,
+                        });
+                        current_submesh_start = indices.len();
+                    }
+                    current_mat = new_mat;
+                }
                 "v" => {
                     positions.push(Vec3::new(
                         parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0.0),
@@ -734,7 +787,27 @@ impl Mesh {
             }
         }
 
+        if indices.len() > current_submesh_start {
+            submeshes.push(SubMeshRange {
+                material_name: current_mat,
+                start_index: current_submesh_start,
+                index_count: indices.len() - current_submesh_start,
+                visible: true,
+            });
+        }
+        if submeshes.is_empty() && !indices.is_empty() {
+            submeshes.push(SubMeshRange {
+                material_name: "Material".to_string(),
+                start_index: 0,
+                index_count: indices.len(),
+                visible: true,
+            });
+        }
+
         let mut mesh = Self::new(name.to_string(), vertices, indices);
+        if !submeshes.is_empty() {
+            mesh.submeshes = submeshes;
+        }
 
         // If normals are missing or degenerate, compute from triangle topology
         let has_valid_normals = mesh.vertices.iter().any(|v| v.normal.length_squared() > 1e-4);
@@ -990,6 +1063,8 @@ fn decode_base64_simple(input: &str) -> Vec<u8> {
             result
         };
 
+        let materials_arr = json.get("materials").and_then(|m| m.as_array());
+        let mut submeshes = Vec::new();
         let mut vertices = Vec::new();
         let mut indices = Vec::new();
 
@@ -997,6 +1072,7 @@ fn decode_base64_simple(input: &str) -> Vec<u8> {
         for mesh_obj in meshes_arr {
             if let Some(prims) = mesh_obj.get("primitives").and_then(|p| p.as_array()) {
                 for prim in prims {
+                    let start_submesh_idx = indices.len();
                     let attrs = match prim.get("attributes").and_then(|a| a.as_object()) {
                         Some(a) => a,
                         None => continue,
@@ -1049,6 +1125,23 @@ fn decode_base64_simple(input: &str) -> Vec<u8> {
                             indices.push(base_vert_idx + i);
                         }
                     }
+
+                    let count = indices.len() - start_submesh_idx;
+                    if count > 0 {
+                        let mat_idx = prim.get("material").and_then(|m| m.as_u64());
+                        let mat_name = mat_idx
+                            .and_then(|i| materials_arr.and_then(|arr| arr.get(i as usize)))
+                            .and_then(|m| m.get("name"))
+                            .and_then(|n| n.as_str())
+                            .unwrap_or("Material")
+                            .to_string();
+                        submeshes.push(SubMeshRange {
+                            material_name: mat_name,
+                            start_index: start_submesh_idx,
+                            index_count: count,
+                            visible: true,
+                        });
+                    }
                 }
             }
         }
@@ -1058,6 +1151,9 @@ fn decode_base64_simple(input: &str) -> Vec<u8> {
         }
 
         let mut mesh = Self::new(name.to_string(), vertices, indices);
+        if !submeshes.is_empty() {
+            mesh.submeshes = submeshes;
+        }
         mesh.recompute_bounds();
         mesh.normalize_to_unit_box();
         mesh.ensure_tangents();
@@ -1766,14 +1862,29 @@ impl Mesh {
             writeln!(writer, "vn {:.6} {:.6} {:.6}", v.normal.x, v.normal.y, v.normal.z).map_err(|e| e.to_string())?;
         }
 
-        writeln!(writer, "usemtl Material").map_err(|e| e.to_string())?;
-        writeln!(writer, "s 1").map_err(|e| e.to_string())?;
+        if self.submeshes.is_empty() {
+            writeln!(writer, "usemtl Material").map_err(|e| e.to_string())?;
+            writeln!(writer, "s 1").map_err(|e| e.to_string())?;
 
-        for chunk in self.indices.chunks_exact(3) {
-            let i0 = chunk[0] + 1;
-            let i1 = chunk[1] + 1;
-            let i2 = chunk[2] + 1;
-            writeln!(writer, "f {0}/{0}/{0} {1}/{1}/{1} {2}/{2}/{2}", i0, i1, i2).map_err(|e| e.to_string())?;
+            for chunk in self.indices.chunks_exact(3) {
+                let i0 = chunk[0] + 1;
+                let i1 = chunk[1] + 1;
+                let i2 = chunk[2] + 1;
+                writeln!(writer, "f {0}/{0}/{0} {1}/{1}/{1} {2}/{2}/{2}", i0, i1, i2).map_err(|e| e.to_string())?;
+            }
+        } else {
+            for sm in &self.submeshes {
+                writeln!(writer, "usemtl {}", sm.material_name).map_err(|e| e.to_string())?;
+                writeln!(writer, "s 1").map_err(|e| e.to_string())?;
+                let start = sm.start_index;
+                let end = (sm.start_index + sm.index_count).min(self.indices.len());
+                for chunk in self.indices[start..end].chunks_exact(3) {
+                    let i0 = chunk[0] + 1;
+                    let i1 = chunk[1] + 1;
+                    let i2 = chunk[2] + 1;
+                    writeln!(writer, "f {0}/{0}/{0} {1}/{1}/{1} {2}/{2}/{2}", i0, i1, i2).map_err(|e| e.to_string())?;
+                }
+            }
         }
 
         writer.flush().map_err(|e| e.to_string())?;
@@ -1837,4 +1948,45 @@ mod tests {
         let decoded = Mesh::decode_base64_simple(text);
         assert_eq!(std::str::from_utf8(&decoded).unwrap(), "Hello World");
     }
+
+    #[test]
+    fn test_multimaterial_obj_submeshes() {
+        let obj_content = r#"
+v -1.0 -1.0 0.0
+v 1.0 -1.0 0.0
+v 1.0 1.0 0.0
+v -1.0 1.0 0.0
+vt 0.0 0.0
+vt 1.0 0.0
+vt 1.0 1.0
+vt 0.0 1.0
+vn 0.0 0.0 1.0
+usemtl Metal_Trim
+f 1/1/1 2/2/1 3/3/1
+usemtl Glass_Visor
+f 1/1/1 3/3/1 4/4/1
+"#;
+        let mut mesh = Mesh::from_obj_str(obj_content, "MultiMatTest").expect("Failed to parse multi-material OBJ");
+        assert_eq!(mesh.submeshes.len(), 2, "Expected 2 submeshes from usemtl tags");
+        assert_eq!(mesh.submeshes[0].material_name, "Metal_Trim");
+        assert_eq!(mesh.submeshes[0].start_index, 0);
+        assert_eq!(mesh.submeshes[0].index_count, 3);
+
+        assert_eq!(mesh.submeshes[1].material_name, "Glass_Visor");
+        assert_eq!(mesh.submeshes[1].start_index, 3);
+        assert_eq!(mesh.submeshes[1].index_count, 3);
+
+        // Submesh triangle indexing
+        assert_eq!(mesh.submesh_index_for_triangle(0), Some(0));
+        assert_eq!(mesh.submesh_index_for_triangle(1), Some(1));
+
+        // Submesh visibility tests
+        assert!(mesh.is_triangle_visible(0));
+        assert!(mesh.is_triangle_visible(1));
+
+        mesh.submeshes[0].visible = false;
+        assert!(!mesh.is_triangle_visible(0));
+        assert!(mesh.is_triangle_visible(1));
+    }
 }
+

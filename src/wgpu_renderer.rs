@@ -280,7 +280,7 @@ pub struct WgpuViewport {
     gpu_compositor: crate::gpu_compositor::GpuCompositor,
     pub gpu_layers: Vec<crate::gpu_compositor::GpuLayer>,
     pub gpu_brush: crate::gpu_brush::GpuBrushEngine,
-
+    pub submeshes: Vec<crate::mesh::SubMeshRange>,
     index_count: u32,
     wire_index_count: u32,
     pub adapter_info: Option<eframe::wgpu::AdapterInfo>,
@@ -842,6 +842,7 @@ impl WgpuViewport {
             gpu_compositor,
             gpu_layers: Vec::new(),
             gpu_brush,
+            submeshes: mesh.submeshes.clone(),
             index_count: mesh.indices.len() as u32,
             wire_index_count,
             adapter_info: Some(render_state.adapter.get_info()),
@@ -926,23 +927,6 @@ impl WgpuViewport {
             size
         );
         self.queue.submit(std::iter::once(encoder.finish()));
-
-        if project.composite_textures.emissive.width == self.pbr_tex_width && project.composite_textures.emissive.height == self.pbr_tex_height {
-            self.queue.write_texture(
-                wgpu::ImageCopyTexture { texture: &self.tex_emissive, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-                bytemuck::cast_slice(&project.composite_textures.emissive.data),
-                wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(self.pbr_tex_width * 16), rows_per_image: Some(self.pbr_tex_height) },
-                size,
-            );
-        }
-        if project.composite_textures.opacity.width == self.pbr_tex_width && project.composite_textures.opacity.height == self.pbr_tex_height {
-            self.queue.write_texture(
-                wgpu::ImageCopyTexture { texture: &self.tex_opacity, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-                bytemuck::cast_slice(&project.composite_textures.opacity.data),
-                wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(self.pbr_tex_width * 4), rows_per_image: Some(self.pbr_tex_height) },
-                size,
-            );
-        }
     }
 
     pub fn ensure_baked_textures(&mut self, w: u32, h: u32) {
@@ -1550,7 +1534,17 @@ fn blur_equirectangular(
             pass.set_bind_group(1, &self.material_bind_group, &[]);
             pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
             pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..self.index_count, 0, 0..1);
+            if self.submeshes.is_empty() {
+                pass.draw_indexed(0..self.index_count, 0, 0..1);
+            } else {
+                for sm in &self.submeshes {
+                    if sm.visible && sm.index_count > 0 {
+                        let start = sm.start_index as u32;
+                        let count = sm.index_count as u32;
+                        pass.draw_indexed(start..(start + count), 0, 0..1);
+                    }
+                }
+            }
 
             // Draw Wireframe Overlay
             if show_wireframe && self.wire_index_count > 0 {
@@ -1695,7 +1689,12 @@ impl WgpuViewport {
 
         self.index_count = mesh.indices.len() as u32;
         self.wire_index_count = wire_indices.len() as u32;
+        self.submeshes = mesh.submeshes.clone();
         self.gpu_layers.clear();
+    }
+
+    pub fn sync_submesh_visibility(&mut self, submeshes: &[crate::mesh::SubMeshRange]) {
+        self.submeshes = submeshes.to_vec();
     }
 
     pub fn clear_gpu_layers(&mut self) {

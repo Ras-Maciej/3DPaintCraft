@@ -898,6 +898,62 @@ pub fn barycentric_3d(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> (f32, f32, f32) {
         self.last_hit_normal = Some(hit_normal);
     }
 
+    /// Calculate all active symmetry points (primary + mirrored across X/Y/Z) for 3D projection painting
+    pub fn get_symmetry_points(&self, hit_pos: Vec3, hit_normal: Vec3) -> Vec<(Vec3, Vec3)> {
+        let mut pts = vec![(hit_pos, hit_normal)];
+        let c = self.settings.symmetry_center;
+        let sym_x = self.settings.symmetry_x;
+        let sym_y = self.settings.symmetry_y;
+        let sym_z = self.settings.symmetry_z;
+
+        if !sym_x && !sym_y && !sym_z {
+            return pts;
+        }
+
+        // 1. Single Axis Symmetry
+        if sym_x {
+            let p = Vec3::new(2.0 * c.x - hit_pos.x, hit_pos.y, hit_pos.z);
+            let n = Vec3::new(-hit_normal.x, hit_normal.y, hit_normal.z);
+            pts.push((p, n));
+        }
+        if sym_y {
+            let p = Vec3::new(hit_pos.x, 2.0 * c.y - hit_pos.y, hit_pos.z);
+            let n = Vec3::new(hit_normal.x, -hit_normal.y, hit_normal.z);
+            pts.push((p, n));
+        }
+        if sym_z {
+            let p = Vec3::new(hit_pos.x, hit_pos.y, 2.0 * c.z - hit_pos.z);
+            let n = Vec3::new(hit_normal.x, hit_normal.y, -hit_normal.z);
+            pts.push((p, n));
+        }
+
+        // 2. Dual Axis Symmetry
+        if sym_x && sym_y {
+            let p = Vec3::new(2.0 * c.x - hit_pos.x, 2.0 * c.y - hit_pos.y, hit_pos.z);
+            let n = Vec3::new(-hit_normal.x, -hit_normal.y, hit_normal.z);
+            pts.push((p, n));
+        }
+        if sym_x && sym_z {
+            let p = Vec3::new(2.0 * c.x - hit_pos.x, hit_pos.y, 2.0 * c.z - hit_pos.z);
+            let n = Vec3::new(-hit_normal.x, hit_normal.y, -hit_normal.z);
+            pts.push((p, n));
+        }
+        if sym_y && sym_z {
+            let p = Vec3::new(hit_pos.x, 2.0 * c.y - hit_pos.y, 2.0 * c.z - hit_pos.z);
+            let n = Vec3::new(hit_normal.x, -hit_normal.y, -hit_normal.z);
+            pts.push((p, n));
+        }
+
+        // 3. Triple Axis Symmetry
+        if sym_x && sym_y && sym_z {
+            let p = Vec3::new(2.0 * c.x - hit_pos.x, 2.0 * c.y - hit_pos.y, 2.0 * c.z - hit_pos.z);
+            let n = Vec3::new(-hit_normal.x, -hit_normal.y, -hit_normal.z);
+            pts.push((p, n));
+        }
+
+        pts
+    }
+
     /// Collect 3D projection stamping uniform and triangle parameters for GPU compute shader execution
     pub fn build_gpu_stamp_data(
         &self,
@@ -1094,5 +1150,59 @@ mod tests {
         assert!(erased_emis.x < 0.2, "Emissive should be erased towards 0, got {}", erased_emis.x);
         assert!(erased_emis.w < 0.5, "Emissive intensity should be erased, got {}", erased_emis.w);
         assert!(erased_opac > 0.8, "Opacity should be restored towards 1.0, got {}", erased_opac);
+    }
+
+    #[test]
+    fn test_symmetry_point_generation() {
+        let mut engine = BrushEngine::new();
+        let hit_pos = glam::Vec3::new(1.5, 2.0, 3.0);
+        let hit_norm = glam::Vec3::new(0.577, 0.577, 0.577);
+
+        // Off
+        engine.settings.symmetry_x = false;
+        engine.settings.symmetry_y = false;
+        engine.settings.symmetry_z = false;
+        let pts = engine.get_symmetry_points(hit_pos, hit_norm);
+        assert_eq!(pts.len(), 1);
+        assert_eq!(pts[0].0, hit_pos);
+
+        // X axis
+        engine.settings.symmetry_x = true;
+        let pts_x = engine.get_symmetry_points(hit_pos, hit_norm);
+        assert_eq!(pts_x.len(), 2);
+        assert_eq!(pts_x[0].0, hit_pos);
+        assert_eq!(pts_x[1].0, glam::Vec3::new(-1.5, 2.0, 3.0));
+        assert_eq!(pts_x[1].1, glam::Vec3::new(-0.577, 0.577, 0.577));
+
+        // Y axis
+        engine.settings.symmetry_x = false;
+        engine.settings.symmetry_y = true;
+        let pts_y = engine.get_symmetry_points(hit_pos, hit_norm);
+        assert_eq!(pts_y.len(), 2);
+        assert_eq!(pts_y[1].0, glam::Vec3::new(1.5, -2.0, 3.0));
+        assert_eq!(pts_y[1].1, glam::Vec3::new(0.577, -0.577, 0.577));
+
+        // Z axis
+        engine.settings.symmetry_y = false;
+        engine.settings.symmetry_z = true;
+        let pts_z = engine.get_symmetry_points(hit_pos, hit_norm);
+        assert_eq!(pts_z.len(), 2);
+        assert_eq!(pts_z[1].0, glam::Vec3::new(1.5, 2.0, -3.0));
+        assert_eq!(pts_z[1].1, glam::Vec3::new(0.577, 0.577, -0.577));
+
+        // Dual axis (X and Y)
+        engine.settings.symmetry_x = true;
+        engine.settings.symmetry_y = true;
+        engine.settings.symmetry_z = false;
+        let pts_xy = engine.get_symmetry_points(hit_pos, hit_norm);
+        assert_eq!(pts_xy.len(), 4, "Dual axis symmetry should generate original + X + Y + XY points");
+
+        // Custom center offset
+        engine.settings.symmetry_x = true;
+        engine.settings.symmetry_y = false;
+        engine.settings.symmetry_center = glam::Vec3::new(1.0, 0.0, 0.0);
+        let pts_offset = engine.get_symmetry_points(hit_pos, hit_norm);
+        // mirrored x around 1.0: 2 * 1.0 - 1.5 = 0.5
+        assert_eq!(pts_offset[1].0.x, 0.5);
     }
 }

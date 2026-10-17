@@ -102,7 +102,7 @@ impl HistoryManager {
         match &entry.action {
             HistoryAction::Stroke { layer_idx, prev_layer, .. } => {
                 if let Some(target) = project.layers.get_mut(*layer_idx) {
-                    *target = (**prev_layer).clone();
+                    target.restore_stroke_snapshot(prev_layer);
                     target.mark_dirty_full();
                     project.rebuild_composite();
                 }
@@ -135,7 +135,7 @@ impl HistoryManager {
         match &entry.action {
             HistoryAction::Stroke { layer_idx, next_layer, .. } => {
                 if let Some(target) = project.layers.get_mut(*layer_idx) {
-                    *target = (**next_layer).clone();
+                    target.restore_stroke_snapshot(next_layer);
                     target.mark_dirty_full();
                     project.rebuild_composite();
                 }

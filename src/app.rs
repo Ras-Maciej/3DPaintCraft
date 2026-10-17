@@ -1108,21 +1108,30 @@ impl eframe::App for PaintcraftApp {
                             }
 
                             // Symmetry controls
-                            ui.label("Sym:");
+                            let any_sym = self.brush_engine.settings.symmetry_x || self.brush_engine.settings.symmetry_y || self.brush_engine.settings.symmetry_z;
+                            let sym_label_color = if any_sym { Color32::from_rgb(243, 94, 24) } else { Color32::from_rgb(140, 145, 155) };
+                            ui.label(egui::RichText::new("Symmetry:").color(sym_label_color));
+
+                            let sym_off = !any_sym;
+                            if ui.selectable_label(sym_off, "Off").on_hover_text("Disable Symmetry Painting").clicked() {
+                                self.brush_engine.settings.symmetry_x = false;
+                                self.brush_engine.settings.symmetry_y = false;
+                                self.brush_engine.settings.symmetry_z = false;
+                            }
                             let sym_x = self.brush_engine.settings.symmetry_x;
-                            if ui.selectable_label(sym_x, "X").on_hover_text("Mirror X (Left/Right)").clicked() {
+                            if ui.selectable_label(sym_x, "X").on_hover_text("Mirror X (Left/Right plane)").clicked() {
                                 self.brush_engine.settings.symmetry_x = !sym_x;
                             }
                             let sym_y = self.brush_engine.settings.symmetry_y;
-                            if ui.selectable_label(sym_y, "Y").on_hover_text("Mirror Y (Top/Bottom)").clicked() {
+                            if ui.selectable_label(sym_y, "Y").on_hover_text("Mirror Y (Top/Bottom plane)").clicked() {
                                 self.brush_engine.settings.symmetry_y = !sym_y;
                             }
                             let sym_z = self.brush_engine.settings.symmetry_z;
-                            if ui.selectable_label(sym_z, "Z").on_hover_text("Mirror Z (Front/Back)").clicked() {
+                            if ui.selectable_label(sym_z, "Z").on_hover_text("Mirror Z (Front/Back plane)").clicked() {
                                 self.brush_engine.settings.symmetry_z = !sym_z;
                             }
-                            if sym_x || sym_y || sym_z {
-                                if ui.small_button("Center").on_hover_text("Center symmetry on mesh bounds").clicked() {
+                            if any_sym {
+                                if ui.small_button("Center").on_hover_text("Center symmetry plane on active mesh bounds").clicked() {
                                     self.brush_engine.settings.symmetry_center = (self.project.mesh.aabb_min + self.project.mesh.aabb_max) * 0.5;
                                     self.status_message = "Symmetry plane centered on mesh".to_string();
                                 }
@@ -1489,25 +1498,85 @@ impl eframe::App for PaintcraftApp {
             .default_width(380.0)
             .show(ctx, |ui| {
                 // Top: TEXTURE SET LIST (Substance 3D Painter)
+                // Top: TEXTURE SET LIST (Substance 3D Painter)
                 ui.group(|ui| {
                     ui.horizontal(|ui| {
                         ui.strong(egui::RichText::new("TEXTURE SET LIST").size(10.5).color(Color32::from_rgb(175, 180, 190)));
+                        ui.label(egui::RichText::new(format!("[{}]", self.project.texture_sets.len())).small().color(Color32::from_rgb(226, 91, 16)));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.label(egui::RichText::new(format!("{}x{}", self.project.texture_width, self.project.texture_height)).small().color(Color32::from_rgb(140, 145, 155)));
+                            ui.checkbox(&mut self.project.auto_switch_texture_set, "Auto-Switch")
+                                .on_hover_text("Automatically activate Texture Set when painting or clicking on its sub-mesh in the 3D viewport");
                         });
                     });
-                    ui.horizontal(|ui| {
-                        let active_set_bg = Color32::from_rgb(38, 44, 56);
-                        let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 24.0), egui::Sense::hover());
-                        ui.painter().rect(rect, 3.0, active_set_bg, egui::Stroke::new(1.0_f32, Color32::from_rgb(45, 120, 230)));
-                        ui.painter().text(
-                            egui::pos2(rect.min.x + 8.0, rect.center().y),
-                            egui::Align2::LEFT_CENTER,
-                            format!("[o]  {}  (Main shader)", self.project.mesh.name),
-                            egui::FontId::proportional(11.0),
-                            Color32::WHITE,
-                        );
-                    });
+
+                    // Scrollable list of texture sets
+                    let max_ts_height = (self.project.texture_sets.len() as f32 * 28.0).clamp(40.0, 130.0);
+                    egui::ScrollArea::vertical()
+                        .max_height(max_ts_height)
+                        .show(ui, |ui| {
+                            let mut switch_to = None;
+                            let mut toggle_vis = None;
+                            let mut toggle_solo = None;
+
+                            for (idx, ts) in self.project.texture_sets.iter().enumerate() {
+                                let is_active = idx == self.project.active_texture_set_idx;
+                                let is_visible = ts.visible;
+                                
+                                ui.horizontal(|ui| {
+                                    // Eye visibility toggle
+                                    let eye_txt = if is_visible { "[V]" } else { "[ ]" };
+                                    let eye_col = if is_visible { Color32::from_rgb(220, 225, 235) } else { Color32::from_rgb(100, 105, 115) };
+                                    if ui.button(egui::RichText::new(eye_txt).monospace().color(eye_col)).on_hover_text("Toggle Texture Set / Sub-mesh visibility in 3D viewport").clicked() {
+                                        toggle_vis = Some(idx);
+                                    }
+
+                                    // Solo toggle
+                                    let solo_col = if is_active { Color32::from_rgb(243, 94, 24) } else { Color32::from_rgb(130, 135, 145) };
+                                    if ui.small_button(egui::RichText::new("S").strong().color(solo_col)).on_hover_text("Solo Texture Set (isolate in viewport)").clicked() {
+                                        toggle_solo = Some(idx);
+                                    }
+
+                                    // Name and tri count
+                                    let tri_count: usize = ts.submesh_indices.iter()
+                                        .filter_map(|&sm_idx| self.project.mesh.submeshes.get(sm_idx))
+                                        .map(|sm| sm.index_count / 3)
+                                        .sum();
+
+                                    let label_text = format!("{}  ({} tris)", ts.name, tri_count);
+                                    let resp = if is_active {
+                                        ui.selectable_label(true, egui::RichText::new(&label_text).strong().color(Color32::WHITE))
+                                    } else {
+                                        ui.selectable_label(false, egui::RichText::new(&label_text).color(Color32::from_rgb(180, 185, 195)))
+                                    };
+
+                                    if resp.clicked() && !is_active {
+                                        switch_to = Some(idx);
+                                    }
+                                });
+                            }
+
+                            if let Some(idx) = toggle_vis {
+                                self.project.toggle_texture_set_visibility(idx);
+                                if let Some(wgpu) = &mut self.wgpu_viewport {
+                                    wgpu.sync_submesh_visibility(&self.project.mesh.submeshes);
+                                }
+                            }
+                            if let Some(idx) = toggle_solo {
+                                self.project.solo_texture_set(idx);
+                                if let Some(wgpu) = &mut self.wgpu_viewport {
+                                    wgpu.sync_submesh_visibility(&self.project.mesh.submeshes);
+                                }
+                            }
+                            if let Some(idx) = switch_to {
+                                self.project.switch_texture_set(idx);
+                                if let Some(wgpu) = &mut self.wgpu_viewport {
+                                    wgpu.sync_textures(&mut self.project);
+                                }
+                                self.status_message = format!("Active Texture Set: {}", self.project.texture_sets[idx].name);
+                            }
+                        });
+
+                    // Active Texture Set size selector and quick actions
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new("Size:").small().color(Color32::from_rgb(140, 145, 155)));
                         let res_list = [512, 1024, 2048, 4096];
@@ -1528,6 +1597,36 @@ impl eframe::App for PaintcraftApp {
                                 self.status_message = format!("Resized texture set to {}x{}", r, r);
                             }
                         }
+
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if self.project.texture_sets.len() > 1 {
+                                if ui.small_button("Del").on_hover_text("Delete active texture set").clicked() {
+                                    let cur_idx = self.project.active_texture_set_idx;
+                                    self.project.delete_texture_set(cur_idx);
+                                    if let Some(wgpu) = &mut self.wgpu_viewport {
+                                        wgpu.sync_textures(&mut self.project);
+                                    }
+                                }
+                            }
+                            if ui.small_button("Dup").on_hover_text("Duplicate active texture set").clicked() {
+                                let cur_idx = self.project.active_texture_set_idx;
+                                self.project.duplicate_texture_set(cur_idx);
+                                if let Some(wgpu) = &mut self.wgpu_viewport {
+                                    wgpu.sync_textures(&mut self.project);
+                                }
+                            }
+                            if ui.small_button("+ Set").on_hover_text("Add new empty Texture Set").clicked() {
+                                let new_id = self.project.texture_sets.len() + 1;
+                                self.project.add_texture_set(
+                                    format!("Material_{}", new_id),
+                                    format!("Material_{}", new_id),
+                                    vec![],
+                                );
+                                if let Some(wgpu) = &mut self.wgpu_viewport {
+                                    wgpu.sync_textures(&mut self.project);
+                                }
+                            }
+                        });
                     });
                 });
                 ui.add_space(3.0);
@@ -4528,8 +4627,11 @@ impl PaintcraftApp {
             && !input.modifiers.alt && !input.modifiers.command
         {
                 if !self.is_stroke_active {
+                    if let Some(wgpu) = &mut self.wgpu_viewport {
+                        wgpu.ensure_gpu_layers(&self.project);
+                    }
                     if let Some(layer) = self.project.active_layer() {
-                        self.stroke_start_layer = Some(Box::new(layer.clone()));
+                        self.stroke_start_layer = Some(layer.clone_stroke_snapshot());
                         self.is_stroke_active = true;
                     }
                 }
@@ -4569,7 +4671,20 @@ impl PaintcraftApp {
                     );
 
                     if let Some(hit) = self.project.mesh.raycast(&ray) {
-                        if self.brush_engine.settings.mode == ToolMode::Eyedropper {
+                        if !self.project.mesh.is_triangle_visible(hit.triangle_idx) {
+                            // Submesh is hidden, skip painting
+                        } else {
+                            if self.project.auto_switch_texture_set {
+                                if let Some(target_ts_idx) = self.project.texture_set_index_for_triangle(hit.triangle_idx) {
+                                    if target_ts_idx != self.project.active_texture_set_idx {
+                                        self.project.switch_texture_set(target_ts_idx);
+                                        if let Some(wgpu) = &mut self.wgpu_viewport {
+                                            wgpu.sync_textures(&mut self.project);
+                                        }
+                                    }
+                                }
+                            }
+                            if self.brush_engine.settings.mode == ToolMode::Eyedropper {
                             let sampled = self.project.composite_textures.base_color.sample_bilinear(hit.uv);
                             self.brush_engine.settings.paint_color = sampled;
                             self.brush_engine.settings.paint_roughness = self.project.composite_textures.roughness.sample_bilinear(hit.uv);
@@ -4689,11 +4804,7 @@ impl PaintcraftApp {
                                     let doc_w = self.project.texture_width;
                                     let doc_h = self.project.texture_height;
 
-                                    let gpu_stamp_data = if self.wgpu_viewport.is_some() {
-                                        self.brush_engine.build_gpu_stamp_data(&self.project.mesh, hit.point, hit.normal, world_radius, doc_w, doc_h)
-                                    } else {
-                                        None
-                                    };
+                                    let sym_pts = self.brush_engine.get_symmetry_points(hit.point, hit.normal);
 
                                     // Keep CPU layer buffer updated for history/undo/save integrity
                                     {
@@ -4702,13 +4813,21 @@ impl PaintcraftApp {
                                         self.brush_engine.paint_stroke_3d(layer, mesh, hit.point, hit.normal, world_radius);
                                     }
 
-                                    // Option 3: Hardware GPU Compute Shader 3D Projection Stamping
+                                    // Option 1 & 3: Hardware GPU Compute Shader 3D Projection Stamping across all symmetry points
                                     let mut gpu_stamped = false;
-                                    if let (Some(wgpu), Some((uniforms, gpu_tris))) = (&mut self.wgpu_viewport, gpu_stamp_data) {
-                                        wgpu.stamp_3d_gpu(act_idx, &uniforms, &gpu_tris);
-                                        wgpu.composite_and_update(&self.project);
-                                        self.perf_metrics.texture_transfer_bytes = (doc_w as u64) * (doc_h as u64) * 40;
-                                        gpu_stamped = true;
+                                    if let Some(wgpu) = &mut self.wgpu_viewport {
+                                        let mut any_stamped = false;
+                                        for (p, n) in &sym_pts {
+                                            if let Some((uniforms, gpu_tris)) = self.brush_engine.build_gpu_stamp_data(&self.project.mesh, *p, *n, world_radius, doc_w, doc_h) {
+                                                wgpu.stamp_3d_gpu(act_idx, &uniforms, &gpu_tris);
+                                                any_stamped = true;
+                                            }
+                                        }
+                                        if any_stamped {
+                                            wgpu.composite_and_update(&self.project);
+                                            self.perf_metrics.texture_transfer_bytes = (doc_w as u64) * (doc_h as u64) * 40 * (sym_pts.len() as u64);
+                                            gpu_stamped = true;
+                                        }
                                     }
 
                                     self.perf_metrics.paint_stroke_ms = t_stroke.elapsed().as_secs_f32() * 1000.0;
@@ -4727,6 +4846,7 @@ impl PaintcraftApp {
                             }
                         }
                     }
+                    }
                 }
             } else if response.drag_stopped() {
                 self.brush_engine.end_stroke();
@@ -4740,7 +4860,7 @@ impl PaintcraftApp {
                             self.history.push("Paint Stroke", HistoryAction::Stroke {
                                 layer_idx: idx,
                                 prev_layer: prev,
-                                next_layer: Box::new(next.clone()),
+                                next_layer: next.clone_stroke_snapshot(),
                                 description: "Paint Stroke".to_string(),
                             });
                         }
@@ -4880,21 +5000,9 @@ impl PaintcraftApp {
                     let ray = self.camera.screen_to_ray(local_x, local_y, vp_w, vp_h);
 
                     if let Some(hit) = self.project.mesh.raycast(&ray) {
-                        let c = self.brush_engine.settings.symmetry_center;
-
-                        let mut sym_points = Vec::new();
-                        if sym_x {
-                            sym_points.push(glam::Vec3::new(2.0 * c.x - hit.point.x, hit.point.y, hit.point.z));
-                        }
-                        if sym_y {
-                            sym_points.push(glam::Vec3::new(hit.point.x, 2.0 * c.y - hit.point.y, hit.point.z));
-                        }
-                        if sym_z {
-                            sym_points.push(glam::Vec3::new(hit.point.x, hit.point.y, 2.0 * c.z - hit.point.z));
-                        }
-
-                        for sym_p in sym_points {
-                            if let Some(screen_p) = self.camera.world_to_screen(sym_p, vp_w, vp_h) {
+                        let sym_points = self.brush_engine.get_symmetry_points(hit.point, hit.normal);
+                        for (sym_p, _) in sym_points.iter().skip(1) {
+                            if let Some(screen_p) = self.camera.world_to_screen(*sym_p, vp_w, vp_h) {
                                 let sym_screen_pos = rect.min + egui::vec2(screen_p.x, screen_p.y);
                                 ui.painter().circle_stroke(
                                     sym_screen_pos,
@@ -5078,7 +5186,7 @@ impl PaintcraftApp {
                 ctx.request_repaint();
                 if !self.is_stroke_active {
                     if let Some(layer) = self.project.active_layer() {
-                        self.stroke_start_layer = Some(Box::new(layer.clone()));
+                        self.stroke_start_layer = Some(layer.clone_stroke_snapshot());
                         self.is_stroke_active = true;
                     }
                 }
@@ -5223,7 +5331,7 @@ impl PaintcraftApp {
                             self.history.push("2D UV Paint Stroke", HistoryAction::Stroke {
                                 layer_idx: idx,
                                 prev_layer: prev,
-                                next_layer: Box::new(next.clone()),
+                                next_layer: next.clone_stroke_snapshot(),
                                 description: "2D UV Paint Stroke".to_string(),
                             });
                         }

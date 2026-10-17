@@ -423,8 +423,91 @@ impl Layer {
         self.roughness_buf.resize_bilinear(new_width, new_height);
         self.metallic_buf.resize_bilinear(new_width, new_height);
         self.height_buf.resize_bilinear(new_width, new_height);
+        self.emissive_buf.resize_bilinear(new_width, new_height);
+        self.opacity_buf.resize_bilinear(new_width, new_height);
+        self.clearcoat_buf.resize_bilinear(new_width, new_height);
         self.mask_buf.resize_bilinear(new_width, new_height);
         self.mark_dirty_full();
+    }
+
+    /// Create a lightweight snapshot of this layer for undo/redo stroke tracking.
+    /// Excludes heavy static texture maps (fill_color_tex, fill_normal_tex, etc.)
+    /// to avoid copying tens/hundreds of megabytes of read-only textures on every stroke.
+    pub fn clone_stroke_snapshot(&self) -> Box<Layer> {
+        Box::new(Layer {
+            id: self.id,
+            name: self.name.clone(),
+            layer_type: self.layer_type,
+            visible: self.visible,
+            opacity: self.opacity,
+            blend_mode: self.blend_mode,
+            channel_flags: self.channel_flags,
+
+            fill_color: self.fill_color,
+            fill_roughness: self.fill_roughness,
+            fill_metallic: self.fill_metallic,
+            fill_height: self.fill_height,
+            fill_normal_strength: self.fill_normal_strength,
+            fill_emissive: self.fill_emissive,
+            fill_opacity: self.fill_opacity,
+            fill_clearcoat: self.fill_clearcoat,
+            fill_generator: self.fill_generator,
+            generator_scale: self.generator_scale,
+            generator_contrast: self.generator_contrast,
+            generator_invert: self.generator_invert,
+            triplanar: self.triplanar,
+
+            uv_scale: self.uv_scale,
+            uv_offset: self.uv_offset,
+            uv_rotation: self.uv_rotation,
+
+            fill_color_tex: None,
+            fill_roughness_tex: None,
+            fill_metallic_tex: None,
+            fill_normal_tex: None,
+            fill_emissive_tex: None,
+            fill_opacity_tex: None,
+
+            base_color_buf: self.base_color_buf.clone(),
+            roughness_buf: self.roughness_buf.clone(),
+            metallic_buf: self.metallic_buf.clone(),
+            height_buf: self.height_buf.clone(),
+            normal_buf: self.normal_buf.clone(),
+            emissive_buf: self.emissive_buf.clone(),
+            opacity_buf: self.opacity_buf.clone(),
+            clearcoat_buf: self.clearcoat_buf.clone(),
+
+            has_mask: self.has_mask,
+            mask_buf: self.mask_buf.clone(),
+            mask_inverted: self.mask_inverted,
+            base_mask_value: self.base_mask_value,
+            mask_effects: self.mask_effects.clone(),
+            next_mask_effect_id: self.next_mask_effect_id,
+            active_mask_effect_id: self.active_mask_effect_id,
+            dirty_rect: self.dirty_rect,
+            parent_folder_id: self.parent_folder_id,
+            folder_collapsed: self.folder_collapsed,
+        })
+    }
+
+    /// Restore raster buffer state from a stroke snapshot, preserving loaded fill textures
+    pub fn restore_stroke_snapshot(&mut self, snapshot: &Layer) {
+        self.base_color_buf = snapshot.base_color_buf.clone();
+        self.roughness_buf = snapshot.roughness_buf.clone();
+        self.metallic_buf = snapshot.metallic_buf.clone();
+        self.height_buf = snapshot.height_buf.clone();
+        self.normal_buf = snapshot.normal_buf.clone();
+        self.emissive_buf = snapshot.emissive_buf.clone();
+        self.opacity_buf = snapshot.opacity_buf.clone();
+        self.clearcoat_buf = snapshot.clearcoat_buf.clone();
+        self.mask_buf = snapshot.mask_buf.clone();
+        self.has_mask = snapshot.has_mask;
+        self.mask_inverted = snapshot.mask_inverted;
+        self.base_mask_value = snapshot.base_mask_value;
+        self.mask_effects = snapshot.mask_effects.clone();
+        self.active_mask_effect_id = snapshot.active_mask_effect_id;
+        self.channel_flags = snapshot.channel_flags;
+        self.dirty_rect = snapshot.dirty_rect;
     }
 
     pub fn add_black_mask(&mut self) {
@@ -1595,7 +1678,15 @@ impl CompositeTextureSet {
             clearcoat: ScalarBuffer::new(width, height, 0.0),
         }
     }
+}
 
+impl Default for CompositeTextureSet {
+    fn default() -> Self {
+        Self::new(512, 512)
+    }
+}
+
+impl CompositeTextureSet {
     pub fn composite_layers(&mut self, layers: &[Layer]) {
         let w = self.width as usize;
         let _h = self.height as usize;
@@ -2165,4 +2256,42 @@ mod tests {
         comp.composite_layers(&[layer]);
         assert!((comp.opacity.get_pixel(16, 16) - 0.42).abs() < 1e-4, "Composite opacity did not blend layer opacity");
     }
+
+    #[test]
+    fn test_stroke_snapshot_optimization() {
+        let mut layer = Layer::new_fill_layer(
+            1,
+            "Optimized Layer".to_string(),
+            32,
+            32,
+            Vec4::ONE,
+            0.5,
+            0.0,
+        );
+        // Simulate heavy static texture map
+        let heavy_tex = RgbaBuffer::new(32, 32, Vec4::new(0.8, 0.2, 0.1, 1.0));
+        layer.fill_color_tex = Some(heavy_tex);
+
+        // Paint a pixel
+        layer.base_color_buf.set_pixel(10, 10, Vec4::new(1.0, 0.0, 0.0, 1.0));
+
+        // Create stroke snapshot
+        let snapshot = layer.clone_stroke_snapshot();
+
+        // Verify heavy static texture was skipped in snapshot (saving memory and latency)
+        assert!(snapshot.fill_color_tex.is_none(), "Stroke snapshot should not duplicate heavy static fill textures");
+        assert_eq!(snapshot.base_color_buf.get_pixel(10, 10), Vec4::new(1.0, 0.0, 0.0, 1.0));
+
+        // Now mutate original layer (simulate active painting stroke)
+        layer.base_color_buf.set_pixel(10, 10, Vec4::new(0.0, 1.0, 0.0, 1.0));
+        assert_eq!(layer.base_color_buf.get_pixel(10, 10), Vec4::new(0.0, 1.0, 0.0, 1.0));
+
+        // Restore stroke snapshot (simulate undo)
+        layer.restore_stroke_snapshot(&snapshot);
+
+        // Verify painted buffer was restored while target's static texture map remained intact
+        assert_eq!(layer.base_color_buf.get_pixel(10, 10), Vec4::new(1.0, 0.0, 0.0, 1.0));
+        assert!(layer.fill_color_tex.is_some(), "Restoring stroke snapshot must preserve target's fill textures");
+    }
 }
+
