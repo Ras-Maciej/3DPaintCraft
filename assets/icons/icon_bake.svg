@@ -1,25 +1,11 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
-  <!-- High-Poly Surface Wave (Upper) -->
-  <path d="M 8 20 Q 20 10, 32 20 T 56 20" fill="none" stroke="#f35e18" stroke-width="3" stroke-linecap="round"/>
-  
-  <!-- Low-Poly Surface Flat Plane (Lower) -->
-  <line x1="8" y1="46" x2="56" y2="46" stroke="#94a3b8" stroke-width="3" stroke-linecap="round"/>
-  
-  <!-- Bidirectional Surface Normal Baking Rays -->
-  <!-- Ray 1 -->
-  <line x1="16" y1="20" x2="16" y2="44" stroke="#00d2ff" stroke-width="1.8" stroke-dasharray="2,2"/>
-  <polygon points="16,45 13,39 19,39" fill="#00d2ff"/>
-  
-  <!-- Ray 2 Center -->
-  <line x1="32" y1="22" x2="32" y2="44" stroke="#00d2ff" stroke-width="1.8" stroke-dasharray="2,2"/>
-  <polygon points="32,45 29,39 35,39" fill="#00d2ff"/>
-  
-  <!-- Ray 3 -->
-  <line x1="48" y1="20" x2="48" y2="44" stroke="#00d2ff" stroke-width="1.8" stroke-dasharray="2,2"/>
-  <polygon points="48,45 45,39 51,39" fill="#00d2ff"/>
-  
-  <!-- Projection Intersection Points -->
-  <circle cx="16" cy="18" r="2.2" fill="#ffa166"/>
-  <circle cx="32" cy="20" r="2.2" fill="#ffa166"/>
-  <circle cx="48" cy="18" r="2.2" fill="#ffa166"/>
+  <!-- Simple Bake Silhouette -->
+  <path d="M 12 18 Q 22 10 32 18 T 52 18" fill="none" stroke="#FFFFFF" stroke-width="3" stroke-linecap="round"/>
+  <line x1="12" y1="48" x2="52" y2="48" stroke="#FFFFFF" stroke-width="3" stroke-linecap="round"/>
+  <line x1="32" y1="24" x2="32" y2="43" stroke="#FFFFFF" stroke-width="2.5"/>
+  <polyline points="28,39 32,43 36,39" fill="none" stroke="#FFFFFF" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <line x1="18" y1="24" x2="18" y2="43" stroke="#FFFFFF" stroke-width="2"/>
+  <polyline points="15,39 18,43 21,39" fill="none" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+  <line x1="46" y1="24" x2="46" y2="43" stroke="#FFFFFF" stroke-width="2"/>
+  <polyline points="43,39 46,43 49,39" fill="none" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
 </svg>

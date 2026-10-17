@@ -1,24 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
-  <!-- Asset Shelf 2x2 Grid Tiles -->
-  <!-- Top-Left Tile (Material Sphere) -->
-  <rect x="12" y="12" width="16" height="16" rx="3" fill="#2d3748" stroke="#4a5568" stroke-width="1.5"/>
-  <circle cx="20" cy="20" r="5" fill="#f35e18"/>
-  <circle cx="18" cy="18" r="1.5" fill="#ffa166"/>
-  
-  <!-- Top-Right Tile (Smart Material / Cube) -->
-  <rect x="36" y="12" width="16" height="16" rx="3" fill="#2d3748" stroke="#4a5568" stroke-width="1.5"/>
-  <polygon points="44,15 50,18 44,21 38,18" fill="#cbd5e1"/>
-  <polygon points="38,18 44,21 44,25 38,22" fill="#94a3b8"/>
-  <polygon points="44,21 50,18 50,22 44,25" fill="#64748b"/>
-  
-  <!-- Bottom-Left Tile (Mask Filter / Procedural) -->
-  <rect x="12" y="34" width="16" height="16" rx="3" fill="#2d3748" stroke="#4a5568" stroke-width="1.5"/>
-  <circle cx="20" cy="42" r="5" fill="#00d2ff"/>
-  
-  <!-- Bottom-Right Tile (Alpha Decal) -->
-  <rect x="36" y="34" width="16" height="16" rx="3" fill="#2d3748" stroke="#4a5568" stroke-width="1.5"/>
-  <polygon points="44,36 46,41 51,41 47,44 49,49 44,46 39,49 41,44 37,41 42,41" fill="#e2e8f0"/>
-  
-  <!-- Shelf Ledge / Base Plate -->
-  <rect x="8" y="54" width="48" height="4" rx="1.5" fill="#f35e18" stroke="#b84508" stroke-width="1.2"/>
+  <!-- Simple 2x2 Asset Grid Shelf Silhouette -->
+  <rect x="12" y="12" width="16" height="16" rx="3" fill="#FFFFFF"/>
+  <rect x="36" y="12" width="16" height="16" rx="3" fill="#FFFFFF"/>
+  <rect x="12" y="36" width="16" height="16" rx="3" fill="#FFFFFF"/>
+  <rect x="36" y="36" width="16" height="16" rx="3" fill="#FFFFFF"/>
 </svg>

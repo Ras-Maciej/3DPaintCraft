@@ -1,14 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
-  <!-- Eye Contour / Sclera -->
-  <path d="M 8 32 C 16 18, 48 18, 56 32 C 48 46, 16 46, 8 32 Z" fill="#1e293b" stroke="#cbd5e1" stroke-width="2.5" stroke-linejoin="round"/>
-  
-  <!-- Iris Circle -->
-  <circle cx="32" cy="32" r="10" fill="#f35e18" stroke="#ffa166" stroke-width="1.5"/>
-  
-  <!-- Pupil -->
-  <circle cx="32" cy="32" r="5" fill="#0f172a"/>
-  
-  <!-- Specular Reflection Highlight -->
-  <circle cx="35" cy="29" r="2.2" fill="#ffffff"/>
-  <circle cx="29" cy="34" r="1.0" fill="#ffffff"/>
+  <!-- Simple Eye Visibility Silhouette -->
+  <path d="M 10 32 C 18 18 46 18 54 32 C 46 46 18 46 10 32 Z" fill="none" stroke="#FFFFFF" stroke-width="3.5" stroke-linejoin="round"/>
+  <circle cx="32" cy="32" r="7" fill="#FFFFFF"/>
 </svg>

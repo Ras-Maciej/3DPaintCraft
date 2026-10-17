@@ -1,17 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
-  <defs>
-    <linearGradient id="folderGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#475569"/>
-      <stop offset="100%" stop-color="#334155"/>
-    </linearGradient>
-  </defs>
-  <!-- Back Folder Tab -->
-  <path d="M 10 18 C 10 16, 12 14, 14 14 L 26 14 C 28 14, 30 16, 32 18 L 34 22 L 52 22 C 54 22, 56 24, 56 26 L 56 46 C 56 48, 54 50, 52 50 L 14 50 C 12 50, 10 48, 10 46 Z" fill="url(#folderGrad)" stroke="#64748b" stroke-width="1.5"/>
-  
-  <!-- Front Folder Flap (Angled Open) -->
-  <path d="M 8 26 L 54 26 C 56 26, 58 28, 57 30 L 53 48 C 52 50, 50 52, 48 52 L 12 52 C 10 52, 8 50, 7 48 L 5 30 C 5 28, 6 26, 8 26 Z" fill="#1e293b" stroke="#f35e18" stroke-width="1.5"/>
-  
-  <!-- Folder Group / PassThrough Indicator Symbol -->
-  <line x1="22" y1="38" x2="38" y2="38" stroke="#f35e18" stroke-width="2" stroke-linecap="round"/>
-  <polyline points="32,32 38,38 32,44" fill="none" stroke="#f35e18" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- Simple Folder Silhouette -->
+  <path d="M 10 18 C 10 16 12 14 14 14 L 26 14 C 28 14 30 16 32 18 L 34 22 L 50 22 C 52 22 54 24 54 26 L 54 48 C 54 50 52 52 50 52 L 14 52 C 12 52 10 50 10 48 Z" fill="#FFFFFF"/>
+  <line x1="10" y1="28" x2="54" y2="28" stroke="#000000" stroke-width="2.5"/>
 </svg>
