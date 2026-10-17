@@ -3709,6 +3709,13 @@ impl eframe::App for PaintcraftApp {
                         self.show_uv_wireframe = self.renderer.show_wireframe;
                     }
 
+                    ui.separator();
+                    ui.heading("Rendering & Diagnostics");
+                    ui.checkbox(&mut self.continuous_60fps, "Continuous 60+ FPS Rendering")
+                        .on_hover_text("Forces continuous frame repaints for game-engine smoothness instead of reactive on-demand rendering.");
+                    ui.checkbox(&mut self.perf_metrics.show_debug_hud, "Performance Diagnostics HUD (F3)")
+                        .on_hover_text("Toggles the real-time throughput, work latency, and texture transfer diagnostics HUD.");
+
                     ui.add_space(8.0);
                     if ui.button("Close").clicked() {
                         self.show_viewport_settings_modal = false;
@@ -4333,8 +4340,8 @@ impl PaintcraftApp {
         );
 
         // Top-right 3D viewport quick controls pill
-        let vp_hud_pos = rect.right_top() + egui::vec2(-630.0, 10.0);
-        let vp_hud_rect = egui::Rect::from_min_size(vp_hud_pos, egui::vec2(620.0, 30.0));
+        let vp_hud_pos = rect.right_top() + egui::vec2(-285.0, 10.0);
+        let vp_hud_rect = egui::Rect::from_min_size(vp_hud_pos, egui::vec2(275.0, 30.0));
         ui.painter().rect_filled(vp_hud_rect, egui::Rounding::same(15.0), egui::Color32::from_rgba_unmultiplied(28, 30, 36, 225));
         ui.painter().rect_stroke(vp_hud_rect, egui::Rounding::same(15.0), egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(58, 62, 74)));
 
@@ -4344,70 +4351,12 @@ impl PaintcraftApp {
                 if ui.small_button("Fit (F)").on_hover_text("Fit model in 3D view (F)").clicked() {
                     self.camera.reset();
                 }
-
-                // Performance Preset dropdown
-                let cur_preset_name = match self.shader_preset {
-                    crate::wgpu_renderer::ShaderPerformancePreset::UltraQuality => "Ultra",
-                    crate::wgpu_renderer::ShaderPerformancePreset::DynamicInteraction => "Dynamic",
-                    crate::wgpu_renderer::ShaderPerformancePreset::BalancedPbr => "Balanced",
-                    crate::wgpu_renderer::ShaderPerformancePreset::MaximumPerformance => "Max FPS",
-                };
-                egui::ComboBox::from_id_source("vp_preset_quick")
-                    .selected_text(cur_preset_name)
-                    .width(78.0)
-                    .show_ui(ui, |ui| {
-                        if ui.selectable_label(self.shader_preset == crate::wgpu_renderer::ShaderPerformancePreset::DynamicInteraction, "Dynamic (Fast Drag / Crisp Idle)").clicked() {
-                            self.shader_preset = crate::wgpu_renderer::ShaderPerformancePreset::DynamicInteraction;
-                            self.shader_settings.apply_preset(self.shader_preset);
-                        }
-                        if ui.selectable_label(self.shader_preset == crate::wgpu_renderer::ShaderPerformancePreset::BalancedPbr, "Balanced PBR (60 FPS)").clicked() {
-                            self.shader_preset = crate::wgpu_renderer::ShaderPerformancePreset::BalancedPbr;
-                            self.shader_settings.apply_preset(self.shader_preset);
-                        }
-                        if ui.selectable_label(self.shader_preset == crate::wgpu_renderer::ShaderPerformancePreset::MaximumPerformance, "Max FPS (Ultra-Fast 60+ FPS)").clicked() {
-                            self.shader_preset = crate::wgpu_renderer::ShaderPerformancePreset::MaximumPerformance;
-                            self.shader_settings.apply_preset(self.shader_preset);
-                        }
-                        if ui.selectable_label(self.shader_preset == crate::wgpu_renderer::ShaderPerformancePreset::UltraQuality, "Ultra Quality (Bilateral SSAO)").clicked() {
-                            self.shader_preset = crate::wgpu_renderer::ShaderPerformancePreset::UltraQuality;
-                            self.shader_settings.apply_preset(self.shader_preset);
-                        }
-                    });
-
-                let aa_active = self.shader_settings.aa_mode != crate::nvidia_dlaa::AntiAliasingMode::Off;
-                let aa_lbl = self.shader_settings.aa_mode.badge_name();
-                if ui.selectable_label(aa_active, aa_lbl).on_hover_text("Cycle Anti-Aliasing: NVIDIA DLAA -> FXAA -> OFF").clicked() {
-                    self.shader_settings.aa_mode = match self.shader_settings.aa_mode {
-                        crate::nvidia_dlaa::AntiAliasingMode::NvidiaDlaa => crate::nvidia_dlaa::AntiAliasingMode::Fxaa,
-                        crate::nvidia_dlaa::AntiAliasingMode::Fxaa => crate::nvidia_dlaa::AntiAliasingMode::Off,
-                        crate::nvidia_dlaa::AntiAliasingMode::Off => crate::nvidia_dlaa::AntiAliasingMode::NvidiaDlaa,
-                    };
-                    self.shader_settings.fxaa_enabled = self.shader_settings.aa_mode == crate::nvidia_dlaa::AntiAliasingMode::Fxaa;
-                }
-
-                let denoise_active = self.shader_settings.denoiser_enabled;
-                let denoise_lbl = if denoise_active { "DENOISER: ON" } else { "DENOISER: OFF" };
-                if ui.selectable_label(denoise_active, denoise_lbl).on_hover_text("Toggle Screen-Space Joint Bilateral Denoiser").clicked() {
-                    self.shader_settings.denoiser_enabled = !self.shader_settings.denoiser_enabled;
-                }
-
-                let ssao_active = self.shader_settings.ssao_enabled;
-                let ssao_lbl = if ssao_active { "SSAO: ON" } else { "SSAO: OFF" };
-                if ui.selectable_label(ssao_active, ssao_lbl).on_hover_text("Toggle High-Quality Bilateral Screen-Space Ambient Occlusion").clicked() {
-                    self.shader_settings.ssao_enabled = !self.shader_settings.ssao_enabled;
-                }
-                let fps60_active = self.continuous_60fps;
-                let fps60_lbl = if fps60_active { "60 FPS: ON" } else { "60 FPS: OFF" };
-                if ui.selectable_label(fps60_active, fps60_lbl).on_hover_text("Toggle continuous 60+ FPS game-engine rendering").clicked() {
-                    self.continuous_60fps = !self.continuous_60fps;
-                }
-                let hud_active = self.perf_metrics.show_debug_hud;
-                let hud_lbl = if hud_active { "Debug HUD: ON" } else { "Debug HUD (F3)" };
-                if ui.selectable_label(hud_active, hud_lbl).on_hover_text("Toggle real-time Performance & Hardware Diagnostics HUD (F3)").clicked() {
-                    self.perf_metrics.show_debug_hud = !self.perf_metrics.show_debug_hud;
-                }
-                if ui.small_button("Shaders...").on_hover_text("Open Shader & Post-Processing settings").clicked() {
+                ui.separator();
+                if ui.small_button("Shaders...").on_hover_text("Open Shader, Presets, and Post-Processing settings").clicked() {
                     self.show_shader_settings_modal = true;
+                }
+                if ui.small_button("Viewport Settings...").on_hover_text("Open Viewport Camera, Navigation, Backdrop, and Overlay settings").clicked() {
+                    self.show_viewport_settings_modal = true;
                 }
             });
         });

@@ -21,6 +21,7 @@ impl AntiAliasingMode {
         }
     }
 
+    #[allow(dead_code)]
     pub fn badge_name(&self) -> &'static str {
         match self {
             Self::Off => "AA: OFF",
