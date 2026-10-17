@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <defs>
+    <linearGradient id="bucketGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#4a5568"/>
+      <stop offset="100%" stop-color="#2d3748"/>
+    </linearGradient>
+  </defs>
+  <!-- Angled Paint Bucket -->
+  <path d="M 12 24 L 28 8 L 36 16 L 20 32 Z" fill="url(#bucketGrad)" stroke="#718096" stroke-width="1.5"/>
+  <ellipse cx="16" cy="28" rx="4" ry="2.5" fill="#f35e18"/>
+  <ellipse cx="32" cy="12" rx="4" ry="2.5" fill="#1a202c"/>
+  
+  <!-- Flowing Paint Stream -->
+  <path d="M 17 29 C 20 34, 25 38, 28 44 C 30 46, 33 50, 35 50 C 33 46, 27 40, 21 33 Z" fill="#f35e18"/>
+  
+  <!-- Polygon Mesh Faces at Bottom -->
+  <polygon points="26,56 42,42 56,54" fill="#2d3748" stroke="#4a5568" stroke-width="1.2"/>
+  <polygon points="42,42 54,32 56,54" fill="#1a202c" stroke="#4a5568" stroke-width="1.2"/>
+  <!-- Highlighted / Filled Polygon Triangle in Orange -->
+  <polygon points="26,56 42,42 30,38" fill="#f35e18" stroke="#ff9e66" stroke-width="1.5"/>
+  
+  <!-- Paint droplets -->
+  <circle cx="28" cy="38" r="2" fill="#f35e18"/>
+  <circle cx="24" cy="44" r="1.5" fill="#ffa166"/>
+</svg>

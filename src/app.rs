@@ -178,6 +178,7 @@ pub struct PaintcraftApp {
     pub bake_preview_pos: Option<TextureHandle>,
     pub bake_preview_thick: Option<TextureHandle>,
     pub bake_success_message: Option<String>,
+    pub icons: Option<crate::icons::AppIcons>,
 }
 
 #[derive(Clone, Debug)]
@@ -425,6 +426,7 @@ impl PaintcraftApp {
             bake_preview_pos: None,
             bake_preview_thick: None,
             bake_success_message: None,
+            icons: None,
         }
     }
 
@@ -827,6 +829,11 @@ impl eframe::App for PaintcraftApp {
         if !self.updater.auto_checked_startup {
             self.updater.auto_checked_startup = true;
             self.updater.check_for_updates(false);
+        }
+
+        // Initialize UI icons
+        if self.icons.is_none() {
+            self.icons = Some(crate::icons::AppIcons::load(ctx));
         }
 
         // --- POLL BACKGROUND BAKE WORKER ---
@@ -1501,9 +1508,10 @@ impl eframe::App for PaintcraftApp {
                 ui.vertical_centered(|ui| {
                     ui.add_space(4.0);
 
-                    // Helper to render high-polish tool card
-                    let render_tool_button = |ui: &mut egui::Ui, active: bool, glyph: &str, label: &str, tip: &str| -> bool {
-                        let btn_size = egui::vec2(34.0, 32.0);
+                    // Helper to render high-polish tool card with icon
+                    let opt_icons = self.icons.as_ref();
+                    let render_tool_button = |ui: &mut egui::Ui, active: bool, opt_tex: Option<egui::TextureId>, fallback_glyph: &str, label: &str, tip: &str| -> bool {
+                        let btn_size = egui::vec2(34.0, 34.0);
                         let (rect, resp) = ui.allocate_exact_size(btn_size, egui::Sense::click());
                         let bg = if active {
                             Color32::from_rgb(44, 48, 56)
@@ -1522,23 +1530,33 @@ impl eframe::App for PaintcraftApp {
 
                         ui.painter().rect(rect, 3.0, bg, stroke);
 
-                        // Tool glyph centered top
-                        let glyph_pos = egui::pos2(rect.center().x, rect.min.y + 10.0);
-                        ui.painter().text(
-                            glyph_pos,
-                            egui::Align2::CENTER_CENTER,
-                            glyph,
-                            egui::FontId::proportional(11.0),
-                            if active { Color32::WHITE } else { Color32::from_rgb(200, 205, 215) },
-                        );
+                        if let Some(tex_id) = opt_tex {
+                            let icon_rect = egui::Rect::from_center_size(egui::pos2(rect.center().x, rect.min.y + 13.0), egui::vec2(18.0, 18.0));
+                            ui.painter().image(
+                                tex_id,
+                                icon_rect,
+                                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                                if active { Color32::WHITE } else { Color32::from_rgba_unmultiplied(210, 215, 225, 220) },
+                            );
+                        } else {
+                            // Tool glyph centered top
+                            let glyph_pos = egui::pos2(rect.center().x, rect.min.y + 10.0);
+                            ui.painter().text(
+                                glyph_pos,
+                                egui::Align2::CENTER_CENTER,
+                                fallback_glyph,
+                                egui::FontId::proportional(11.0),
+                                if active { Color32::WHITE } else { Color32::from_rgb(200, 205, 215) },
+                            );
+                        }
 
                         // Tool label centered bottom
-                        let label_pos = egui::pos2(rect.center().x, rect.max.y - 7.0);
+                        let label_pos = egui::pos2(rect.center().x, rect.max.y - 6.0);
                         ui.painter().text(
                             label_pos,
                             egui::Align2::CENTER_CENTER,
                             label,
-                            egui::FontId::proportional(8.0),
+                            egui::FontId::proportional(7.5),
                             if active { Color32::from_rgb(243, 94, 24) } else { Color32::from_rgb(130, 135, 145) },
                         );
 
@@ -1547,7 +1565,8 @@ impl eframe::App for PaintcraftApp {
 
                     // 1. Paint [1 / B]
                     let is_brush = self.brush_engine.settings.mode == ToolMode::Brush;
-                    if render_tool_button(ui, is_brush, "B", "Paint", "Paint Brush [1 / B]") {
+                    let brush_tex = opt_icons.map(|i| i.brush.id());
+                    if render_tool_button(ui, is_brush, brush_tex, "B", "Paint", "Paint Brush [1 / B]") {
                         self.brush_engine.settings.mode = ToolMode::Brush;
                         self.status_message = "Tool: Paint Brush [1/B]".to_string();
                     }
@@ -1555,7 +1574,8 @@ impl eframe::App for PaintcraftApp {
 
                     // 2. Eraser [2 / E]
                     let is_eraser = self.brush_engine.settings.mode == ToolMode::Eraser;
-                    if render_tool_button(ui, is_eraser, "E", "Erase", "Eraser [2 / E]") {
+                    let eraser_tex = opt_icons.map(|i| i.eraser.id());
+                    if render_tool_button(ui, is_eraser, eraser_tex, "E", "Erase", "Eraser [2 / E]") {
                         self.brush_engine.settings.mode = ToolMode::Eraser;
                         self.status_message = "Tool: Eraser [2/E]".to_string();
                     }
@@ -1563,7 +1583,8 @@ impl eframe::App for PaintcraftApp {
 
                     // 3. Projection [3]
                     let is_proj = self.brush_engine.settings.mode == ToolMode::Projection;
-                    if render_tool_button(ui, is_proj, "3D", "Proj", "3D Projection Painting [3]") {
+                    let proj_tex = opt_icons.map(|i| i.projection.id());
+                    if render_tool_button(ui, is_proj, proj_tex, "3D", "Proj", "3D Projection Painting [3]") {
                         self.brush_engine.settings.mode = ToolMode::Projection;
                         self.status_message = "Tool: Projection Painting [3]".to_string();
                     }
@@ -1571,7 +1592,8 @@ impl eframe::App for PaintcraftApp {
 
                     // 4. Polygon Fill Tool [4 / G]
                     let is_fill = self.brush_engine.settings.mode == ToolMode::FillBucket;
-                    if render_tool_button(ui, is_fill, "4", "Poly", "Polygon Fill Tool [4 / G]") {
+                    let fill_tex = opt_icons.map(|i| i.polygon_fill.id());
+                    if render_tool_button(ui, is_fill, fill_tex, "4", "Poly", "Polygon Fill Tool [4 / G]") {
                         self.brush_engine.settings.mode = ToolMode::FillBucket;
                         self.status_message = "Tool: Polygon Fill Tool [4/G]".to_string();
                     }
@@ -1579,7 +1601,8 @@ impl eframe::App for PaintcraftApp {
 
                     // 5. Smudge [5]
                     let is_smudge = self.brush_engine.settings.mode == ToolMode::Smudge;
-                    if render_tool_button(ui, is_smudge, "S", "Smudge", "Smudge Tool [5]") {
+                    let smudge_tex = opt_icons.map(|i| i.smudge.id());
+                    if render_tool_button(ui, is_smudge, smudge_tex, "S", "Smudge", "Smudge Tool [5]") {
                         self.brush_engine.settings.mode = ToolMode::Smudge;
                         self.status_message = "Tool: Smudge [5]".to_string();
                     }
@@ -1587,7 +1610,8 @@ impl eframe::App for PaintcraftApp {
 
                     // 6. Clone [6]
                     let is_clone = self.brush_engine.settings.mode == ToolMode::Clone;
-                    if render_tool_button(ui, is_clone, "C", "Clone", "Clone Stamp Tool [6]") {
+                    let clone_tex = opt_icons.map(|i| i.clone.id());
+                    if render_tool_button(ui, is_clone, clone_tex, "C", "Clone", "Clone Stamp Tool [6]") {
                         self.brush_engine.settings.mode = ToolMode::Clone;
                         self.status_message = "Tool: Clone [6]".to_string();
                     }
@@ -1595,7 +1619,8 @@ impl eframe::App for PaintcraftApp {
 
                     // 7. Material Picker / Eyedropper [P / I]
                     let is_eye = self.brush_engine.settings.mode == ToolMode::Eyedropper;
-                    if render_tool_button(ui, is_eye, "I", "Pick", "Material Picker / Eyedropper [P / I]") {
+                    let picker_tex = opt_icons.map(|i| i.picker.id());
+                    if render_tool_button(ui, is_eye, picker_tex, "I", "Pick", "Material Picker / Eyedropper [P / I]") {
                         self.brush_engine.settings.mode = ToolMode::Eyedropper;
                         self.status_message = "Tool: Material Picker [P/I]".to_string();
                     }
@@ -1604,7 +1629,8 @@ impl eframe::App for PaintcraftApp {
                     ui.add_space(3.0);
 
                     // 8. Assets / Shelf Toggle Button
-                    if render_tool_button(ui, self.show_shelf, "#", "Assets", "Toggle Left Assets Shelf") {
+                    let shelf_tex = opt_icons.map(|i| i.shelf.id());
+                    if render_tool_button(ui, self.show_shelf, shelf_tex, "#", "Assets", "Toggle Left Assets Shelf") {
                         self.show_shelf = !self.show_shelf;
                     }
                 });
@@ -1822,8 +1848,14 @@ impl eframe::App for PaintcraftApp {
                         }
     
                         // Layer Stack Toolbar
+                        let opt_icons = self.icons.as_ref();
                         ui.horizontal(|ui| {
-                            if ui.button("+ Paint").on_hover_text("Add Paint Layer").clicked() {
+                            let btn_paint = if let Some(icons) = opt_icons {
+                                egui::Button::image_and_text((icons.layer_paint.id(), egui::vec2(13.0, 13.0)), "Paint")
+                            } else {
+                                egui::Button::new("+ Paint")
+                            };
+                            if ui.add(btn_paint).on_hover_text("Add Paint Layer").clicked() {
                                 let prev_layers = self.project.layers.clone();
                                 let prev_active = self.project.active_layer_idx;
                                 let new_idx = self.project.add_paint_layer(None);
@@ -1837,8 +1869,13 @@ impl eframe::App for PaintcraftApp {
                                 });
                                 self.status_message = "Added Paint Layer.".to_string();
                             }
-    
-                            if ui.button("+ Fill").on_hover_text("Add Fill Layer").clicked() {
+
+                            let btn_fill = if let Some(icons) = opt_icons {
+                                egui::Button::image_and_text((icons.layer_fill.id(), egui::vec2(13.0, 13.0)), "Fill")
+                            } else {
+                                egui::Button::new("+ Fill")
+                            };
+                            if ui.add(btn_fill).on_hover_text("Add Fill Layer").clicked() {
                                 let prev_layers = self.project.layers.clone();
                                 let prev_active = self.project.active_layer_idx;
                                 let new_idx = self.project.add_fill_layer(
@@ -1858,7 +1895,12 @@ impl eframe::App for PaintcraftApp {
                                 self.status_message = "Added Fill Layer.".to_string();
                             }
 
-                            if ui.button("+ Folder").on_hover_text("Add Layer Folder / Group").clicked() {
+                            let btn_folder = if let Some(icons) = opt_icons {
+                                egui::Button::image_and_text((icons.layer_folder.id(), egui::vec2(13.0, 13.0)), "Folder")
+                            } else {
+                                egui::Button::new("+ Folder")
+                            };
+                            if ui.add(btn_folder).on_hover_text("Add Layer Folder / Group").clicked() {
                                 let prev_layers = self.project.layers.clone();
                                 let prev_active = self.project.active_layer_idx;
                                 let new_idx = self.project.add_folder_layer(None);
@@ -2054,11 +2096,25 @@ impl eframe::App for PaintcraftApp {
                                                 }
 
                                                 // 2. Visibility toggle
-                                                let eye_icon = if layer.visible { "[o]" } else { "[-]" };
-                                                let eye_color = if layer.visible { Color32::from_rgb(220, 225, 235) } else { Color32::from_rgb(110, 115, 125) };
-                                                let eye_resp = ui.add(egui::Label::new(egui::RichText::new(eye_icon).color(eye_color)).selectable(false).sense(egui::Sense::click()))
-                                                    .on_hover_text("Toggle Layer Visibility");
-                                                if eye_resp.clicked() {
+                                                let (eye_rect, eye_resp) = ui.allocate_exact_size(egui::vec2(15.0, 15.0), egui::Sense::click());
+                                                if let Some(icons) = opt_icons {
+                                                    let tint = if layer.visible {
+                                                        Color32::WHITE
+                                                    } else {
+                                                        Color32::from_rgba_unmultiplied(100, 105, 115, 110)
+                                                    };
+                                                    ui.painter().image(
+                                                        icons.layer_eye.id(),
+                                                        eye_rect,
+                                                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                                                        tint,
+                                                    );
+                                                } else {
+                                                    let eye_icon = if layer.visible { "[o]" } else { "[-]" };
+                                                    let eye_color = if layer.visible { Color32::from_rgb(220, 225, 235) } else { Color32::from_rgb(110, 115, 125) };
+                                                    ui.painter().text(eye_rect.center(), egui::Align2::CENTER_CENTER, eye_icon, egui::FontId::proportional(11.0), eye_color);
+                                                }
+                                                if eye_resp.on_hover_text("Toggle Layer Visibility").clicked() {
                                                     toggle_visible_idx = Some(i);
                                                 }
 
@@ -2087,10 +2143,27 @@ impl eframe::App for PaintcraftApp {
                                                     egui::Stroke::new(1.0_f32, Color32::from_rgb(58, 62, 72))
                                                 };
                                                 ui.painter().rect(mat_rect, 2.0, mat_bg, mat_stroke);
-                                                if layer.layer_type == LayerType::Paint {
-                                                    ui.painter().text(mat_rect.center(), egui::Align2::CENTER_CENTER, "P", egui::FontId::proportional(10.0), Color32::WHITE);
-                                                } else if layer.layer_type == LayerType::Folder {
-                                                    ui.painter().text(mat_rect.center(), egui::Align2::CENTER_CENTER, "D", egui::FontId::proportional(10.0), Color32::WHITE);
+                                                if let Some(icons) = opt_icons {
+                                                    let icon_tex = match layer.layer_type {
+                                                        LayerType::Paint => Some(icons.layer_paint.id()),
+                                                        LayerType::Folder => Some(icons.layer_folder.id()),
+                                                        LayerType::Fill => Some(icons.layer_fill.id()),
+                                                    };
+                                                    if let Some(tex) = icon_tex {
+                                                        let icon_inset = egui::Rect::from_center_size(mat_rect.center(), egui::vec2(12.0, 12.0));
+                                                        ui.painter().image(
+                                                            tex,
+                                                            icon_inset,
+                                                            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                                                            Color32::WHITE,
+                                                        );
+                                                    }
+                                                } else {
+                                                    if layer.layer_type == LayerType::Paint {
+                                                        ui.painter().text(mat_rect.center(), egui::Align2::CENTER_CENTER, "P", egui::FontId::proportional(10.0), Color32::WHITE);
+                                                    } else if layer.layer_type == LayerType::Folder {
+                                                        ui.painter().text(mat_rect.center(), egui::Align2::CENTER_CENTER, "D", egui::FontId::proportional(10.0), Color32::WHITE);
+                                                    }
                                                 }
                                                 if mat_resp.on_hover_text("Target Material (Click to activate material editing)").clicked() {
                                                     self.project.active_layer_idx = i;
@@ -3159,7 +3232,12 @@ impl eframe::App for PaintcraftApp {
                         });
 
                         ui.add_space(6.0);
-                        if ui.button("Bake Mesh Maps...").on_hover_text("Open Baking dialog to bake Normals, AO, and Curvature from geometry").clicked() {
+                        let bake_btn = if let Some(icons) = self.icons.as_ref() {
+                            egui::Button::image_and_text((icons.bake.id(), egui::vec2(15.0, 15.0)), "Bake Mesh Maps...")
+                        } else {
+                            egui::Button::new("Bake Mesh Maps...")
+                        };
+                        if ui.add(bake_btn).on_hover_text("Open Baking dialog to bake Normals, AO, and Curvature from geometry").clicked() {
                             self.show_bake_modal = true;
                         }
 
@@ -4340,11 +4418,12 @@ impl PaintcraftApp {
         );
 
         // Top-right 3D viewport quick controls pill
-        let vp_hud_pos = rect.right_top() + egui::vec2(-285.0, 10.0);
-        let vp_hud_rect = egui::Rect::from_min_size(vp_hud_pos, egui::vec2(275.0, 30.0));
+        let vp_hud_pos = rect.right_top() + egui::vec2(-330.0, 10.0);
+        let vp_hud_rect = egui::Rect::from_min_size(vp_hud_pos, egui::vec2(320.0, 30.0));
         ui.painter().rect_filled(vp_hud_rect, egui::Rounding::same(15.0), egui::Color32::from_rgba_unmultiplied(28, 30, 36, 225));
         ui.painter().rect_stroke(vp_hud_rect, egui::Rounding::same(15.0), egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(58, 62, 74)));
 
+        let opt_icons = self.icons.as_ref();
         ui.allocate_ui_at_rect(vp_hud_rect, |ui| {
             ui.horizontal_centered(|ui| {
                 ui.add_space(8.0);
@@ -4352,10 +4431,21 @@ impl PaintcraftApp {
                     self.camera.reset();
                 }
                 ui.separator();
-                if ui.small_button("Shaders...").on_hover_text("Open Shader, Presets, and Post-Processing settings").clicked() {
+                let shaders_btn = if let Some(icons) = opt_icons {
+                    egui::Button::image_and_text((icons.shaders.id(), egui::vec2(13.0, 13.0)), "Shaders...")
+                } else {
+                    egui::Button::new("Shaders...")
+                };
+                if ui.add(shaders_btn).on_hover_text("Open Shader, Presets, and Post-Processing settings").clicked() {
                     self.show_shader_settings_modal = true;
                 }
-                if ui.small_button("Viewport Settings...").on_hover_text("Open Viewport Camera, Navigation, Backdrop, and Overlay settings").clicked() {
+
+                let vp_btn = if let Some(icons) = opt_icons {
+                    egui::Button::image_and_text((icons.viewport_settings.id(), egui::vec2(13.0, 13.0)), "Viewport Settings...")
+                } else {
+                    egui::Button::new("Viewport Settings...")
+                };
+                if ui.add(vp_btn).on_hover_text("Open Viewport Camera, Navigation, Backdrop, and Overlay settings").clicked() {
                     self.show_viewport_settings_modal = true;
                 }
             });

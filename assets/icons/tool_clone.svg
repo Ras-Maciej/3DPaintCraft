@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <defs>
+    <linearGradient id="stampWood" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#4a3b32"/>
+      <stop offset="100%" stop-color="#8c6d58"/>
+    </linearGradient>
+  </defs>
+  <!-- Stamp Knob Handle -->
+  <circle cx="32" cy="14" r="8" fill="url(#stampWood)" stroke="#2b231d" stroke-width="1.5"/>
+  <ellipse cx="32" cy="12" rx="4" ry="2" fill="#a07d65"/>
+  
+  <!-- Stamp Stem -->
+  <path d="M 28 20 L 28 32 C 28 36, 20 40, 18 44 L 46 44 C 44 40, 36 36, 36 32 L 36 20 Z" fill="url(#stampWood)" stroke="#2b231d" stroke-width="1.5"/>
+  
+  <!-- Stamp Rubber Cushion Base -->
+  <rect x="16" y="44" width="32" height="6" rx="2" fill="#2d3748" stroke="#1a202c" stroke-width="1.5"/>
+  
+  <!-- Stamped Target Reticle / Target Rings -->
+  <ellipse cx="32" cy="55" rx="14" ry="5" fill="none" stroke="#f35e18" stroke-width="1.8" stroke-dasharray="3,2"/>
+  <circle cx="32" cy="55" r="2" fill="#f35e18"/>
+  <line x1="24" y1="55" x2="40" y2="55" stroke="#f35e18" stroke-width="1.2"/>
+</svg>

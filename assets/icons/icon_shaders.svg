@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <defs>
+    <radialGradient id="sphereGrad" cx="35%" cy="35%" r="65%">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="25%" stop-color="#f35e18"/>
+      <stop offset="70%" stop-color="#7c2d12"/>
+      <stop offset="100%" stop-color="#1e1b18"/>
+    </radialGradient>
+  </defs>
+  <!-- Material Sphere / Shader Ball Preview -->
+  <circle cx="30" cy="34" r="18" fill="url(#sphereGrad)" stroke="#f35e18" stroke-width="1.8"/>
+  
+  <!-- Fresnel Ring & Inner Shadow -->
+  <path d="M 22 20 A 18 18 0 0 0 46 42" fill="none" stroke="#ffa166" stroke-width="1.5" opacity="0.6"/>
+  
+  <!-- Sparkling Shader Star Glints -->
+  <!-- Main Glint Top Right -->
+  <path d="M 46 16 Q 46 22, 52 22 Q 46 22, 46 28 Q 46 22, 40 22 Q 46 22, 46 16 Z" fill="#00d2ff"/>
+  <circle cx="46" cy="22" r="1.5" fill="#ffffff"/>
+  
+  <!-- Small Starlet Glint Top Left -->
+  <path d="M 18 12 Q 18 15, 21 15 Q 18 15, 18 18 Q 18 15, 15 15 Q 18 15, 18 12 Z" fill="#ffffff"/>
+  
+  <!-- Surface Specular Highlight Glint -->
+  <ellipse cx="24" cy="26" rx="4" ry="2.5" fill="#ffffff" transform="rotate(-30 24 26)"/>
+</svg>

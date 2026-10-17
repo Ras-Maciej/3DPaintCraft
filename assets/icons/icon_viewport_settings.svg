@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <defs>
+    <linearGradient id="gearGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#94a3b8"/>
+      <stop offset="100%" stop-color="#475569"/>
+    </linearGradient>
+  </defs>
+  <!-- Mechanical Gear / Viewport Cog -->
+  <path d="M 28 8 L 36 8 L 38 14 C 40 15, 42 16, 44 18 L 50 16 L 54 22 L 50 27 C 51 29, 51 31, 51 32 C 51 33, 51 35, 50 37 L 54 42 L 50 48 L 44 46 C 42 48, 40 49, 38 50 L 36 56 L 28 56 L 26 50 C 24 49, 22 48, 20 46 L 14 48 L 10 42 L 14 37 C 13 35, 13 33, 13 32 C 13 31, 13 29, 14 27 L 10 22 L 14 16 L 20 18 C 22 16, 24 15, 26 14 Z" fill="url(#gearGrad)" stroke="#334155" stroke-width="1.8"/>
+  
+  <!-- Outer Recess -->
+  <circle cx="32" cy="32" r="14" fill="#1e293b" stroke="#334155" stroke-width="1.5"/>
+  
+  <!-- Camera Aperture / Viewport Eyepiece Center in Orange -->
+  <circle cx="32" cy="32" r="7" fill="#f35e18" stroke="#ffa166" stroke-width="1.5"/>
+  <circle cx="32" cy="32" r="3" fill="#0f172a"/>
+  <circle cx="33.5" cy="30.5" r="1.2" fill="#ffffff"/>
+</svg>

@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <defs>
+    <linearGradient id="brushHandle" x1="0%" y1="100%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#4a3b32"/>
+      <stop offset="100%" stop-color="#8c6d58"/>
+    </linearGradient>
+    <linearGradient id="brushTip" x1="0%" y1="100%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#e25b10"/>
+      <stop offset="100%" stop-color="#f35e18"/>
+    </linearGradient>
+  </defs>
+  <!-- Handle -->
+  <path d="M 14 52 C 12 50, 12 46, 14 44 L 32 26 L 40 34 L 22 52 C 20 54, 16 54, 14 52 Z" fill="url(#brushHandle)" stroke="#2b231d" stroke-width="1.5"/>
+  <!-- Ferrule -->
+  <polygon points="30,28 38,20 44,26 36,34" fill="#a0a8b8" stroke="#5a6070" stroke-width="1.5"/>
+  <line x1="33" y1="25" x2="39" y2="31" stroke="#5a6070" stroke-width="1.2"/>
+  <!-- Bristles -->
+  <path d="M 38 20 C 42 12, 48 8, 54 8 C 54 14, 50 20, 44 26 Z" fill="url(#brushTip)" stroke="#b84508" stroke-width="1.5"/>
+  <!-- Paint Tip Highlight -->
+  <circle cx="53" cy="9" r="2.5" fill="#ffa166"/>
+  <!-- Wet paint drop -->
+  <path d="M 52 24 C 52 22, 54 20, 54 18 C 54 20, 56 22, 56 24 C 56 25.5, 54.5 27, 54 27 C 53.5 27, 52 25.5, 52 24 Z" fill="#f35e18"/>
+</svg>

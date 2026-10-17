@@ -24,6 +24,7 @@ mod shelf;
 mod asset_manager;
 mod utils;
 mod updater;
+pub mod icons;
 
 use app::PaintcraftApp;
 use export::ExportPreset;
