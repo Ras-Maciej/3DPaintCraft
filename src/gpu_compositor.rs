@@ -224,7 +224,11 @@ impl GpuCompositor {
 
     pub fn update_layer(&self, cpu_layer: &mut crate::layer::Layer, gpu_layer: &GpuLayer, width: u32, height: u32) {
         if let Some((x0, y0, x1, y1)) = cpu_layer.dirty_rect.take() {
-            let flags = cpu_layer.dirty_flags;
+            let flags = if cpu_layer.dirty_flags == crate::layer::LayerDirtyFlags::none() {
+                crate::layer::LayerDirtyFlags::all()
+            } else {
+                cpu_layer.dirty_flags
+            };
             cpu_layer.dirty_flags = crate::layer::LayerDirtyFlags::none();
 
             let rect_w = (x1.saturating_sub(x0) + 1).min(width.saturating_sub(x0));

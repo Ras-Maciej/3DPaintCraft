@@ -516,6 +516,7 @@ impl Project {
         self.composite_textures.composite_layers(&self.layers);
         self.is_dirty = true;
         self.gpu_sync_needed = true;
+        self.gpu_extended_channels_dirty = true;
         self.texture_revision = self.texture_revision.wrapping_add(1);
     }
 
@@ -1049,6 +1050,23 @@ mod tests {
         assert_eq!(ts.layers.len(), 1);
         assert_eq!(ts.layers[0].layer_type, crate::layer::LayerType::Fill);
         assert_eq!(ts.layers[0].fill_color, glam::Vec4::ONE);
+    }
+
+    #[test]
+    fn test_clearcoat_layer_compositing_and_dirty_flags() {
+        let mut proj = Project::new_default(64, 64);
+        assert!(proj.gpu_extended_channels_dirty);
+        proj.gpu_extended_channels_dirty = false;
+
+        let layer = &mut proj.layers[0];
+        layer.channel_flags.clearcoat = true;
+        layer.set_fill_clearcoat(0.85);
+        assert_eq!(layer.clearcoat_buf.get_pixel(32, 32), 0.85);
+
+        proj.rebuild_composite();
+        assert!(proj.gpu_extended_channels_dirty);
+        assert!(proj.gpu_sync_needed);
+        assert_eq!(proj.composite_textures.clearcoat.get_pixel(32, 32), 0.85);
     }
 }
 

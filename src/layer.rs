@@ -734,6 +734,30 @@ impl Layer {
         }
     }
 
+    pub fn set_fill_clearcoat(&mut self, val: f32) {
+        self.fill_clearcoat = val;
+        if self.fill_generator == ProceduralGenerator::None && !self.triplanar {
+            self.clearcoat_buf.data.fill(val);
+            self.mark_dirty_full();
+        }
+    }
+
+    pub fn set_fill_emissive(&mut self, val: Vec4) {
+        self.fill_emissive = val;
+        if self.fill_emissive_tex.is_none() && self.fill_generator == ProceduralGenerator::None && !self.triplanar {
+            self.emissive_buf.data.fill(val);
+            self.mark_dirty_full();
+        }
+    }
+
+    pub fn set_fill_opacity(&mut self, val: f32) {
+        self.fill_opacity = val;
+        if self.fill_opacity_tex.is_none() && self.fill_generator == ProceduralGenerator::None && !self.triplanar {
+            self.opacity_buf.data.fill(val);
+            self.mark_dirty_full();
+        }
+    }
+
     /// Resize all internal channel buffers to a new resolution
     pub fn resize(&mut self, new_width: u32, new_height: u32) {
         if self.layer_type == LayerType::Folder {
@@ -786,16 +810,36 @@ impl Layer {
                 self.mask_buf.clone(),
             )
         } else if target == Some(crate::brush::PaintTarget::Material) {
-            let bc = if ch.base_color { self.base_color_buf.clone() } else { RgbaBuffer::new(0, 0, Vec4::ZERO) };
-            let rough = if ch.roughness { self.roughness_buf.clone() } else { ScalarBuffer::new(0, 0, 0.0) };
-            let metal = if ch.metallic { self.metallic_buf.clone() } else { ScalarBuffer::new(0, 0, 0.0) };
-            let height = if ch.height { self.height_buf.clone() } else { ScalarBuffer::new(0, 0, 0.0) };
-            let norm = if ch.normal || ch.height { self.normal_buf.clone() } else { RgbaBuffer::new(0, 0, Vec4::ZERO) };
-            let emis = if ch.emission { self.emissive_buf.clone() } else { RgbaBuffer::new(0, 0, Vec4::ZERO) };
-            let opac = if ch.opacity { self.opacity_buf.clone() } else { ScalarBuffer::new(0, 0, 0.0) };
-            let cc = if ch.clearcoat { self.clearcoat_buf.clone() } else { ScalarBuffer::new(0, 0, 0.0) };
-            let aniso = if ch.anisotropy { self.anisotropy_buf.clone() } else { ScalarBuffer::new(0, 0, 0.0) };
-            let aniso_ang = if ch.anisotropy { self.anisotropy_angle_buf.clone() } else { ScalarBuffer::new(0, 0, 0.0) };
+            let (bc_norm, rest) = rayon::join(
+                || rayon::join(
+                    || if ch.base_color { self.base_color_buf.clone() } else { RgbaBuffer::new(0, 0, Vec4::ZERO) },
+                    || if ch.normal || ch.height { self.normal_buf.clone() } else { RgbaBuffer::new(0, 0, Vec4::ZERO) },
+                ),
+                || rayon::join(
+                    || rayon::join(
+                        || if ch.roughness { self.roughness_buf.clone() } else { ScalarBuffer::new(0, 0, 0.0) },
+                        || if ch.metallic { self.metallic_buf.clone() } else { ScalarBuffer::new(0, 0, 0.0) },
+                    ),
+                    || rayon::join(
+                        || rayon::join(
+                            || if ch.height { self.height_buf.clone() } else { ScalarBuffer::new(0, 0, 0.0) },
+                            || if ch.emission { self.emissive_buf.clone() } else { RgbaBuffer::new(0, 0, Vec4::ZERO) },
+                        ),
+                        || rayon::join(
+                            || if ch.opacity { self.opacity_buf.clone() } else { ScalarBuffer::new(0, 0, 0.0) },
+                            || rayon::join(
+                                || if ch.clearcoat { self.clearcoat_buf.clone() } else { ScalarBuffer::new(0, 0, 0.0) },
+                                || rayon::join(
+                                    || if ch.anisotropy { self.anisotropy_buf.clone() } else { ScalarBuffer::new(0, 0, 0.0) },
+                                    || if ch.anisotropy { self.anisotropy_angle_buf.clone() } else { ScalarBuffer::new(0, 0, 0.0) },
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+            );
+            let (bc, norm) = bc_norm;
+            let ((rough, metal), ((height, emis), (opac, (cc, (aniso, aniso_ang))))) = rest;
             let mask = ScalarBuffer::new(0, 0, 0.0);
             (bc, norm, rough, metal, height, emis, opac, cc, aniso, aniso_ang, mask)
         } else {

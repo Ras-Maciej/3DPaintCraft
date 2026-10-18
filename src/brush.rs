@@ -1158,7 +1158,7 @@ pub fn barycentric_3d(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> (f32, f32, f32) {
         hit_pos: Vec3,
         hit_normal: Vec3,
         world_radius: f32,
-    ) {
+    ) -> Vec<(Vec3, Vec3)> {
         let (points, normals) = match (self.last_hit_pos, self.last_hit_normal) {
             (Some(prev_pos), Some(prev_norm)) => {
                 let delta = hit_pos - prev_pos;
@@ -1199,7 +1199,9 @@ pub fn barycentric_3d(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> (f32, f32, f32) {
         let sym_y = self.settings.symmetry_y;
         let sym_z = self.settings.symmetry_z;
 
-        for (pos, norm) in points.into_iter().zip(normals.into_iter()) {
+        let stroke_pts: Vec<(Vec3, Vec3)> = points.into_iter().zip(normals.into_iter()).collect();
+
+        for &(pos, norm) in &stroke_pts {
             self.stroke_counter = self.stroke_counter.wrapping_add(1);
             self.stamp_3d(layer, mesh, pos, norm, world_radius);
 
@@ -1247,6 +1249,8 @@ pub fn barycentric_3d(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> (f32, f32, f32) {
 
         self.last_hit_pos = Some(hit_pos);
         self.last_hit_normal = Some(hit_normal);
+
+        stroke_pts
     }
 
     /// Calculate all active symmetry points (primary + mirrored across X/Y/Z) for 3D projection painting

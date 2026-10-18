@@ -85,6 +85,21 @@ impl Default for ChannelFlags {
 }
 
 impl ChannelFlags {
+    pub fn none() -> Self {
+        Self {
+            base_color: false,
+            roughness: false,
+            metallic: false,
+            normal: false,
+            height: false,
+            ao: false,
+            emission: false,
+            opacity: false,
+            clearcoat: false,
+            anisotropy: false,
+        }
+    }
+
     #[allow(dead_code)]
     pub fn all() -> Self {
         Self {

@@ -4316,7 +4316,9 @@ impl eframe::App for PaintcraftApp {
                                         if layer.channel_flags.clearcoat {
                                             ui.horizontal(|ui| {
                                                 ui.label("Clearcoat:");
-                                                if ui.add(egui::Slider::new(&mut layer.fill_clearcoat, 0.0..=1.0)).changed() {
+                                                let mut cc = layer.fill_clearcoat;
+                                                if ui.add(egui::Slider::new(&mut cc, 0.0..=1.0)).changed() {
+                                                    layer.set_fill_clearcoat(cc);
                                                     prop_changed = true;
                                                 }
                                             });
@@ -4585,7 +4587,11 @@ impl eframe::App for PaintcraftApp {
                             if mask_changed && layer.has_mask {
                                 layer.evaluate_mask_full(curv, ao, pos, wn, id_ref, &anchor_refs);
                             }
-                            if self.wgpu_viewport.is_some() && ui.input(|i| i.pointer.any_down()) {
+                            let is_extended_change = layer.channel_flags.clearcoat
+                                || layer.channel_flags.emission
+                                || layer.channel_flags.opacity
+                                || layer.channel_flags.anisotropy;
+                            if self.wgpu_viewport.is_some() && ui.input(|i| i.pointer.any_down()) && !is_extended_change {
                                 self.project.gpu_sync_needed = true;
                                 self.need_cpu_composite_sync = true;
                             } else {
@@ -6383,7 +6389,24 @@ impl PaintcraftApp {
                     }
                     if let Some(layer) = self.project.active_layer() {
                         let target = self.brush_engine.settings.target;
-                        let channels = layer.channel_flags;
+                        let channels = if target == PaintTarget::Mask {
+                            crate::channel::ChannelFlags::none()
+                        } else {
+                            let b = self.brush_engine.settings.channels;
+                            let l = layer.channel_flags;
+                            crate::channel::ChannelFlags {
+                                base_color: b.base_color && l.base_color,
+                                roughness: b.roughness && l.roughness,
+                                metallic: b.metallic && l.metallic,
+                                height: b.height && l.height,
+                                normal: (b.normal || b.height) && (l.normal || l.height),
+                                emission: b.emission && l.emission,
+                                opacity: b.opacity && l.opacity,
+                                clearcoat: b.clearcoat && l.clearcoat,
+                                anisotropy: b.anisotropy && l.anisotropy,
+                                ao: false,
+                            }
+                        };
                         self.stroke_start_layer = Some(layer.clone_stroke_snapshot_selective(Some(target), Some(channels)));
                         self.is_stroke_active = true;
                     }
@@ -6578,7 +6601,6 @@ impl PaintcraftApp {
                                     let doc_w = self.project.texture_width;
                                     let doc_h = self.project.texture_height;
 
-                                    let sym_pts = self.brush_engine.get_symmetry_points(hit.point, hit.normal);
 
                                     let orig_color = self.brush_engine.settings.paint_color;
                                     let mut skip_stroke = false;
@@ -6598,28 +6620,44 @@ impl PaintcraftApp {
                                     }
 
                                     // Keep CPU layer buffer updated for history/undo/save integrity
-                                    if !skip_stroke {
+                                    let stroke_pts = if !skip_stroke {
                                         let layer = &mut self.project.layers[act_idx];
                                         let mesh = &self.project.mesh;
-                                        self.brush_engine.paint_stroke_3d(layer, mesh, hit.point, hit.normal, world_radius);
-                                    }
+                                        self.brush_engine.paint_stroke_3d(layer, mesh, hit.point, hit.normal, world_radius)
+                                    } else {
+                                        Vec::new()
+                                    };
 
                                     self.brush_engine.settings.paint_color = orig_color;
 
-                                    // Option 1 & 3: Hardware GPU Compute Shader 3D Projection Stamping across all symmetry points
+                                    // Option 1 & 3: Hardware GPU Compute Shader 3D Projection Stamping across all stroke points & symmetry points
                                     let mut gpu_stamped = false;
                                     if let Some(wgpu) = &mut self.wgpu_viewport {
                                         let mut any_stamped = false;
-                                        for (p, n) in &sym_pts {
-                                            if let Some((uniforms, gpu_tris)) = self.brush_engine.build_gpu_stamp_data(&self.project.mesh, *p, *n, world_radius, doc_w, doc_h) {
-                                                wgpu.stamp_3d_gpu(act_idx, &uniforms, &gpu_tris);
-                                                any_stamped = true;
+                                        for (pt_pos, pt_norm) in &stroke_pts {
+                                            let sym_pts = self.brush_engine.get_symmetry_points(*pt_pos, *pt_norm);
+                                            for (p, n) in &sym_pts {
+                                                if let Some((uniforms, gpu_tris)) = self.brush_engine.build_gpu_stamp_data(&self.project.mesh, *p, *n, world_radius, doc_w, doc_h) {
+                                                    wgpu.stamp_3d_gpu(act_idx, &uniforms, &gpu_tris);
+                                                    any_stamped = true;
+                                                }
                                             }
                                         }
                                         if any_stamped {
                                             wgpu.composite_and_update(&self.project);
-                                            self.perf_metrics.texture_transfer_bytes = (doc_w as u64) * (doc_h as u64) * 40 * (sym_pts.len() as u64);
+                                            self.perf_metrics.texture_transfer_bytes = (doc_w as u64) * (doc_h as u64) * 40 * (stroke_pts.len() as u64);
                                             gpu_stamped = true;
+                                        }
+                                    }
+
+                                    if self.brush_engine.settings.channels.clearcoat
+                                        || self.brush_engine.settings.channels.emission
+                                        || self.brush_engine.settings.channels.opacity
+                                        || self.brush_engine.settings.channels.anisotropy
+                                    {
+                                        self.project.rebuild_composite();
+                                        if let Some(wgpu) = &mut self.wgpu_viewport {
+                                            wgpu.sync_textures(&mut self.project);
                                         }
                                     }
 
@@ -6646,8 +6684,9 @@ impl PaintcraftApp {
             } else if response.drag_stopped() || (!input.pointer.any_down() && self.is_stroke_active) {
                 self.brush_engine.end_stroke();
                 self.polygon_fill_drag_tris.clear();
-                if self.wgpu_viewport.is_none() {
-                    self.project.rebuild_composite();
+                self.project.rebuild_composite();
+                if let Some(wgpu) = &mut self.wgpu_viewport {
+                    wgpu.sync_textures(&mut self.project);
                 }
                 if self.is_stroke_active {
                     if let Some(prev) = self.stroke_start_layer.take() {
@@ -6659,7 +6698,24 @@ impl PaintcraftApp {
                                 "Paint Stroke".to_string()
                             };
                             let target = self.brush_engine.settings.target;
-                            let channels = next.channel_flags;
+                            let channels = if target == PaintTarget::Mask {
+                                crate::channel::ChannelFlags::none()
+                            } else {
+                                let b = self.brush_engine.settings.channels;
+                                let l = next.channel_flags;
+                                crate::channel::ChannelFlags {
+                                    base_color: b.base_color && l.base_color,
+                                    roughness: b.roughness && l.roughness,
+                                    metallic: b.metallic && l.metallic,
+                                    height: b.height && l.height,
+                                    normal: (b.normal || b.height) && (l.normal || l.height),
+                                    emission: b.emission && l.emission,
+                                    opacity: b.opacity && l.opacity,
+                                    clearcoat: b.clearcoat && l.clearcoat,
+                                    anisotropy: b.anisotropy && l.anisotropy,
+                                    ao: false,
+                                }
+                            };
                             let next_layer = next.clone_stroke_snapshot_selective(Some(target), Some(channels));
                             self.history.push(&desc.clone(), HistoryAction::Stroke {
                                 layer_idx: idx,
@@ -7125,7 +7181,24 @@ impl PaintcraftApp {
                     }
                     if let Some(layer) = self.project.active_layer() {
                         let target = self.brush_engine.settings.target;
-                        let channels = layer.channel_flags;
+                        let channels = if target == PaintTarget::Mask {
+                            crate::channel::ChannelFlags::none()
+                        } else {
+                            let b = self.brush_engine.settings.channels;
+                            let l = layer.channel_flags;
+                            crate::channel::ChannelFlags {
+                                base_color: b.base_color && l.base_color,
+                                roughness: b.roughness && l.roughness,
+                                metallic: b.metallic && l.metallic,
+                                height: b.height && l.height,
+                                normal: (b.normal || b.height) && (l.normal || l.height),
+                                emission: b.emission && l.emission,
+                                opacity: b.opacity && l.opacity,
+                                clearcoat: b.clearcoat && l.clearcoat,
+                                anisotropy: b.anisotropy && l.anisotropy,
+                                ao: false,
+                            }
+                        };
                         self.stroke_start_layer = Some(layer.clone_stroke_snapshot_selective(Some(target), Some(channels)));
                         self.is_stroke_active = true;
                     }
@@ -7303,7 +7376,24 @@ impl PaintcraftApp {
                                 "2D UV Paint Stroke".to_string()
                             };
                             let target = self.brush_engine.settings.target;
-                            let channels = next.channel_flags;
+                            let channels = if target == PaintTarget::Mask {
+                                crate::channel::ChannelFlags::none()
+                            } else {
+                                let b = self.brush_engine.settings.channels;
+                                let l = next.channel_flags;
+                                crate::channel::ChannelFlags {
+                                    base_color: b.base_color && l.base_color,
+                                    roughness: b.roughness && l.roughness,
+                                    metallic: b.metallic && l.metallic,
+                                    height: b.height && l.height,
+                                    normal: (b.normal || b.height) && (l.normal || l.height),
+                                    emission: b.emission && l.emission,
+                                    opacity: b.opacity && l.opacity,
+                                    clearcoat: b.clearcoat && l.clearcoat,
+                                    anisotropy: b.anisotropy && l.anisotropy,
+                                    ao: false,
+                                }
+                            };
                             let next_layer = next.clone_stroke_snapshot_selective(Some(target), Some(channels));
                             self.history.push(&desc.clone(), HistoryAction::Stroke {
                                 layer_idx: idx,
