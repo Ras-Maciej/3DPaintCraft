@@ -1007,56 +1007,64 @@ impl WgpuViewport {
 
         self.queue.submit(std::iter::once(encoder.finish()));
 
-        if project.composite_textures.emissive.width == w && project.composite_textures.emissive.height == h {
-            self.queue.write_texture(
-                wgpu::ImageCopyTexture { texture: &self.tex_emissive, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-                bytemuck::cast_slice(&project.composite_textures.emissive.data),
-                wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(w * 16), rows_per_image: Some(h) },
-                size,
-            );
-        }
-        if project.composite_textures.opacity.width == w && project.composite_textures.opacity.height == h {
-            self.queue.write_texture(
-                wgpu::ImageCopyTexture { texture: &self.tex_opacity, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-                bytemuck::cast_slice(&project.composite_textures.opacity.data),
-                wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(w * 4), rows_per_image: Some(h) },
-                size,
-            );
-        }
-        if project.composite_textures.clearcoat.width == w && project.composite_textures.clearcoat.height == h {
-            self.queue.write_texture(
-                wgpu::ImageCopyTexture { texture: &self.tex_clearcoat, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-                bytemuck::cast_slice(&project.composite_textures.clearcoat.data),
-                wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(w * 4), rows_per_image: Some(h) },
-                size,
-            );
-        }
-        if project.composite_textures.anisotropy.width == w && project.composite_textures.anisotropy.height == h {
-            let total = (w * h) as usize;
-            let req_len = total * 4;
-            if self.aniso_staging.len() != req_len {
-                self.aniso_staging.resize(req_len, 0.0);
+        if project.gpu_extended_channels_dirty {
+            if project.composite_textures.emissive.width == w && project.composite_textures.emissive.height == h {
+                self.queue.write_texture(
+                    wgpu::ImageCopyTexture { texture: &self.tex_emissive, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                    bytemuck::cast_slice(&project.composite_textures.emissive.data),
+                    wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(w * 16), rows_per_image: Some(h) },
+                    size,
+                );
             }
-            let aniso_data = &project.composite_textures.anisotropy.data;
-            let angle_data = &project.composite_textures.anisotropy_angle.data;
-            for i in 0..total {
-                let a = if i < aniso_data.len() { aniso_data[i] } else { 0.0 };
-                let ang = if i < angle_data.len() { angle_data[i] } else { 0.0 };
-                self.aniso_staging[i * 4 + 0] = a;
-                self.aniso_staging[i * 4 + 1] = ang;
-                self.aniso_staging[i * 4 + 2] = 0.0;
-                self.aniso_staging[i * 4 + 3] = 1.0;
+            if project.composite_textures.opacity.width == w && project.composite_textures.opacity.height == h {
+                self.queue.write_texture(
+                    wgpu::ImageCopyTexture { texture: &self.tex_opacity, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                    bytemuck::cast_slice(&project.composite_textures.opacity.data),
+                    wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(w * 4), rows_per_image: Some(h) },
+                    size,
+                );
             }
-            self.queue.write_texture(
-                wgpu::ImageCopyTexture { texture: &self.tex_anisotropy, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-                bytemuck::cast_slice(&self.aniso_staging),
-                wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(w * 16), rows_per_image: Some(h) },
-                size,
-            );
+            if project.composite_textures.clearcoat.width == w && project.composite_textures.clearcoat.height == h {
+                self.queue.write_texture(
+                    wgpu::ImageCopyTexture { texture: &self.tex_clearcoat, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                    bytemuck::cast_slice(&project.composite_textures.clearcoat.data),
+                    wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(w * 4), rows_per_image: Some(h) },
+                    size,
+                );
+            }
+            if project.composite_textures.anisotropy.width == w && project.composite_textures.anisotropy.height == h {
+                let total = (w * h) as usize;
+                let req_len = total * 4;
+                if self.aniso_staging.len() != req_len {
+                    self.aniso_staging.resize(req_len, 0.0);
+                }
+                let aniso_data = &project.composite_textures.anisotropy.data;
+                let angle_data = &project.composite_textures.anisotropy_angle.data;
+                let has_aniso = aniso_data.iter().any(|&v| v > 0.001) || angle_data.iter().any(|&v| v > 0.001);
+                if has_aniso {
+                    for i in 0..total {
+                        let a = if i < aniso_data.len() { aniso_data[i] } else { 0.0 };
+                        let ang = if i < angle_data.len() { angle_data[i] } else { 0.0 };
+                        self.aniso_staging[i * 4 + 0] = a;
+                        self.aniso_staging[i * 4 + 1] = ang;
+                        self.aniso_staging[i * 4 + 2] = 0.0;
+                        self.aniso_staging[i * 4 + 3] = 1.0;
+                    }
+                } else {
+                    self.aniso_staging.fill(0.0);
+                }
+                self.queue.write_texture(
+                    wgpu::ImageCopyTexture { texture: &self.tex_anisotropy, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                    bytemuck::cast_slice(&self.aniso_staging),
+                    wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(w * 16), rows_per_image: Some(h) },
+                    size,
+                );
+            }
+            project.gpu_extended_channels_dirty = false;
         }
     }
 
-    pub fn ensure_gpu_layers(&mut self, project: &crate::project::Project) {
+    pub fn ensure_gpu_layers(&mut self, project: &mut crate::project::Project) {
         let w = project.texture_width;
         let h = project.texture_height;
         self.ensure_pbr_textures(w, h);
@@ -1071,11 +1079,13 @@ impl WgpuViewport {
         if project_ids != current_gpu_ids {
             let mut old_layers = std::mem::take(&mut self.gpu_layers);
             let mut new_gpu_layers = Vec::with_capacity(project.layers.len());
-            for cpu_layer in &project.layers {
+            for cpu_layer in &mut project.layers {
                 if let Some(pos) = old_layers.iter().position(|gl| gl.id == cpu_layer.id) {
                     new_gpu_layers.push(old_layers.remove(pos));
                 } else {
                     new_gpu_layers.push(self.gpu_compositor.create_layer(cpu_layer, w, h));
+                    cpu_layer.dirty_rect = None;
+                    cpu_layer.dirty_flags = crate::layer::LayerDirtyFlags::none();
                 }
             }
             self.gpu_layers = new_gpu_layers;

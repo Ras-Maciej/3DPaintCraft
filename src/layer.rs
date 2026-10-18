@@ -434,6 +434,8 @@ pub struct Layer {
     pub active_mask_effect_id: Option<u64>,
     #[serde(skip)]
     pub dirty_rect: Option<(u32, u32, u32, u32)>,
+    #[serde(skip)]
+    pub dirty_flags: LayerDirtyFlags,
 
     // Folder / Group hierarchy
     pub parent_folder_id: Option<u64>,
@@ -448,6 +450,53 @@ pub struct Layer {
     // Anchor point identifier for cross-layer referencing
     #[serde(default)]
     pub anchor_point: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LayerDirtyFlags {
+    pub color: bool,
+    pub roughness: bool,
+    pub metallic: bool,
+    pub normal: bool,
+    pub mask: bool,
+}
+
+impl Default for LayerDirtyFlags {
+    fn default() -> Self {
+        Self {
+            color: true,
+            roughness: true,
+            metallic: true,
+            normal: true,
+            mask: true,
+        }
+    }
+}
+
+impl LayerDirtyFlags {
+    pub fn all() -> Self {
+        Self {
+            color: true,
+            roughness: true,
+            metallic: true,
+            normal: true,
+            mask: true,
+        }
+    }
+
+    pub fn none() -> Self {
+        Self {
+            color: false,
+            roughness: false,
+            metallic: false,
+            normal: false,
+            mask: false,
+        }
+    }
+
+    pub fn is_any(&self) -> bool {
+        self.color || self.roughness || self.metallic || self.normal || self.mask
+    }
 }
 
 fn default_base_mask_val() -> f32 {
@@ -512,6 +561,7 @@ impl Layer {
             next_mask_effect_id: 0,
             active_mask_effect_id: None,
             dirty_rect: None,
+            dirty_flags: LayerDirtyFlags::all(),
 
             parent_folder_id: None,
             folder_collapsed: false,
@@ -521,23 +571,77 @@ impl Layer {
         }
     }
 
-    pub fn new_folder_layer(id: u64, name: String, width: u32, height: u32) -> Self {
-        let mut layer = Self::new_paint_layer(id, name, width, height);
-        layer.layer_type = LayerType::Folder;
-        layer.blend_mode = BlendMode::PassThrough;
-        layer.channel_blend_modes = ChannelBlendModes {
-            base_color: BlendMode::PassThrough,
-            roughness: BlendMode::PassThrough,
-            metallic: BlendMode::PassThrough,
-            normal: BlendMode::PassThrough,
-            height: BlendMode::PassThrough,
-            ao: BlendMode::PassThrough,
-            emission: BlendMode::PassThrough,
-            opacity: BlendMode::PassThrough,
-            clearcoat: BlendMode::PassThrough,
-            anisotropy: BlendMode::PassThrough,
-        };
-        layer
+    pub fn new_folder_layer(id: u64, name: String, _width: u32, _height: u32) -> Self {
+        Self {
+            id,
+            name,
+            layer_type: LayerType::Folder,
+            visible: true,
+            opacity: 1.0,
+            blend_mode: BlendMode::PassThrough,
+            channel_flags: ChannelFlags::default(),
+            fill_color: Vec4::new(0.8, 0.8, 0.8, 1.0),
+            fill_roughness: 0.5,
+            fill_metallic: 0.0,
+            fill_height: 0.5,
+            fill_normal_strength: 1.0,
+            fill_emissive: Vec4::new(0.0, 0.0, 0.0, 1.0),
+            fill_opacity: 1.0,
+            fill_clearcoat: 0.0,
+            fill_anisotropy: 0.0,
+            fill_anisotropy_angle: 0.0,
+            fill_generator: ProceduralGenerator::None,
+            generator_scale: 8.0,
+            generator_contrast: 1.0,
+            generator_invert: false,
+            triplanar: false,
+            uv_scale: 1.0,
+            uv_offset: glam::Vec2::ZERO,
+            uv_rotation: 0.0,
+            fill_color_tex: None,
+            fill_roughness_tex: None,
+            fill_metallic_tex: None,
+            fill_normal_tex: None,
+            fill_height_tex: None,
+            fill_emissive_tex: None,
+            fill_opacity_tex: None,
+            // Folders never hold raster paint buffers: zero memory allocated
+            base_color_buf: RgbaBuffer::new(0, 0, Vec4::ZERO),
+            roughness_buf: ScalarBuffer::new(0, 0, 0.0),
+            metallic_buf: ScalarBuffer::new(0, 0, 0.0),
+            height_buf: ScalarBuffer::new(0, 0, 0.0),
+            normal_buf: RgbaBuffer::new(0, 0, Vec4::ZERO),
+            emissive_buf: RgbaBuffer::new(0, 0, Vec4::ZERO),
+            opacity_buf: ScalarBuffer::new(0, 0, 0.0),
+            clearcoat_buf: ScalarBuffer::new(0, 0, 0.0),
+            anisotropy_buf: ScalarBuffer::new(0, 0, 0.0),
+            anisotropy_angle_buf: ScalarBuffer::new(0, 0, 0.0),
+            has_mask: false,
+            mask_buf: ScalarBuffer::new(0, 0, 0.0),
+            mask_inverted: false,
+            base_mask_value: 1.0,
+            mask_effects: Vec::new(),
+            next_mask_effect_id: 0,
+            active_mask_effect_id: None,
+            dirty_rect: None,
+            dirty_flags: LayerDirtyFlags::none(),
+            parent_folder_id: None,
+            folder_collapsed: false,
+            channel_blend_modes: ChannelBlendModes {
+                base_color: BlendMode::PassThrough,
+                roughness: BlendMode::PassThrough,
+                metallic: BlendMode::PassThrough,
+                normal: BlendMode::PassThrough,
+                height: BlendMode::PassThrough,
+                ao: BlendMode::PassThrough,
+                emission: BlendMode::PassThrough,
+                opacity: BlendMode::PassThrough,
+                clearcoat: BlendMode::PassThrough,
+                anisotropy: BlendMode::PassThrough,
+            },
+            channel_opacities: ChannelOpacities::default(),
+            anchor_point: None,
+        }
     }
 
     pub fn new_fill_layer(
@@ -578,11 +682,63 @@ impl Layer {
         let h = self.base_color_buf.height;
         if w > 0 && h > 0 {
             self.dirty_rect = Some((0, 0, w - 1, h - 1));
+            self.dirty_flags = LayerDirtyFlags::all();
+        }
+    }
+
+    pub fn mark_dirty_channel(&mut self, ch: ChannelType) {
+        let w = self.base_color_buf.width;
+        let h = self.base_color_buf.height;
+        if w > 0 && h > 0 {
+            self.dirty_rect = Some((0, 0, w - 1, h - 1));
+            match ch {
+                ChannelType::BaseColor => self.dirty_flags.color = true,
+                ChannelType::Roughness => self.dirty_flags.roughness = true,
+                ChannelType::Metallic => self.dirty_flags.metallic = true,
+                ChannelType::Normal => self.dirty_flags.normal = true,
+                _ => {}
+            }
+        }
+    }
+
+    pub fn mark_dirty_mask(&mut self) {
+        let w = self.mask_buf.width;
+        let h = self.mask_buf.height;
+        if w > 0 && h > 0 {
+            self.dirty_rect = Some((0, 0, w - 1, h - 1));
+            self.dirty_flags.mask = true;
+        }
+    }
+
+    pub fn set_fill_roughness(&mut self, val: f32) {
+        self.fill_roughness = val;
+        if self.fill_roughness_tex.is_none() && self.fill_generator == ProceduralGenerator::None && !self.triplanar {
+            self.roughness_buf.data.fill(val);
+            self.mark_dirty_channel(ChannelType::Roughness);
+        }
+    }
+
+    pub fn set_fill_metallic(&mut self, val: f32) {
+        self.fill_metallic = val;
+        if self.fill_metallic_tex.is_none() && self.fill_generator == ProceduralGenerator::None && !self.triplanar {
+            self.metallic_buf.data.fill(val);
+            self.mark_dirty_channel(ChannelType::Metallic);
+        }
+    }
+
+    pub fn set_fill_color(&mut self, val: Vec4) {
+        self.fill_color = val;
+        if self.fill_color_tex.is_none() && self.fill_generator == ProceduralGenerator::None && !self.triplanar {
+            self.base_color_buf.data.fill(val);
+            self.mark_dirty_channel(ChannelType::BaseColor);
         }
     }
 
     /// Resize all internal channel buffers to a new resolution
     pub fn resize(&mut self, new_width: u32, new_height: u32) {
+        if self.layer_type == LayerType::Folder {
+            return;
+        }
         self.base_color_buf.resize_bilinear(new_width, new_height);
         self.normal_buf.resize_bilinear(new_width, new_height);
         self.roughness_buf.resize_bilinear(new_width, new_height);
@@ -601,6 +757,63 @@ impl Layer {
     /// Excludes heavy static texture maps (fill_color_tex, fill_normal_tex, etc.)
     /// to avoid copying tens/hundreds of megabytes of read-only textures on every stroke.
     pub fn clone_stroke_snapshot(&self) -> Box<Layer> {
+        self.clone_stroke_snapshot_selective(None, None)
+    }
+
+    /// High-performance selective stroke snapshot that clones ONLY the buffers
+    /// actively modified by the stroke target and active channels, bypassing
+    /// untouched channel buffers (avoiding hundreds of MBs of buffer allocations).
+    pub fn clone_stroke_snapshot_selective(
+        &self,
+        target: Option<crate::brush::PaintTarget>,
+        channels: Option<ChannelFlags>,
+    ) -> Box<Layer> {
+        let is_mask_only = target == Some(crate::brush::PaintTarget::Mask);
+        let ch = channels.unwrap_or(self.channel_flags);
+
+        let (bc, norm, rough, metal, height, emis, opac, cc, aniso, aniso_ang, mask) = if is_mask_only {
+            (
+                RgbaBuffer::new(0, 0, Vec4::ZERO),
+                RgbaBuffer::new(0, 0, Vec4::ZERO),
+                ScalarBuffer::new(0, 0, 0.0),
+                ScalarBuffer::new(0, 0, 0.0),
+                ScalarBuffer::new(0, 0, 0.0),
+                RgbaBuffer::new(0, 0, Vec4::ZERO),
+                ScalarBuffer::new(0, 0, 0.0),
+                ScalarBuffer::new(0, 0, 0.0),
+                ScalarBuffer::new(0, 0, 0.0),
+                ScalarBuffer::new(0, 0, 0.0),
+                self.mask_buf.clone(),
+            )
+        } else if target == Some(crate::brush::PaintTarget::Material) {
+            let bc = if ch.base_color { self.base_color_buf.clone() } else { RgbaBuffer::new(0, 0, Vec4::ZERO) };
+            let rough = if ch.roughness { self.roughness_buf.clone() } else { ScalarBuffer::new(0, 0, 0.0) };
+            let metal = if ch.metallic { self.metallic_buf.clone() } else { ScalarBuffer::new(0, 0, 0.0) };
+            let height = if ch.height { self.height_buf.clone() } else { ScalarBuffer::new(0, 0, 0.0) };
+            let norm = if ch.normal || ch.height { self.normal_buf.clone() } else { RgbaBuffer::new(0, 0, Vec4::ZERO) };
+            let emis = if ch.emission { self.emissive_buf.clone() } else { RgbaBuffer::new(0, 0, Vec4::ZERO) };
+            let opac = if ch.opacity { self.opacity_buf.clone() } else { ScalarBuffer::new(0, 0, 0.0) };
+            let cc = if ch.clearcoat { self.clearcoat_buf.clone() } else { ScalarBuffer::new(0, 0, 0.0) };
+            let aniso = if ch.anisotropy { self.anisotropy_buf.clone() } else { ScalarBuffer::new(0, 0, 0.0) };
+            let aniso_ang = if ch.anisotropy { self.anisotropy_angle_buf.clone() } else { ScalarBuffer::new(0, 0, 0.0) };
+            let mask = ScalarBuffer::new(0, 0, 0.0);
+            (bc, norm, rough, metal, height, emis, opac, cc, aniso, aniso_ang, mask)
+        } else {
+            (
+                self.base_color_buf.clone(),
+                self.normal_buf.clone(),
+                self.roughness_buf.clone(),
+                self.metallic_buf.clone(),
+                self.height_buf.clone(),
+                self.emissive_buf.clone(),
+                self.opacity_buf.clone(),
+                self.clearcoat_buf.clone(),
+                self.anisotropy_buf.clone(),
+                self.anisotropy_angle_buf.clone(),
+                self.mask_buf.clone(),
+            )
+        };
+
         Box::new(Layer {
             id: self.id,
             name: self.name.clone(),
@@ -638,25 +851,26 @@ impl Layer {
             fill_emissive_tex: None,
             fill_opacity_tex: None,
 
-            base_color_buf: self.base_color_buf.clone(),
-            roughness_buf: self.roughness_buf.clone(),
-            metallic_buf: self.metallic_buf.clone(),
-            height_buf: self.height_buf.clone(),
-            normal_buf: self.normal_buf.clone(),
-            emissive_buf: self.emissive_buf.clone(),
-            opacity_buf: self.opacity_buf.clone(),
-            clearcoat_buf: self.clearcoat_buf.clone(),
-            anisotropy_buf: self.anisotropy_buf.clone(),
-            anisotropy_angle_buf: self.anisotropy_angle_buf.clone(),
+            base_color_buf: bc,
+            roughness_buf: rough,
+            metallic_buf: metal,
+            height_buf: height,
+            normal_buf: norm,
+            emissive_buf: emis,
+            opacity_buf: opac,
+            clearcoat_buf: cc,
+            anisotropy_buf: aniso,
+            anisotropy_angle_buf: aniso_ang,
 
             has_mask: self.has_mask,
-            mask_buf: self.mask_buf.clone(),
+            mask_buf: mask,
             mask_inverted: self.mask_inverted,
             base_mask_value: self.base_mask_value,
             mask_effects: self.mask_effects.clone(),
             next_mask_effect_id: self.next_mask_effect_id,
             active_mask_effect_id: self.active_mask_effect_id,
             dirty_rect: self.dirty_rect,
+            dirty_flags: self.dirty_flags,
             parent_folder_id: self.parent_folder_id,
             folder_collapsed: self.folder_collapsed,
             channel_blend_modes: self.channel_blend_modes,
@@ -665,19 +879,43 @@ impl Layer {
         })
     }
 
-    /// Restore raster buffer state from a stroke snapshot, preserving loaded fill textures
+    /// Restore raster buffer state from a stroke snapshot, preserving loaded fill textures.
+    /// If selective buffer snapshot was used, empty buffers in snapshot will not overwrite
+    /// existing layer data.
     pub fn restore_stroke_snapshot(&mut self, snapshot: &Layer) {
-        self.base_color_buf = snapshot.base_color_buf.clone();
-        self.roughness_buf = snapshot.roughness_buf.clone();
-        self.metallic_buf = snapshot.metallic_buf.clone();
-        self.height_buf = snapshot.height_buf.clone();
-        self.normal_buf = snapshot.normal_buf.clone();
-        self.emissive_buf = snapshot.emissive_buf.clone();
-        self.opacity_buf = snapshot.opacity_buf.clone();
-        self.clearcoat_buf = snapshot.clearcoat_buf.clone();
-        self.anisotropy_buf = snapshot.anisotropy_buf.clone();
-        self.anisotropy_angle_buf = snapshot.anisotropy_angle_buf.clone();
-        self.mask_buf = snapshot.mask_buf.clone();
+        if !snapshot.base_color_buf.data.is_empty() {
+            self.base_color_buf = snapshot.base_color_buf.clone();
+        }
+        if !snapshot.roughness_buf.data.is_empty() {
+            self.roughness_buf = snapshot.roughness_buf.clone();
+        }
+        if !snapshot.metallic_buf.data.is_empty() {
+            self.metallic_buf = snapshot.metallic_buf.clone();
+        }
+        if !snapshot.height_buf.data.is_empty() {
+            self.height_buf = snapshot.height_buf.clone();
+        }
+        if !snapshot.normal_buf.data.is_empty() {
+            self.normal_buf = snapshot.normal_buf.clone();
+        }
+        if !snapshot.emissive_buf.data.is_empty() {
+            self.emissive_buf = snapshot.emissive_buf.clone();
+        }
+        if !snapshot.opacity_buf.data.is_empty() {
+            self.opacity_buf = snapshot.opacity_buf.clone();
+        }
+        if !snapshot.clearcoat_buf.data.is_empty() {
+            self.clearcoat_buf = snapshot.clearcoat_buf.clone();
+        }
+        if !snapshot.anisotropy_buf.data.is_empty() {
+            self.anisotropy_buf = snapshot.anisotropy_buf.clone();
+        }
+        if !snapshot.anisotropy_angle_buf.data.is_empty() {
+            self.anisotropy_angle_buf = snapshot.anisotropy_angle_buf.clone();
+        }
+        if !snapshot.mask_buf.data.is_empty() {
+            self.mask_buf = snapshot.mask_buf.clone();
+        }
         self.has_mask = snapshot.has_mask;
         self.mask_inverted = snapshot.mask_inverted;
         self.base_mask_value = snapshot.base_mask_value;
@@ -685,6 +923,7 @@ impl Layer {
         self.active_mask_effect_id = snapshot.active_mask_effect_id;
         self.channel_flags = snapshot.channel_flags;
         self.dirty_rect = snapshot.dirty_rect;
+        self.dirty_flags = snapshot.dirty_flags;
     }
 
     pub fn get_channel_blend_mode(&self, ch: ChannelType) -> BlendMode {
@@ -3146,6 +3385,66 @@ mod tests {
         // Right half (green) should not match color selection mask (0.0)
         let right_val = layer.mask_buf.get_pixel(12, 8);
         assert!(right_val < 1e-3, "Green region must not match red target color, got {}", right_val);
+    }
+
+    #[test]
+    fn test_selective_stroke_snapshot_zero_alloc() {
+        let mut layer = Layer::new_fill_layer(1, "TestLayer".to_string(), 64, 64, Vec4::ONE, 0.5, 0.0);
+        layer.add_white_mask();
+
+        // 1. Snapshot for Mask painting: material buffers should be zero-allocated (empty)
+        let mask_snapshot = layer.clone_stroke_snapshot_selective(Some(crate::brush::PaintTarget::Mask), None);
+        assert_eq!(mask_snapshot.base_color_buf.data.len(), 0);
+        assert_eq!(mask_snapshot.roughness_buf.data.len(), 0);
+        assert_eq!(mask_snapshot.metallic_buf.data.len(), 0);
+        assert_eq!(mask_snapshot.mask_buf.data.len(), 64 * 64);
+
+        // Mutate mask and restore
+        layer.mask_buf.set_pixel(5, 5, 0.0);
+        assert_eq!(layer.mask_buf.get_pixel(5, 5), 0.0);
+        layer.restore_stroke_snapshot(&mask_snapshot);
+        assert_eq!(layer.mask_buf.get_pixel(5, 5), 1.0);
+        // Base color should remain intact and non-empty
+        assert_eq!(layer.base_color_buf.data.len(), 64 * 64);
+
+        // 2. Snapshot for Material painting with base_color only: mask buffer should be zero-allocated
+        let mut flags = ChannelFlags::default();
+        flags.base_color = true;
+        flags.roughness = false;
+        flags.metallic = false;
+        let mat_snapshot = layer.clone_stroke_snapshot_selective(Some(crate::brush::PaintTarget::Material), Some(flags));
+        assert_eq!(mat_snapshot.base_color_buf.data.len(), 64 * 64);
+        assert_eq!(mat_snapshot.mask_buf.data.len(), 0);
+        assert_eq!(mat_snapshot.roughness_buf.data.len(), 0);
+    }
+
+    #[test]
+    fn test_folder_layer_zero_buffer_allocation() {
+        let folder = Layer::new_folder_layer(2, "FolderGroup".to_string(), 2048, 2048);
+        assert_eq!(folder.base_color_buf.data.len(), 0);
+        assert_eq!(folder.roughness_buf.data.len(), 0);
+        assert_eq!(folder.metallic_buf.data.len(), 0);
+        assert_eq!(folder.normal_buf.data.len(), 0);
+        assert_eq!(folder.mask_buf.data.len(), 0);
+        assert_eq!(folder.layer_type, LayerType::Folder);
+    }
+
+    #[test]
+    fn test_selective_dirty_channel_tracking() {
+        let mut layer = Layer::new_fill_layer(1, "Fill".to_string(), 32, 32, Vec4::ONE, 0.5, 0.0);
+        assert!(layer.dirty_flags.is_any());
+
+        // Clear dirty flags
+        layer.dirty_flags = LayerDirtyFlags::none();
+        layer.dirty_rect = None;
+        assert!(!layer.dirty_flags.is_any());
+
+        // Changing roughness only marks roughness dirty
+        layer.set_fill_roughness(0.2);
+        assert!(layer.dirty_flags.roughness);
+        assert!(!layer.dirty_flags.color);
+        assert!(!layer.dirty_flags.metallic);
+        assert!(layer.dirty_rect.is_some());
     }
 }
 

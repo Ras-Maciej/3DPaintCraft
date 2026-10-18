@@ -35,7 +35,7 @@ fn default_ts_visible() -> bool {
 
 impl TextureSet {
     pub fn new(id: u64, name: String, material_name: String, submesh_indices: Vec<usize>, width: u32, height: u32) -> Self {
-        let initial_layer = Layer::new_paint_layer(1, "Base Paint".to_string(), width, height);
+        let initial_layer = Layer::new_fill_layer(1, "Base Material".to_string(), width, height, glam::Vec4::ONE, 0.5, 0.0);
         let mut composite_textures = CompositeTextureSet::new(width, height);
         composite_textures.composite_layers(&[initial_layer.clone()]);
         Self {
@@ -165,6 +165,7 @@ pub struct Project {
     pub next_layer_id: u64,
     pub is_dirty: bool,
     pub gpu_sync_needed: bool,
+    pub gpu_extended_channels_dirty: bool,
     pub gpu_mesh_maps_sync_needed: bool,
     pub texture_revision: u64,
     pub high_poly_mesh: Option<Mesh>,
@@ -197,17 +198,18 @@ impl Project {
             next_layer_id: 1,
             is_dirty: true,
             gpu_sync_needed: true,
+            gpu_extended_channels_dirty: true,
             gpu_mesh_maps_sync_needed: true,
             texture_revision: 0,
             file_path: None, high_poly_mesh: None,
         };
 
-        // Default to a single base fill layer
+        // Default to a single base fill layer (pure white default material)
         let base_fill = Layer::new_fill_layer(
             proj.next_layer_id, 
             "Base Material".to_string(), 
             width, height, 
-            glam::Vec4::new(0.8, 0.8, 0.8, 1.0), 
+            glam::Vec4::ONE, 
             0.5, 0.0
         );
         proj.next_layer_id += 1;
@@ -743,6 +745,7 @@ impl Project {
             next_layer_id: serialized.next_layer_id,
             is_dirty: false,
             gpu_sync_needed: true,
+            gpu_extended_channels_dirty: true,
             gpu_mesh_maps_sync_needed: true,
             texture_revision: 0,
             file_path: Some(path.to_string_lossy().to_string()), high_poly_mesh: None,
@@ -1032,6 +1035,20 @@ mod tests {
         assert!(proj.remove_resource("baked_curvature"));
         assert_eq!(proj.resources.len(), 2);
         assert!(proj.get_resource("baked_curvature").is_none());
+    }
+
+    #[test]
+    fn test_project_opens_with_white_fill_layer() {
+        let proj = Project::new_default(64, 64);
+        assert_eq!(proj.layers.len(), 1);
+        let base_layer = &proj.layers[0];
+        assert_eq!(base_layer.layer_type, crate::layer::LayerType::Fill);
+        assert_eq!(base_layer.fill_color, glam::Vec4::ONE);
+
+        let ts = TextureSet::new(1, "TestTS".to_string(), "Mat".to_string(), vec![0], 64, 64);
+        assert_eq!(ts.layers.len(), 1);
+        assert_eq!(ts.layers[0].layer_type, crate::layer::LayerType::Fill);
+        assert_eq!(ts.layers[0].fill_color, glam::Vec4::ONE);
     }
 }
 

@@ -303,6 +303,7 @@ pub struct PaintcraftApp {
     pub new_material_opacity: f32,
     pub new_material_clearcoat: f32,
     pub new_material_anisotropy: f32,
+    pub need_cpu_composite_sync: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -588,6 +589,7 @@ impl PaintcraftApp {
             new_material_opacity: 1.0,
             new_material_clearcoat: 0.0,
             new_material_anisotropy: 0.0,
+            need_cpu_composite_sync: false,
         }
     }
 
@@ -2972,7 +2974,12 @@ impl eframe::App for PaintcraftApp {
                         }
     
                         if blend_or_opacity_changed {
-                            self.project.rebuild_composite();
+                            if self.wgpu_viewport.is_some() && ui.input(|i| i.pointer.any_down()) {
+                                self.project.gpu_sync_needed = true;
+                                self.need_cpu_composite_sync = true;
+                            } else {
+                                self.project.rebuild_composite();
+                            }
                         }
     
                         // Layer Stack Toolbar
@@ -2987,7 +2994,7 @@ impl eframe::App for PaintcraftApp {
                                 let prev_active = self.project.active_layer_idx;
                                 let new_idx = self.project.add_paint_layer(None);
                                 self.brush_engine.settings.target = PaintTarget::Material;
-                                let layer_clone = Box::new(self.project.layers[new_idx].clone());
+                                let layer_clone = self.project.layers[new_idx].clone_stroke_snapshot();
                                 self.history.push("Add Paint Layer", HistoryAction::AddLayer {
                                     layer_idx: new_idx,
                                     layer: layer_clone,
@@ -3005,12 +3012,12 @@ impl eframe::App for PaintcraftApp {
                                 let prev_active = self.project.active_layer_idx;
                                 let new_idx = self.project.add_fill_layer(
                                     None,
-                                    self.brush_engine.settings.paint_color,
-                                    self.brush_engine.settings.paint_roughness,
-                                    self.brush_engine.settings.paint_metallic,
+                                    glam::Vec4::ONE,
+                                    0.5,
+                                    0.0,
                                 );
                                 self.brush_engine.settings.target = PaintTarget::Material;
-                                let layer_clone = Box::new(self.project.layers[new_idx].clone());
+                                let layer_clone = self.project.layers[new_idx].clone_stroke_snapshot();
                                 self.history.push("Add Fill Layer", HistoryAction::AddLayer {
                                     layer_idx: new_idx,
                                     layer: layer_clone,
@@ -3027,7 +3034,7 @@ impl eframe::App for PaintcraftApp {
                             if ui.add(btn_folder).on_hover_text("Add Layer Folder / Group").clicked() {
                                 let prev_active = self.project.active_layer_idx;
                                 let new_idx = self.project.add_folder_layer(None);
-                                let layer_clone = Box::new(self.project.layers[new_idx].clone());
+                                let layer_clone = self.project.layers[new_idx].clone_stroke_snapshot();
                                 self.history.push("Add Folder", HistoryAction::AddLayer {
                                     layer_idx: new_idx,
                                     layer: layer_clone,
@@ -4578,8 +4585,13 @@ impl eframe::App for PaintcraftApp {
                             if mask_changed && layer.has_mask {
                                 layer.evaluate_mask_full(curv, ao, pos, wn, id_ref, &anchor_refs);
                             }
-                            self.project.rebuild_composite();
-                            self.project.gpu_sync_needed = true;
+                            if self.wgpu_viewport.is_some() && ui.input(|i| i.pointer.any_down()) {
+                                self.project.gpu_sync_needed = true;
+                                self.need_cpu_composite_sync = true;
+                            } else {
+                                self.project.rebuild_composite();
+                                self.project.gpu_sync_needed = true;
+                            }
                         }
 
                         if let Some(target) = open_shelf_picker {
@@ -5929,6 +5941,13 @@ impl eframe::App for PaintcraftApp {
         // --- GITHUB UPDATE NOTIFIER DIALOG ---
         self.updater.render_dialog(ctx);
 
+        // --- DEFERRED CPU COMPOSITING SYNC ON POINTER RELEASE ---
+        if self.need_cpu_composite_sync && !ctx.input(|i| i.pointer.any_down()) {
+            self.project.rebuild_composite();
+            self.need_cpu_composite_sync = false;
+            ctx.request_repaint();
+        }
+
         self.perf_metrics.work_latency_ms = frame_start.elapsed().as_secs_f32() * 1000.0;
         if self.continuous_60fps {
             ctx.request_repaint();
@@ -6358,10 +6377,14 @@ impl PaintcraftApp {
         {
                 if !self.is_stroke_active {
                     if let Some(wgpu) = &mut self.wgpu_viewport {
-                        wgpu.ensure_gpu_layers(&self.project);
+                        if wgpu.gpu_layers.len() != self.project.layers.len() {
+                            wgpu.ensure_gpu_layers(&mut self.project);
+                        }
                     }
                     if let Some(layer) = self.project.active_layer() {
-                        self.stroke_start_layer = Some(layer.clone_stroke_snapshot());
+                        let target = self.brush_engine.settings.target;
+                        let channels = layer.channel_flags;
+                        self.stroke_start_layer = Some(layer.clone_stroke_snapshot_selective(Some(target), Some(channels)));
                         self.is_stroke_active = true;
                     }
                     self.polygon_fill_drag_tris.clear();
@@ -6635,10 +6658,13 @@ impl PaintcraftApp {
                             } else {
                                 "Paint Stroke".to_string()
                             };
+                            let target = self.brush_engine.settings.target;
+                            let channels = next.channel_flags;
+                            let next_layer = next.clone_stroke_snapshot_selective(Some(target), Some(channels));
                             self.history.push(&desc.clone(), HistoryAction::Stroke {
                                 layer_idx: idx,
                                 prev_layer: prev,
-                                next_layer: next.clone_stroke_snapshot(),
+                                next_layer,
                                 description: desc,
                             });
                         }
@@ -7092,8 +7118,15 @@ impl PaintcraftApp {
             if !is_panning && (response.dragged_by(egui::PointerButton::Primary) || response.clicked()) {
                 ctx.request_repaint();
                 if !self.is_stroke_active {
+                    if let Some(wgpu) = &mut self.wgpu_viewport {
+                        if wgpu.gpu_layers.len() != self.project.layers.len() {
+                            wgpu.ensure_gpu_layers(&mut self.project);
+                        }
+                    }
                     if let Some(layer) = self.project.active_layer() {
-                        self.stroke_start_layer = Some(layer.clone_stroke_snapshot());
+                        let target = self.brush_engine.settings.target;
+                        let channels = layer.channel_flags;
+                        self.stroke_start_layer = Some(layer.clone_stroke_snapshot_selective(Some(target), Some(channels)));
                         self.is_stroke_active = true;
                     }
                     self.polygon_fill_drag_tris.clear();
@@ -7269,10 +7302,13 @@ impl PaintcraftApp {
                             } else {
                                 "2D UV Paint Stroke".to_string()
                             };
+                            let target = self.brush_engine.settings.target;
+                            let channels = next.channel_flags;
+                            let next_layer = next.clone_stroke_snapshot_selective(Some(target), Some(channels));
                             self.history.push(&desc.clone(), HistoryAction::Stroke {
                                 layer_idx: idx,
                                 prev_layer: prev,
-                                next_layer: next.clone_stroke_snapshot(),
+                                next_layer,
                                 description: desc,
                             });
                         }
@@ -9523,11 +9559,11 @@ mod tests {
         }
         layer.mark_dirty_full();
 
-        // Check that at least some pixels were colored
+        // Check that at least some pixels were colored (orange has z < 0.2, default white has z == 1.0)
         let mut colored_pixels = 0;
         for py in 0..32 {
             for px in 0..32 {
-                if layer.base_color_buf.get_pixel(px, py).x > 0.9 {
+                if layer.base_color_buf.get_pixel(px, py).z < 0.2 {
                     colored_pixels += 1;
                 }
             }
@@ -9552,11 +9588,11 @@ mod tests {
         let desc = history.undo(&mut proj).expect("Undo must return an action description");
         assert_eq!(desc, "Polygon Fill (Polygon (Quad))");
 
-        // Verify layer reverted to initial state
+        // Verify layer reverted to initial state (white default layer has z == 1.0)
         let mut reverted_colored = 0;
         for py in 0..32 {
             for px in 0..32 {
-                if proj.layers[0].base_color_buf.get_pixel(px, py).x > 0.9 {
+                if proj.layers[0].base_color_buf.get_pixel(px, py).z < 0.2 {
                     reverted_colored += 1;
                 }
             }
