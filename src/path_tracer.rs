@@ -56,20 +56,37 @@ pub fn sample_cosine_hemisphere(normal: Vec3, rng: &mut XorShift64) -> Vec3 {
     (tangent * x + bitangent * y + normal * z).normalize_or_zero()
 }
 
-/// Random point inside a unit sphere for rough specular perturbation
+/// Importance sample GGX normal distribution for a given surface normal and roughness
 #[inline]
-pub fn random_in_unit_sphere(rng: &mut XorShift64) -> Vec3 {
-    let u = rng.next_f32();
-    let v = rng.next_f32();
-    let theta = u * 2.0 * std::f32::consts::PI;
-    let phi = (2.0 * v - 1.0).clamp(-1.0, 1.0).acos();
-    let r = rng.next_f32().cbrt();
-    let sin_phi = phi.sin();
-    Vec3::new(
-        r * sin_phi * theta.cos(),
-        r * sin_phi * theta.sin(),
-        r * phi.cos(),
-    )
+pub fn sample_ggx(normal: Vec3, roughness: f32, rng: &mut XorShift64) -> Vec3 {
+    let alpha = (roughness * roughness).clamp(0.001, 1.0);
+    let u1 = rng.next_f32();
+    let u2 = rng.next_f32();
+
+    let phi = 2.0 * std::f32::consts::PI * u1;
+    let cos_theta = ((1.0 - u2) / (1.0 + (alpha * alpha - 1.0) * u2).max(1e-6))
+        .sqrt()
+        .clamp(0.0, 1.0);
+    let sin_theta = (1.0 - cos_theta * cos_theta).max(0.0).sqrt();
+
+    let h_local = Vec3::new(sin_theta * phi.cos(), sin_theta * phi.sin(), cos_theta);
+
+    let up = if normal.z.abs() < 0.999 { Vec3::Z } else { Vec3::X };
+    let tangent = normal.cross(up).normalize_or_zero();
+    let bitangent = normal.cross(tangent);
+
+    (tangent * h_local.x + bitangent * h_local.y + normal * h_local.z).normalize_or_zero()
+}
+
+/// ACES Filmic tonemapping curve (Unreal Engine 5 / Substance 3D standard)
+#[inline]
+pub fn tonemap_aces(v: Vec3) -> Vec3 {
+    let a = 2.51;
+    let b = 0.03;
+    let c = 2.43;
+    let d = 0.59;
+    let e = 0.14;
+    ((v * (a * v + b)) / (v * (c * v + d) + e)).clamp(Vec3::ZERO, Vec3::ONE)
 }
 
 /// Progressive Monte Carlo Path Tracer
@@ -110,7 +127,7 @@ impl PathTracer {
         }
     }
 
-    /// Reset accumulation when camera or project state changes
+    /// Reset accumulation when camera, scene, or materials change
     pub fn reset(&mut self) {
         self.accumulation_buffer.fill(Vec3::ZERO);
         self.sample_count = 0;
@@ -158,8 +175,6 @@ impl PathTracer {
         }
 
         let max_bounces = self.max_bounces;
-
-        // Render in parallel scanline chunks
         let w_f32 = w as f32;
         let h_f32 = h as f32;
 
@@ -193,9 +208,9 @@ impl PathTracer {
             });
 
         self.sample_count += samples_to_run;
-        let s_count_f32 = self.sample_count as f32;
+        let s_count_f32 = self.sample_count.max(1) as f32;
 
-        // Tonemap and gamma correct accumulation into color_buffer
+        // ACES Filmic tonemapping and display sRGB conversion into color_buffer
         let accum_buf = &self.accumulation_buffer;
         self.color_buffer
             .par_chunks_exact_mut(4)
@@ -203,14 +218,14 @@ impl PathTracer {
             .for_each(|(idx, rgba)| {
                 let mean_rad = accum_buf[idx] / s_count_f32;
 
-                // Reinhard tonemapping
-                let mapped = mean_rad / (mean_rad + Vec3::ONE);
+                // ACES Filmic tonemapping
+                let mapped = tonemap_aces(mean_rad);
 
-                // Gamma 2.2 correction
+                // Convert linear photometric radiance to display sRGB
                 let inv_gamma = 1.0 / 2.2;
-                let r = (mapped.x.max(0.0).powf(inv_gamma).min(1.0) * 255.0) as u8;
-                let g = (mapped.y.max(0.0).powf(inv_gamma).min(1.0) * 255.0) as u8;
-                let b = (mapped.z.max(0.0).powf(inv_gamma).min(1.0) * 255.0) as u8;
+                let r = (mapped.x.clamp(0.0, 1.0).powf(inv_gamma) * 255.0 + 0.5) as u8;
+                let g = (mapped.y.clamp(0.0, 1.0).powf(inv_gamma) * 255.0 + 0.5) as u8;
+                let b = (mapped.z.clamp(0.0, 1.0).powf(inv_gamma) * 255.0 + 0.5) as u8;
 
                 rgba[0] = r;
                 rgba[1] = g;
@@ -235,7 +250,7 @@ impl PathTracer {
     }
 }
 
-/// Trace a single light transport path with multiple bounces
+/// Trace a single light transport path with physical GGX microfacets, shadow rays, and environment IBL
 #[inline]
 fn trace_path(
     initial_ray: Ray,
@@ -294,11 +309,25 @@ fn trace_path(
 
         // Sample PBR material maps at UV coordinate
         let uv = hit.uv;
+
+        // Convert base color from stored sRGB to linear radiometric space for physical transport
         let base_color = textures.base_color.sample_bilinear(uv).truncate();
+        let albedo = Vec3::new(
+            base_color.x.powf(2.2),
+            base_color.y.powf(2.2),
+            base_color.z.powf(2.2),
+        );
+
         let metallic = textures.metallic.sample_bilinear(uv).clamp(0.0, 1.0);
-        let roughness = textures.roughness.sample_bilinear(uv).clamp(0.03, 1.0);
-        let emissive = textures.emissive.sample_bilinear(uv).truncate();
+        let roughness = textures.roughness.sample_bilinear(uv).clamp(0.015, 1.0);
         let ao = textures.ao.sample_bilinear(uv).clamp(0.0, 1.0);
+
+        let emissive = textures.emissive.sample_bilinear(uv).truncate();
+        let emissive_lin = Vec3::new(
+            emissive.x.powf(2.2),
+            emissive.y.powf(2.2),
+            emissive.z.powf(2.2),
+        );
 
         // Tangent-space normal mapping
         let norm_sample = textures.normal.sample_bilinear(uv);
@@ -322,9 +351,20 @@ fn trace_path(
         };
 
         let hit_pos = hit.point + normal * 0.0005;
+        let v_dir = -ray.direction;
+        let n_dot_v = normal.dot(v_dir).max(1e-4);
+
+        // Dielectric F0 is 0.04, metal F0 is tinted by linear albedo
+        let f0 = Vec3::splat(0.04).lerp(albedo, metallic);
+
+        // Physical Matte Attenuation:
+        // As roughness approaches 1.0 on dielectrics, microfacets completely scatter specular into diffuse
+        let gloss = (1.0 - roughness).clamp(0.0, 1.0);
+        let dielectric_falloff = gloss.powf(1.5);
+        let matte_factor = dielectric_falloff * (1.0 - metallic) + metallic;
 
         // 1. Direct Emissive illumination
-        radiance += throughput * emissive;
+        radiance += throughput * emissive_lin;
 
         // 2. Direct Key / Sun Light with Shadow Ray (True Contact Shadows)
         let l_dir = hdri.key_light_direction();
@@ -335,21 +375,18 @@ fn trace_path(
             let in_shadow = mesh.bvh.raycast(&shadow_ray, &mesh.vertices, &mesh.indices).is_some();
 
             if !in_shadow {
-                let v_dir = -ray.direction;
-                let h = (v_dir + l_dir).normalize_or_zero();
-                let n_dot_v = normal.dot(v_dir).max(1e-4);
-                let n_dot_h = normal.dot(h).max(0.0);
-                let v_dot_h = v_dir.dot(h).max(0.0);
+                let h_sun = (v_dir + l_dir).normalize_or_zero();
+                let n_dot_h = normal.dot(h_sun).max(0.0);
+                let v_dot_h = v_dir.dot(h_sun).max(0.0);
 
                 // Fresnel Schlick
-                let f0 = Vec3::splat(0.04).lerp(base_color, metallic);
-                let f = f0 + (Vec3::ONE - f0) * (1.0 - v_dot_h).powf(5.0);
+                let f_sun = f0 + (Vec3::ONE - f0) * (1.0 - v_dot_h).powf(5.0);
 
                 // GGX Normal Distribution
-                let alpha = roughness * roughness;
+                let alpha = (roughness * roughness).max(0.001);
                 let alpha2 = alpha * alpha;
                 let denom_d = n_dot_h * n_dot_h * (alpha2 - 1.0) + 1.0;
-                let d = alpha2 / (std::f32::consts::PI * denom_d * denom_d);
+                let d = alpha2 / (std::f32::consts::PI * denom_d * denom_d).max(1e-8);
 
                 // Smith Geometry Function
                 let k = (roughness + 1.0).powi(2) / 8.0;
@@ -357,12 +394,68 @@ fn trace_path(
                 let g1_l = n_dot_l / (n_dot_l * (1.0 - k) + k);
                 let g = g1_v * g1_l;
 
-                let spec = (d * g) / (4.0 * n_dot_v * n_dot_l + 1e-4) * f;
-                let kd = (Vec3::ONE - f) * (1.0 - metallic);
-                let diff = kd * base_color / std::f32::consts::PI;
+                let spec = (d * g) / (4.0 * n_dot_v * n_dot_l).max(1e-4) * f_sun * matte_factor;
+                let diff = (Vec3::ONE - f_sun) * (1.0 - metallic) * albedo / std::f32::consts::PI;
 
                 let light_color = hdri.key_light_color();
                 radiance += throughput * (diff + spec) * light_color * n_dot_l * ao;
+            }
+        }
+
+        // 3. Environment Diffuse Irradiance (Ambient Light)
+        let diffuse_irradiance = hdri.evaluate_diffuse(normal);
+        let ibl_diffuse = (Vec3::ONE - f0) * (1.0 - metallic) * albedo * diffuse_irradiance * ao;
+        radiance += throughput * ibl_diffuse;
+
+        // 4. Environment Specular Reflection via GGX Microfacet Importance Sampling
+        // Samples the HDRI along the physical microfacet distribution parameterized by roughness
+        let h_microfacet = sample_ggx(normal, roughness, rng);
+        let r_spec = (2.0 * v_dir.dot(h_microfacet) * h_microfacet - v_dir).normalize_or_zero();
+
+        if r_spec.dot(normal) > 0.0 {
+            let v_dot_hm = v_dir.dot(h_microfacet).max(0.0);
+            let f_spec = f0 + (Vec3::ONE - f0) * (1.0 - v_dot_hm).powf(5.0);
+
+            // Cast specular ray to test for self-reflection vs environment
+            let spec_ray = Ray::new(hit_pos, r_spec);
+            let spec_hit = mesh.bvh.raycast(&spec_ray, &mesh.vertices, &mesh.indices);
+
+            let spec_incoming = match spec_hit {
+                Some(sh) => {
+                    // Reflected light from another surface on the mesh
+                    let s_uv = sh.uv;
+                    let s_base = textures.base_color.sample_bilinear(s_uv).truncate();
+                    let s_albedo = Vec3::new(s_base.x.powf(2.2), s_base.y.powf(2.2), s_base.z.powf(2.2));
+                    let s_diff = hdri.evaluate_diffuse(sh.normal);
+                    s_albedo * s_diff * 0.5
+                }
+                None => {
+                    // Reflected light from the HDRI environment
+                    if let Some(c) = hdri.sample_equirectangular(r_spec) {
+                        c * hdri.exposure
+                    } else {
+                        hdri.evaluate_specular(r_spec, roughness)
+                    }
+                }
+            };
+
+            radiance += throughput * spec_incoming * f_spec * matte_factor * ao;
+        }
+
+        // 5. Clearcoat specular reflection layer
+        let clearcoat = textures.clearcoat.sample_bilinear(uv);
+        if clearcoat > 0.01 {
+            let cc_h = sample_ggx(normal, 0.08, rng);
+            let cc_r = (2.0 * v_dir.dot(cc_h) * cc_h - v_dir).normalize_or_zero();
+            if cc_r.dot(normal) > 0.0 {
+                let cc_sky = if let Some(c) = hdri.sample_equirectangular(cc_r) {
+                    c * hdri.exposure
+                } else {
+                    hdri.evaluate_specular(cc_r, 0.08)
+                };
+                let v_dot_cch = v_dir.dot(cc_h).max(0.0);
+                let f_cc = 0.04 + (1.0 - 0.04) * (1.0 - v_dot_cch).powf(5.0);
+                radiance += throughput * cc_sky * f_cc * clearcoat;
             }
         }
 
@@ -371,30 +464,10 @@ fn trace_path(
             break;
         }
 
-        // 3. Monte Carlo Indirect Bounce
-        let f0 = Vec3::splat(0.04).lerp(base_color, metallic);
-        let v_dir = -ray.direction;
-        let f = f0 + (Vec3::ONE - f0) * (1.0 - normal.dot(v_dir).max(0.0)).powf(5.0);
-        let spec_prob = ((f.x + f.y + f.z) / 3.0).clamp(0.05, 0.95);
-
-        if rng.next_f32() < spec_prob {
-            // Specular reflection bounce with roughness perturbation
-            let reflect_dir = ray.direction - 2.0 * ray.direction.dot(normal) * normal;
-            let perturb = random_in_unit_sphere(rng) * roughness;
-            let bounce_dir = (reflect_dir + perturb).normalize_or_zero();
-
-            if bounce_dir.dot(normal) <= 0.0 {
-                break;
-            }
-
-            throughput = throughput * f / spec_prob;
-            ray = Ray::new(hit_pos, bounce_dir);
-        } else {
-            // Cosine-weighted diffuse bounce
-            let bounce_dir = sample_cosine_hemisphere(normal, rng);
-            throughput = throughput * (Vec3::ONE - f0) * (1.0 - metallic) * base_color * ao / (1.0 - spec_prob);
-            ray = Ray::new(hit_pos, bounce_dir);
-        }
+        // 6. Monte Carlo Indirect Diffuse Bounce (Color Bleeding & Mesh Self-Occlusion)
+        let bounce_dir = sample_cosine_hemisphere(normal, rng);
+        throughput = throughput * (Vec3::ONE - f0) * (1.0 - metallic) * albedo * ao;
+        ray = Ray::new(hit_pos, bounce_dir);
 
         // Russian Roulette termination for bounces >= 2
         if bounce >= 2 {
@@ -421,6 +494,50 @@ mod tests {
             let val = rng.next_f32();
             assert!(val >= 0.0 && val <= 1.0);
         }
+    }
+
+    #[test]
+    fn test_sample_cosine_hemisphere_normals() {
+        let mut rng = XorShift64::new(12345);
+        let n = Vec3::Y;
+        for _ in 0..100 {
+            let sample = sample_cosine_hemisphere(n, &mut rng);
+            assert!(sample.dot(n) >= -0.01);
+            assert!((sample.length() - 1.0).abs() < 0.05);
+        }
+    }
+
+    #[test]
+    fn test_sample_ggx_distribution_roughness() {
+        let mut rng = XorShift64::new(999);
+        let n = Vec3::Y;
+
+        // Smooth mirror surface (roughness = 0.01) must stay extremely close to normal
+        for _ in 0..50 {
+            let h = sample_ggx(n, 0.01, &mut rng);
+            assert!(h.dot(n) > 0.99);
+        }
+
+        // Rough surface (roughness = 0.9) must spread across the hemisphere
+        let mut spread_count = 0;
+        for _ in 0..100 {
+            let h = sample_ggx(n, 0.9, &mut rng);
+            if h.dot(n) < 0.8 {
+                spread_count += 1;
+            }
+        }
+        assert!(spread_count > 10);
+    }
+
+    #[test]
+    fn test_tonemap_aces_monotonic() {
+        let low = tonemap_aces(Vec3::splat(0.2));
+        let med = tonemap_aces(Vec3::splat(1.0));
+        let high = tonemap_aces(Vec3::splat(5.0));
+
+        assert!(low.x < med.x);
+        assert!(med.x < high.x);
+        assert!(high.x <= 1.0);
     }
 
     #[test]
@@ -451,13 +568,30 @@ mod tests {
     }
 
     #[test]
-    fn test_sample_cosine_hemisphere_normals() {
-        let mut rng = XorShift64::new(12345);
-        let n = Vec3::Y;
-        for _ in 0..100 {
-            let sample = sample_cosine_hemisphere(n, &mut rng);
-            assert!(sample.dot(n) >= -0.01);
-            assert!((sample.length() - 1.0).abs() < 0.05);
-        }
+    fn test_path_tracer_roughness_produces_distinct_highlights() {
+        let camera = Camera::default();
+        let mesh = Mesh::create_cube_mesh("Cube", 1.0);
+        let hdri = HdriEnvironment::new(HdriPreset::StudioNeutral);
+
+        let mut tex_smooth = CompositeTextureSet::new(64, 64);
+        tex_smooth.roughness.data.fill(0.02);
+
+        let mut tex_rough = CompositeTextureSet::new(64, 64);
+        tex_rough.roughness.data.fill(0.95);
+
+        let mut pt_smooth = PathTracer::new(32, 32);
+        pt_smooth.render_samples(&camera, &mesh, &tex_smooth, &hdri, 4);
+
+        let mut pt_rough = PathTracer::new(32, 32);
+        pt_rough.render_samples(&camera, &mesh, &tex_rough, &hdri, 4);
+
+        // Calculate differences between the smooth mirror and rough matte renders
+        let diff: i32 = pt_smooth.color_buffer
+            .iter()
+            .zip(pt_rough.color_buffer.iter())
+            .map(|(a, b)| (*a as i32 - *b as i32).abs())
+            .sum();
+
+        assert!(diff > 500, "Smooth and rough materials must produce visibly distinct path-traced buffers (diff: {})", diff);
     }
 }

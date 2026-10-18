@@ -284,6 +284,7 @@ pub struct PaintcraftApp {
     pub iray_max_samples: u32,
     pub iray_max_bounces: u32,
     pub iray_samples_per_frame: u32,
+    pub last_iray_texture_revision: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -552,6 +553,7 @@ impl PaintcraftApp {
             iray_max_samples: 256,
             iray_max_bounces: 2,
             iray_samples_per_frame: 1,
+            last_iray_texture_revision: 0,
         }
     }
 
@@ -5767,6 +5769,7 @@ impl PaintcraftApp {
             self.project.gpu_mesh_maps_sync_needed = false;
         }
 
+        let textures_dirty = self.project.gpu_sync_needed;
         if self.project.gpu_sync_needed {
             let t_sync = std::time::Instant::now();
             if let Some(wgpu) = &mut self.wgpu_viewport {
@@ -5782,7 +5785,7 @@ impl PaintcraftApp {
         let aspect = vp_w / vp_h;
 
         let is_interacting = response.dragged() || self.is_stroke_active;
-        if is_interacting || response.hovered() || self.project.gpu_sync_needed {
+        if is_interacting || response.hovered() || self.project.gpu_sync_needed || textures_dirty {
             ctx.request_repaint();
         }
         let render_w = (vp_w as u32).max(128).min(3840);
@@ -5805,16 +5808,18 @@ impl PaintcraftApp {
             let current_rot = self.renderer.hdri.rotation;
             let camera_changed = self.last_iray_camera_view.map(|v| v != current_view).unwrap_or(true);
             let hdri_changed = (self.last_iray_hdri_rot - current_rot).abs() > 0.01;
+            let textures_changed = textures_dirty || (self.last_iray_texture_revision != self.project.texture_revision);
 
             if let Some(pt) = &mut self.path_tracer {
                 pt.resize(pt_w, pt_h);
                 pt.max_samples = self.iray_max_samples;
                 pt.max_bounces = self.iray_max_bounces;
 
-                if camera_changed || hdri_changed || self.project.gpu_sync_needed {
+                if camera_changed || hdri_changed || textures_changed {
                     pt.reset();
                     self.last_iray_camera_view = Some(current_view);
                     self.last_iray_hdri_rot = current_rot;
+                    self.last_iray_texture_revision = self.project.texture_revision;
                 }
 
                 let samples = if is_interacting { 1 } else { self.iray_samples_per_frame };

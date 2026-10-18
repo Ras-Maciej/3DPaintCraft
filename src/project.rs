@@ -166,6 +166,7 @@ pub struct Project {
     pub is_dirty: bool,
     pub gpu_sync_needed: bool,
     pub gpu_mesh_maps_sync_needed: bool,
+    pub texture_revision: u64,
     pub high_poly_mesh: Option<Mesh>,
     #[allow(dead_code)]
     pub file_path: Option<String>,
@@ -197,6 +198,7 @@ impl Project {
             is_dirty: true,
             gpu_sync_needed: true,
             gpu_mesh_maps_sync_needed: true,
+            texture_revision: 0,
             file_path: None, high_poly_mesh: None,
         };
 
@@ -512,6 +514,7 @@ impl Project {
         self.composite_textures.composite_layers(&self.layers);
         self.is_dirty = true;
         self.gpu_sync_needed = true;
+        self.texture_revision = self.texture_revision.wrapping_add(1);
     }
 
     pub fn active_layer_mut(&mut self) -> Option<&mut Layer> {
@@ -741,6 +744,7 @@ impl Project {
             is_dirty: false,
             gpu_sync_needed: true,
             gpu_mesh_maps_sync_needed: true,
+            texture_revision: 0,
             file_path: Some(path.to_string_lossy().to_string()), high_poly_mesh: None,
         };
 
