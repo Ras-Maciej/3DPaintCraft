@@ -30,6 +30,24 @@ impl HdriAssetEntry {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CustomMaterialEntry {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub path: PathBuf,
+    pub file_name: String,
+    pub base_color: [f32; 4],
+    pub roughness: f32,
+    pub metallic: f32,
+    pub height: f32,
+    pub normal: [f32; 4],
+    pub emissive: [f32; 4],
+    pub opacity: f32,
+    pub clearcoat: f32,
+    pub anisotropy: f32,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AssetPaths {
     pub root_dir: PathBuf,
@@ -67,6 +85,7 @@ pub struct AssetManager {
     pub paths: AssetPaths,
     pub hdris: Vec<HdriAssetEntry>,
     pub active_hdri_index: usize,
+    pub materials: Vec<CustomMaterialEntry>,
 }
 
 impl Default for AssetManager {
@@ -82,6 +101,7 @@ impl AssetManager {
             paths,
             hdris: Vec::new(),
             active_hdri_index: 0,
+            materials: Vec::new(),
         };
         manager.init();
         manager
@@ -92,6 +112,7 @@ impl AssetManager {
         self.ensure_directories();
         self.ensure_builtin_hdris();
         self.refresh_hdris();
+        self.refresh_materials();
     }
 
     /// Ensure all asset folders exist on disk
@@ -276,6 +297,90 @@ impl AssetManager {
     pub fn active_entry(&self) -> Option<&HdriAssetEntry> {
         self.hdris.get(self.active_hdri_index)
     }
+
+    /// Rescan the materials folder for all .mat and .json material definitions
+    pub fn refresh_materials(&mut self) {
+        let mut found = Vec::new();
+        let mut scan_dirs = vec![self.paths.materials_dir.clone()];
+        scan_dirs.extend(self.paths.custom_dirs.clone());
+
+        for dir in scan_dirs {
+            if let Ok(entries) = fs::read_dir(&dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_file() {
+                        if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
+                            let ext_lower = ext.to_lowercase();
+                            if ext_lower == "mat" || ext_lower == "json" {
+                                if let Ok(content) = fs::read_to_string(&path) {
+                                    if let Ok(mut mat) = serde_json::from_str::<CustomMaterialEntry>(&content) {
+                                        mat.path = path.clone();
+                                        mat.file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("").to_string();
+                                        found.push(mat);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        found.sort_by(|a, b| a.name.cmp(&b.name));
+        self.materials = found;
+    }
+
+    /// Save a user custom material to the materials folder as a .mat JSON file
+    pub fn save_material(&mut self, mat: &CustomMaterialEntry) -> Result<PathBuf, String> {
+        let clean_stem = if !mat.id.is_empty() {
+            mat.id.trim().replace(' ', "_").to_lowercase()
+        } else {
+            mat.name.trim().replace(' ', "_").to_lowercase()
+        };
+        let file_name = format!("{}.mat", clean_stem);
+        let path = self.paths.materials_dir.join(&file_name);
+        let mut entry = mat.clone();
+        entry.id = clean_stem;
+        entry.path = path.clone();
+        entry.file_name = file_name;
+
+        let json = serde_json::to_string_pretty(&entry).map_err(|e| e.to_string())?;
+        fs::write(&path, json).map_err(|e| format!("Failed to save material to {:?}: {}", path, e))?;
+        self.refresh_materials();
+        Ok(path)
+    }
+
+    /// Delete a user custom material from disk
+    pub fn delete_material(&mut self, id: &str) -> Result<(), String> {
+        if let Some(entry) = self.materials.iter().find(|m| m.id == id).cloned() {
+            if entry.path.exists() {
+                fs::remove_file(&entry.path).map_err(|e| format!("Failed to delete material {:?}: {}", entry.path, e))?;
+            }
+        }
+        self.refresh_materials();
+        Ok(())
+    }
+
+    /// Open materials asset folder in Linux Desktop file manager
+    pub fn open_materials_folder(&self) -> Result<(), String> {
+        let path = &self.paths.materials_dir;
+        if !path.exists() {
+            let _ = fs::create_dir_all(path);
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            std::process::Command::new("xdg-open")
+                .arg(path)
+                .spawn()
+                .map_err(|e| format!("Failed to open folder via xdg-open: {}", e))?;
+            Ok(())
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Err("Unsupported OS for folder open".to_string())
+        }
+    }
 }
 
 #[cfg(test)]
@@ -297,5 +402,46 @@ mod tests {
         assert!(studio.is_some(), "Built-in Studio_Softboxes.hdr must be written to disk");
         assert!(manager.active_entry().is_some());
         assert!(!manager.hdris[0].size_formatted().is_empty());
+    }
+
+    #[test]
+    fn test_custom_materials_lifecycle() {
+        let mut manager = AssetManager::new();
+        let test_mat = CustomMaterialEntry {
+            id: "test_cyber_metal".to_string(),
+            name: "Cyber Metal".to_string(),
+            description: "Futuristic iridescent brushed alloy".to_string(),
+            path: PathBuf::new(),
+            file_name: String::new(),
+            base_color: [0.1, 0.7, 0.9, 1.0],
+            roughness: 0.18,
+            metallic: 0.95,
+            height: 0.5,
+            normal: [0.5, 0.5, 1.0, 0.5],
+            emissive: [0.0, 0.3, 0.5, 1.0],
+            opacity: 1.0,
+            clearcoat: 0.8,
+            anisotropy: 0.4,
+        };
+
+        let save_res = manager.save_material(&test_mat);
+        assert!(save_res.is_ok(), "Saving custom material should succeed");
+        let saved_path = save_res.unwrap();
+        assert!(saved_path.exists());
+
+        // Refresh and verify material is present
+        manager.refresh_materials();
+        let found = manager.materials.iter().find(|m| m.id == "test_cyber_metal");
+        assert!(found.is_some(), "Saved custom material must be found in materials list");
+        let loaded = found.unwrap();
+        assert_eq!(loaded.name, "Cyber Metal");
+        assert_eq!(loaded.metallic, 0.95);
+        assert_eq!(loaded.roughness, 0.18);
+
+        // Delete and verify cleanup
+        let del_res = manager.delete_material("test_cyber_metal");
+        assert!(del_res.is_ok());
+        assert!(!saved_path.exists());
+        assert!(manager.materials.iter().all(|m| m.id != "test_cyber_metal"));
     }
 }

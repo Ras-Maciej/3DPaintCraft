@@ -45,114 +45,7 @@ pub struct ShelfAsset {
 
 pub static SHELF_ASSETS: &[ShelfAsset] = &[
         // --- 1. PBR MATERIALS ---
-        ShelfAsset {
-            id: "mat_gold",
-            name: "Pure Gold",
-            category: ShelfCategory::Materials,
-            preview_color: [255, 215, 0],
-            preview_metallic: 1.0,
-            preview_roughness: 0.15,
-            description: "Polished 24k gold with smooth mirror reflections",
-        },
-        ShelfAsset {
-            id: "mat_chrome",
-            name: "Polished Chrome",
-            category: ShelfCategory::Materials,
-            preview_color: [230, 230, 235],
-            preview_metallic: 1.0,
-            preview_roughness: 0.05,
-            description: "Ultra-reflective mirror chrome finish",
-        },
-        ShelfAsset {
-            id: "mat_copper",
-            name: "Rough Copper",
-            category: ShelfCategory::Materials,
-            preview_color: [205, 115, 55],
-            preview_metallic: 1.0,
-            preview_roughness: 0.38,
-            description: "Raw untreated copper with satin roughness",
-        },
-        ShelfAsset {
-            id: "mat_aluminium",
-            name: "Brushed Aluminium",
-            category: ShelfCategory::Materials,
-            preview_color: [210, 215, 220],
-            preview_metallic: 0.95,
-            preview_roughness: 0.28,
-            description: "Machined aerospace-grade aluminium",
-        },
-        ShelfAsset {
-            id: "mat_cast_iron",
-            name: "Rusted Cast Iron",
-            category: ShelfCategory::Materials,
-            preview_color: [85, 55, 45],
-            preview_metallic: 0.2,
-            preview_roughness: 0.85,
-            description: "Heavy porous iron with surface oxidation",
-        },
-        ShelfAsset {
-            id: "mat_car_paint_red",
-            name: "Car Paint (Red)",
-            category: ShelfCategory::Materials,
-            preview_color: [220, 25, 25],
-            preview_metallic: 0.0,
-            preview_roughness: 0.08,
-            description: "High-gloss automotive clearcoat enamel",
-        },
-        ShelfAsset {
-            id: "mat_military_olive",
-            name: "Military Olive",
-            category: ShelfCategory::Materials,
-            preview_color: [75, 85, 35],
-            preview_metallic: 0.0,
-            preview_roughness: 0.90,
-            description: "Ultra-matte anti-reflective tactical coating",
-        },
-        ShelfAsset {
-            id: "mat_rubber",
-            name: "Dark Rubber",
-            category: ShelfCategory::Materials,
-            preview_color: [35, 35, 35],
-            preview_metallic: 0.0,
-            preview_roughness: 0.75,
-            description: "Dense vulcanized rubber polymer",
-        },
-        ShelfAsset {
-            id: "mat_white_plastic",
-            name: "White Plastic",
-            category: ShelfCategory::Materials,
-            preview_color: [240, 240, 242],
-            preview_metallic: 0.0,
-            preview_roughness: 0.22,
-            description: "Clean injection-molded ABS plastic",
-        },
-        ShelfAsset {
-            id: "mat_oak_wood",
-            name: "Oak Wood",
-            category: ShelfCategory::Materials,
-            preview_color: [135, 88, 38],
-            preview_metallic: 0.0,
-            preview_roughness: 0.65,
-            description: "Natural hardwood with grain finish",
-        },
-        ShelfAsset {
-            id: "mat_obsidian",
-            name: "Obsidian Glass",
-            category: ShelfCategory::Materials,
-            preview_color: [20, 20, 25],
-            preview_metallic: 0.1,
-            preview_roughness: 0.04,
-            description: "Glossy deep-black volcanic mineral",
-        },
-        ShelfAsset {
-            id: "mat_clay",
-            name: "Terracotta Clay",
-            category: ShelfCategory::Materials,
-            preview_color: [195, 110, 80],
-            preview_metallic: 0.0,
-            preview_roughness: 0.95,
-            description: "Rough unglazed pottery clay",
-        },
+        // Built-in materials removed to allow pure user-defined materials
 
         // --- 2. SMART MATERIALS ---
         // Built-in smart materials removed to allow pure user-defined smart materials
@@ -614,7 +507,7 @@ mod tests {
         let has_generators = assets.iter().any(|a| a.category == ShelfCategory::Generators);
         let has_alphas = assets.iter().any(|a| a.category == ShelfCategory::Alphas);
 
-        assert!(has_materials, "Should have material assets");
+        assert!(!has_materials, "Built-in static materials should be cleared for user-created materials");
         assert!(has_smart_masks, "Should have smart mask assets");
         assert!(has_generators, "Should have procedural generator noise assets");
         assert!(has_alphas, "Should have brush alpha assets");

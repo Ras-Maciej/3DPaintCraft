@@ -286,6 +286,18 @@ pub struct PaintcraftApp {
     pub iray_samples_per_frame: u32,
     pub iray_denoise: bool,
     pub last_iray_texture_revision: u64,
+
+    // Custom Material Creation Modal state
+    pub show_new_material_modal: bool,
+    pub new_material_name: String,
+    pub new_material_color: [f32; 4],
+    pub new_material_roughness: f32,
+    pub new_material_metallic: f32,
+    pub new_material_height: f32,
+    pub new_material_emissive: [f32; 3],
+    pub new_material_opacity: f32,
+    pub new_material_clearcoat: f32,
+    pub new_material_anisotropy: f32,
 }
 
 #[derive(Clone, Debug)]
@@ -556,6 +568,16 @@ impl PaintcraftApp {
             iray_samples_per_frame: 1,
             iray_denoise: true,
             last_iray_texture_revision: 0,
+            show_new_material_modal: false,
+            new_material_name: "My Material".to_string(),
+            new_material_color: [0.8, 0.8, 0.8, 1.0],
+            new_material_roughness: 0.35,
+            new_material_metallic: 0.0,
+            new_material_height: 0.5,
+            new_material_emissive: [0.0, 0.0, 0.0],
+            new_material_opacity: 1.0,
+            new_material_clearcoat: 0.0,
+            new_material_anisotropy: 0.0,
         }
     }
 
@@ -3008,6 +3030,37 @@ impl eframe::App for PaintcraftApp {
                                         prev_active: act_idx,
                                     });
                                     self.status_message = format!("Duplicated layer #{}", new_idx);
+                                }
+                            }
+
+                            if ui.button("Save as Mat").on_hover_text("Save selected layer as a reusable PBR material in the Shelf").clicked() {
+                                if let Some(layer) = self.project.layers.get(act_idx) {
+                                    let name = layer.name.clone();
+                                    let clean_id = name.trim().replace(' ', "_").to_lowercase();
+                                    let mat = crate::asset_manager::CustomMaterialEntry {
+                                        id: clean_id,
+                                        name: name.clone(),
+                                        description: format!("Custom PBR material created from layer '{}'", name),
+                                        path: std::path::PathBuf::new(),
+                                        file_name: String::new(),
+                                        base_color: [layer.fill_color.x, layer.fill_color.y, layer.fill_color.z, layer.fill_color.w],
+                                        roughness: layer.fill_roughness,
+                                        metallic: layer.fill_metallic,
+                                        height: layer.fill_height,
+                                        normal: [0.5, 0.5, 1.0, 0.5],
+                                        emissive: [layer.fill_emissive.x, layer.fill_emissive.y, layer.fill_emissive.z, layer.fill_emissive.w],
+                                        opacity: layer.fill_opacity,
+                                        clearcoat: layer.fill_clearcoat,
+                                        anisotropy: layer.fill_anisotropy,
+                                    };
+                                    match self.asset_manager.save_material(&mat) {
+                                        Ok(path) => {
+                                            self.status_message = format!("Saved Material '{}' to {:?}", mat.name, path.file_name().unwrap_or_default());
+                                        }
+                                        Err(e) => {
+                                            self.status_message = format!("Failed to save material: {}", e);
+                                        }
+                                    }
                                 }
                             }
     
@@ -5739,6 +5792,95 @@ impl eframe::App for PaintcraftApp {
                 });
         }
 
+        // --- NEW CUSTOM MATERIAL MODAL ---
+        if self.show_new_material_modal {
+            let mut close_modal = false;
+            let mut save_material_req = false;
+
+            egui::Window::new("Create New Custom PBR Material")
+                .collapsible(false)
+                .resizable(false)
+                .default_width(340.0)
+                .show(ctx, |ui| {
+                    ui.heading("New PBR Material");
+                    ui.label("Configure material attributes to save into your custom library.");
+                    ui.separator();
+
+                    ui.horizontal(|ui| {
+                        ui.label("Name:");
+                        ui.text_edit_singleline(&mut self.new_material_name);
+                    });
+
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.label("Base Color:");
+                        ui.color_edit_button_rgba_unmultiplied(&mut self.new_material_color);
+                    });
+
+                    ui.add_space(4.0);
+                    ui.add(egui::Slider::new(&mut self.new_material_roughness, 0.0..=1.0).text("Roughness"));
+                    ui.add(egui::Slider::new(&mut self.new_material_metallic, 0.0..=1.0).text("Metallic"));
+                    ui.add(egui::Slider::new(&mut self.new_material_height, 0.0..=1.0).text("Height"));
+                    ui.add(egui::Slider::new(&mut self.new_material_opacity, 0.0..=1.0).text("Opacity"));
+                    ui.add(egui::Slider::new(&mut self.new_material_clearcoat, 0.0..=1.0).text("Clearcoat"));
+                    ui.add(egui::Slider::new(&mut self.new_material_anisotropy, 0.0..=1.0).text("Anisotropy"));
+
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.add_space(4.0);
+
+                    ui.horizontal(|ui| {
+                        let save_btn = egui::Button::new(egui::RichText::new("Save Material").strong().color(Color32::WHITE))
+                            .fill(Color32::from_rgb(45, 140, 255));
+                        if ui.add(save_btn).clicked() {
+                            save_material_req = true;
+                            close_modal = true;
+                        }
+
+                        if ui.button("Cancel").clicked() {
+                            close_modal = true;
+                        }
+                    });
+                });
+
+            if save_material_req {
+                let name = if self.new_material_name.trim().is_empty() {
+                    format!("Material_{}", self.asset_manager.materials.len() + 1)
+                } else {
+                    self.new_material_name.trim().to_string()
+                };
+                let clean_id = name.replace(' ', "_").to_lowercase();
+                let mat = crate::asset_manager::CustomMaterialEntry {
+                    id: clean_id,
+                    name: name.clone(),
+                    description: format!("Custom user PBR material: {}", name),
+                    path: std::path::PathBuf::new(),
+                    file_name: String::new(),
+                    base_color: self.new_material_color,
+                    roughness: self.new_material_roughness,
+                    metallic: self.new_material_metallic,
+                    height: self.new_material_height,
+                    normal: [0.5, 0.5, 1.0, 0.5],
+                    emissive: [self.new_material_emissive[0], self.new_material_emissive[1], self.new_material_emissive[2], 1.0],
+                    opacity: self.new_material_opacity,
+                    clearcoat: self.new_material_clearcoat,
+                    anisotropy: self.new_material_anisotropy,
+                };
+                match self.asset_manager.save_material(&mat) {
+                    Ok(path) => {
+                        self.status_message = format!("Created and saved Material '{}' to {:?}", mat.name, path.file_name().unwrap_or_default());
+                    }
+                    Err(e) => {
+                        self.status_message = format!("Failed to save material: {}", e);
+                    }
+                }
+            }
+
+            if close_modal {
+                self.show_new_material_modal = false;
+            }
+        }
+
         // --- ABOUT MODAL ---
         if self.show_about_modal {
             egui::Window::new("About 3D Paintcraft")
@@ -7234,6 +7376,63 @@ impl PaintcraftApp {
                     self.status_message = format!("Refreshed HDRI assets: {} environments ready", self.asset_manager.hdris.len());
                 }
             });
+        } else if self.shelf_category == crate::shelf::ShelfCategory::Materials {
+            // Material library actions
+            ui.horizontal(|ui| {
+                if ui.small_button("+ New Material").on_hover_text("Create a new custom PBR material").clicked() {
+                    self.show_new_material_modal = true;
+                    self.new_material_name = format!("Material_{}", self.asset_manager.materials.len() + 1);
+                    if let Some(layer) = self.project.active_layer() {
+                        self.new_material_color = [layer.fill_color.x, layer.fill_color.y, layer.fill_color.z, layer.fill_color.w];
+                        self.new_material_roughness = layer.fill_roughness;
+                        self.new_material_metallic = layer.fill_metallic;
+                        self.new_material_height = layer.fill_height;
+                        self.new_material_emissive = [layer.fill_emissive.x, layer.fill_emissive.y, layer.fill_emissive.z];
+                        self.new_material_opacity = layer.fill_opacity;
+                        self.new_material_clearcoat = layer.fill_clearcoat;
+                        self.new_material_anisotropy = layer.fill_anisotropy;
+                    }
+                }
+                if ui.small_button("Save Layer as Mat").on_hover_text("Save currently selected active layer as a new material").clicked() {
+                    if let Some(layer) = self.project.active_layer() {
+                        let name = layer.name.clone();
+                        let clean_id = name.trim().replace(' ', "_").to_lowercase();
+                        let mat = crate::asset_manager::CustomMaterialEntry {
+                            id: clean_id,
+                            name: name.clone(),
+                            description: format!("Custom PBR material created from layer '{}'", name),
+                            path: std::path::PathBuf::new(),
+                            file_name: String::new(),
+                            base_color: [layer.fill_color.x, layer.fill_color.y, layer.fill_color.z, layer.fill_color.w],
+                            roughness: layer.fill_roughness,
+                            metallic: layer.fill_metallic,
+                            height: layer.fill_height,
+                            normal: [0.5, 0.5, 1.0, 0.5],
+                            emissive: [layer.fill_emissive.x, layer.fill_emissive.y, layer.fill_emissive.z, layer.fill_emissive.w],
+                            opacity: layer.fill_opacity,
+                            clearcoat: layer.fill_clearcoat,
+                            anisotropy: layer.fill_anisotropy,
+                        };
+                        match self.asset_manager.save_material(&mat) {
+                            Ok(path) => {
+                                self.status_message = format!("Saved Material '{}' to {:?}", mat.name, path.file_name().unwrap_or_default());
+                            }
+                            Err(e) => {
+                                self.status_message = format!("Failed to save material: {}", e);
+                            }
+                        }
+                    } else {
+                        self.status_message = "No active layer selected to save as material".to_string();
+                    }
+                }
+                if ui.small_button("Open Folder").on_hover_text("Open assets/materials directory in desktop file manager").clicked() {
+                    let _ = self.asset_manager.open_materials_folder();
+                }
+                if ui.small_button("↻ Refresh").on_hover_text("Rescan materials folder on disk").clicked() {
+                    self.asset_manager.refresh_materials();
+                    self.status_message = format!("Refreshed materials: {} custom materials ready", self.asset_manager.materials.len());
+                }
+            });
         } else {
             // Preset bundle actions
             ui.horizontal(|ui| {
@@ -7393,6 +7592,197 @@ impl PaintcraftApp {
 
             if let Some(path) = selected_hdri_path {
                 self.activate_hdri_file(&path);
+            }
+            return;
+        }
+
+        if self.shelf_category == crate::shelf::ShelfCategory::Materials {
+            let mat_query = self.shelf_search_query.to_lowercase();
+            let filtered_mats: Vec<_> = self.asset_manager.materials.iter().filter(|m| {
+                if !mat_query.is_empty() && !m.name.to_lowercase().contains(&mat_query) && !m.description.to_lowercase().contains(&mat_query) {
+                    return false;
+                }
+                true
+            }).collect();
+
+            let mut selected_mat: Option<crate::asset_manager::CustomMaterialEntry> = None;
+            let mut delete_mat_id: Option<String> = None;
+
+            egui::ScrollArea::vertical()
+                .id_source("assets_panel_materials_scroll")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    if filtered_mats.is_empty() {
+                        ui.vertical_centered(|ui| {
+                            ui.add_space(20.0);
+                            ui.label(egui::RichText::new("No custom materials found.").strong().color(Color32::from_rgb(200, 205, 215)));
+                            ui.add_space(6.0);
+                            ui.label(egui::RichText::new("Built-in materials have been cleared.\nClick '+ New Material' or 'Save Layer as Mat' above to create your own materials!").italics().color(Color32::from_rgb(140, 145, 155)));
+                            ui.add_space(12.0);
+                            if ui.button("+ Create First Material").clicked() {
+                                self.show_new_material_modal = true;
+                                self.new_material_name = "My Material".to_string();
+                            }
+                        });
+                    } else {
+                        let chunks: Vec<_> = filtered_mats.chunks(2).collect();
+                        for row in chunks {
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
+                                for mat in row {
+                                    let card_size = egui::vec2(card_w, card_h);
+                                    let (rect, response) = ui.allocate_exact_size(card_size, egui::Sense::click());
+
+                                    let is_hovered = response.hovered();
+                                    let bg_color = if is_hovered {
+                                        egui::Color32::from_rgb(46, 50, 58)
+                                    } else {
+                                        egui::Color32::from_rgb(30, 32, 36)
+                                    };
+
+                                    let border_stroke = if is_hovered {
+                                        egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(45, 140, 255))
+                                    } else {
+                                        egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(44, 47, 54))
+                                    };
+
+                                    ui.painter().rect(rect, egui::Rounding::same(4.0), bg_color, border_stroke);
+
+                                    // Preview Sphere / Swatch
+                                    let preview_rect = egui::Rect::from_min_size(
+                                        egui::pos2(rect.min.x + 5.0, rect.min.y + 5.0),
+                                        egui::vec2(card_w - 10.0, card_w - 18.0),
+                                    );
+                                    let center = preview_rect.center();
+                                    let radius = (preview_rect.width() * 0.40).min(18.0);
+                                    let col = egui::Color32::from_rgba_unmultiplied(
+                                        (mat.base_color[0] * 255.0).clamp(0.0, 255.0) as u8,
+                                        (mat.base_color[1] * 255.0).clamp(0.0, 255.0) as u8,
+                                        (mat.base_color[2] * 255.0).clamp(0.0, 255.0) as u8,
+                                        255,
+                                    );
+                                    ui.painter().circle_filled(center, radius, col);
+
+                                    // Specular highlight on sphere for glossy materials
+                                    if mat.roughness < 0.6 {
+                                        let gloss = 1.0 - mat.roughness;
+                                        let hl_offset = egui::vec2(-radius * 0.35, -radius * 0.35);
+                                        let hl_radius = radius * (0.35 * gloss);
+                                        let hl_alpha = ((0.8 * gloss) * 255.0) as u8;
+                                        ui.painter().circle_filled(
+                                            center + hl_offset,
+                                            hl_radius,
+                                            egui::Color32::from_rgba_unmultiplied(255, 255, 255, hl_alpha),
+                                        );
+                                    }
+                                    // Metallic border accent
+                                    if mat.metallic > 0.5 {
+                                        ui.painter().circle_stroke(
+                                            center,
+                                            radius + 1.0,
+                                            egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(255, 200, 80)),
+                                        );
+                                    }
+
+                                    // Badge in top right corner
+                                    ui.painter().text(
+                                        egui::pos2(rect.max.x - 3.0, rect.min.y + 2.0),
+                                        egui::Align2::RIGHT_TOP,
+                                        "MAT",
+                                        egui::FontId::proportional(7.5),
+                                        egui::Color32::from_rgb(45, 140, 255),
+                                    );
+
+                                    // Name label
+                                    let name_rect = egui::Rect::from_min_max(
+                                        egui::pos2(rect.min.x + 2.0, rect.max.y - 18.0),
+                                        egui::pos2(rect.max.x - 2.0, rect.max.y - 2.0),
+                                    );
+                                    ui.painter().text(
+                                        name_rect.center(),
+                                        egui::Align2::CENTER_CENTER,
+                                        &mat.name,
+                                        egui::FontId::proportional(9.0),
+                                        egui::Color32::from_rgb(215, 220, 230),
+                                    );
+
+                                    let tooltip = format!(
+                                        "{}\nRoughness: {:.2} | Metallic: {:.2}\nOpacity: {:.2} | Height: {:.2}\nClick to add as Fill Layer\nRight-click for options",
+                                        mat.name,
+                                        mat.roughness,
+                                        mat.metallic,
+                                        mat.opacity,
+                                        mat.height,
+                                    );
+                                    let response = response.on_hover_text(tooltip);
+
+                                    response.context_menu(|ui| {
+                                        if ui.button("Apply as New Fill Layer").clicked() {
+                                            selected_mat = Some((*mat).clone());
+                                            ui.close_menu();
+                                        }
+                                        if ui.button("Apply to Current Active Layer").clicked() {
+                                            let curv = self.project.curvature_map.clone();
+                                            if let Some(layer) = self.project.active_layer_mut() {
+                                                layer.fill_color = glam::Vec4::new(mat.base_color[0], mat.base_color[1], mat.base_color[2], mat.base_color[3]);
+                                                layer.fill_roughness = mat.roughness;
+                                                layer.fill_metallic = mat.metallic;
+                                                layer.fill_height = mat.height;
+                                                layer.fill_emissive = glam::Vec4::new(mat.emissive[0], mat.emissive[1], mat.emissive[2], mat.emissive[3]);
+                                                layer.fill_opacity = mat.opacity;
+                                                layer.fill_clearcoat = mat.clearcoat;
+                                                layer.fill_anisotropy = mat.anisotropy;
+                                                layer.evaluate_fill(curv.as_ref());
+                                            }
+                                            self.project.rebuild_composite();
+                                            ui.close_menu();
+                                        }
+                                        ui.separator();
+                                        if ui.button("Delete Material").clicked() {
+                                            delete_mat_id = Some(mat.id.clone());
+                                            ui.close_menu();
+                                        }
+                                    });
+
+                                    if response.clicked() {
+                                        selected_mat = Some((*mat).clone());
+                                    }
+                                }
+                            });
+                        }
+                    }
+                });
+
+            if let Some(id) = delete_mat_id {
+                let _ = self.asset_manager.delete_material(&id);
+                self.status_message = format!("Deleted material '{}'", id);
+            }
+
+            if let Some(mat) = selected_mat {
+                let col = glam::Vec4::new(mat.base_color[0], mat.base_color[1], mat.base_color[2], mat.base_color[3]);
+                let prev_active = self.project.active_layer_idx;
+                let new_idx = self.project.add_fill_layer(
+                    Some(mat.name.clone()),
+                    col,
+                    mat.roughness,
+                    mat.metallic,
+                );
+                if let Some(layer) = self.project.layers.get_mut(new_idx) {
+                    layer.fill_height = mat.height;
+                    layer.fill_emissive = glam::Vec4::new(mat.emissive[0], mat.emissive[1], mat.emissive[2], mat.emissive[3]);
+                    layer.fill_opacity = mat.opacity;
+                    layer.fill_clearcoat = mat.clearcoat;
+                    layer.fill_anisotropy = mat.anisotropy;
+                    layer.evaluate_fill(self.project.curvature_map.as_ref());
+                }
+                self.project.rebuild_composite();
+                let layer_clone = Box::new(self.project.layers[new_idx].clone());
+                self.history.push("Add Material Layer", HistoryAction::AddLayer {
+                    layer_idx: new_idx,
+                    layer: layer_clone,
+                    prev_active,
+                });
+                self.status_message = format!("Added Custom Material: {}", mat.name);
             }
             return;
         }
@@ -7611,6 +8001,76 @@ impl PaintcraftApp {
                         ui.separator();
                         ui.add_space(2.0);
                         ui.label(egui::RichText::new("LIBRARY PRESETS").small().strong().color(Color32::from_rgb(140, 145, 155)));
+                    }
+                }
+
+                if self.shelf_category == crate::shelf::ShelfCategory::All && !self.asset_manager.materials.is_empty() {
+                    let mat_matches: Vec<_> = self.asset_manager.materials.iter().filter(|m| {
+                        if !query.is_empty() && !m.name.to_lowercase().contains(&query) && !m.description.to_lowercase().contains(&query) {
+                            return false;
+                        }
+                        true
+                    }).collect();
+
+                    if !mat_matches.is_empty() {
+                        ui.label(egui::RichText::new("USER MATERIALS").small().strong().color(Color32::from_rgb(45, 140, 255)));
+                        let mchunks: Vec<_> = mat_matches.chunks(2).collect();
+                        for row in mchunks {
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
+                                for mat in row {
+                                    let card_size = egui::vec2(card_w, card_h);
+                                    let (rect, response) = ui.allocate_exact_size(card_size, egui::Sense::click());
+                                    let is_hovered = response.hovered();
+                                    let bg_color = if is_hovered { egui::Color32::from_rgb(46, 50, 58) } else { egui::Color32::from_rgb(30, 32, 36) };
+                                    let border_stroke = if is_hovered { egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(45, 140, 255)) } else { egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(44, 47, 54)) };
+                                    ui.painter().rect(rect, egui::Rounding::same(4.0), bg_color, border_stroke);
+
+                                    let preview_rect = egui::Rect::from_min_size(
+                                        egui::pos2(rect.min.x + 5.0, rect.min.y + 5.0),
+                                        egui::vec2(card_w - 10.0, card_w - 18.0),
+                                    );
+                                    let center = preview_rect.center();
+                                    let radius = (preview_rect.width() * 0.40).min(18.0);
+                                    let col = egui::Color32::from_rgba_unmultiplied(
+                                        (mat.base_color[0] * 255.0).clamp(0.0, 255.0) as u8,
+                                        (mat.base_color[1] * 255.0).clamp(0.0, 255.0) as u8,
+                                        (mat.base_color[2] * 255.0).clamp(0.0, 255.0) as u8,
+                                        255,
+                                    );
+                                    ui.painter().circle_filled(center, radius, col);
+
+                                    ui.painter().text(
+                                        egui::pos2(rect.max.x - 3.0, rect.min.y + 2.0),
+                                        egui::Align2::RIGHT_TOP,
+                                        "MAT",
+                                        egui::FontId::proportional(7.5),
+                                        egui::Color32::from_rgb(45, 140, 255),
+                                    );
+
+                                    let name_rect = egui::Rect::from_min_max(
+                                        egui::pos2(rect.min.x + 2.0, rect.max.y - 18.0),
+                                        egui::pos2(rect.max.x - 2.0, rect.max.y - 2.0),
+                                    );
+                                    ui.painter().text(
+                                        name_rect.center(),
+                                        egui::Align2::CENTER_CENTER,
+                                        &mat.name,
+                                        egui::FontId::proportional(9.0),
+                                        egui::Color32::from_rgb(215, 220, 230),
+                                    );
+
+                                    if response.clicked() {
+                                        let col = glam::Vec4::new(mat.base_color[0], mat.base_color[1], mat.base_color[2], mat.base_color[3]);
+                                        self.project.add_fill_layer(Some(mat.name.clone()), col, mat.roughness, mat.metallic);
+                                        self.status_message = format!("Added Custom Material: {}", mat.name);
+                                    }
+                                }
+                            });
+                        }
+                        ui.add_space(4.0);
+                        ui.separator();
+                        ui.add_space(2.0);
                     }
                 }
                 let chunks: Vec<_> = filtered_assets.chunks(2).collect();
@@ -8734,6 +9194,43 @@ mod tests {
         pt.reset();
         assert_eq!(pt.sample_count, 0);
         assert!(!pt.is_converged());
+    }
+
+    #[test]
+    fn test_user_materials_creation_and_builtin_materials_cleared() {
+        // 1. Verify built-in static materials are deleted from shelf assets
+        let static_assets = crate::shelf::get_shelf_assets();
+        let has_builtin_materials = static_assets.iter().any(|a| a.category == crate::shelf::ShelfCategory::Materials);
+        assert!(!has_builtin_materials, "Built-in static materials must be cleared so user can make custom materials");
+
+        // 2. Verify custom material creation and persistence
+        let mut asset_mgr = crate::asset_manager::AssetManager::new();
+        let custom_mat = crate::asset_manager::CustomMaterialEntry {
+            id: "my_custom_obsidian".to_string(),
+            name: "My Custom Obsidian".to_string(),
+            description: "Handcrafted deep black glossy mineral".to_string(),
+            path: std::path::PathBuf::new(),
+            file_name: String::new(),
+            base_color: [0.05, 0.05, 0.07, 1.0],
+            roughness: 0.04,
+            metallic: 0.1,
+            height: 0.5,
+            normal: [0.5, 0.5, 1.0, 0.5],
+            emissive: [0.0, 0.0, 0.0, 1.0],
+            opacity: 1.0,
+            clearcoat: 0.9,
+            anisotropy: 0.0,
+        };
+
+        let save_res = asset_mgr.save_material(&custom_mat);
+        assert!(save_res.is_ok(), "User saving a custom material should succeed");
+
+        asset_mgr.refresh_materials();
+        let found = asset_mgr.materials.iter().find(|m| m.id == "my_custom_obsidian");
+        assert!(found.is_some(), "Custom user material must be loaded in materials list");
+
+        // Clean up
+        let _ = asset_mgr.delete_material("my_custom_obsidian");
     }
 }
 
