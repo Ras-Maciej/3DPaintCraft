@@ -25,6 +25,7 @@ mod asset_manager;
 mod utils;
 mod updater;
 pub mod icons;
+pub mod color_picker;
 
 use app::PaintcraftApp;
 use export::ExportPreset;

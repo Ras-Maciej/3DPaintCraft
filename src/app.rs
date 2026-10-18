@@ -1351,20 +1351,12 @@ impl eframe::App for PaintcraftApp {
                                 }
                                 ui.add_sized([55.0, 18.0], egui::Slider::new(&mut self.brush_engine.settings.polygon_fill_value, 0.0..=1.0));
                             } else {
-                                let mut col = [
-                                    (self.brush_engine.settings.paint_color.x * 255.0) as u8,
-                                    (self.brush_engine.settings.paint_color.y * 255.0) as u8,
-                                    (self.brush_engine.settings.paint_color.z * 255.0) as u8,
-                                ];
                                 ui.label("Color:");
-                                if ui.color_edit_button_srgb(&mut col).changed() {
-                                    self.brush_engine.settings.paint_color = Vec4::new(
-                                        col[0] as f32 / 255.0,
-                                        col[1] as f32 / 255.0,
-                                        col[2] as f32 / 255.0,
-                                        1.0,
-                                    );
-                                }
+                                crate::color_picker::color_picker_button_vec4(
+                                    ui,
+                                    egui::Id::new("poly_fill_color_btn"),
+                                    &mut self.brush_engine.settings.paint_color,
+                                );
                                 ui.label("Rough:");
                                 ui.add_sized([55.0, 18.0], egui::Slider::new(&mut self.brush_engine.settings.paint_roughness, 0.0..=1.0));
                                 ui.label("Metal:");
@@ -1374,7 +1366,7 @@ impl eframe::App for PaintcraftApp {
                             }
                         }
                         ToolMode::Eyedropper => {
-                            ui.label(egui::RichText::new("Picker").strong().color(Color32::from_rgb(243, 94, 24)));
+                            ui.label(egui::RichText::new("Picker").strong().color(Color32::from_rgb(220, 225, 235)));
                             ui.label("Click surface in viewport to pick material");
                             let col = [
                                 (self.brush_engine.settings.paint_color.x * 255.0) as u8,
@@ -1386,73 +1378,57 @@ impl eframe::App for PaintcraftApp {
                         }
                     }
 
-                    // Right: Viewport Mode, HDRI Environment, Camera & Layout Controls
+                    // Right: Viewport Settings, Shaders, Layout & Channel Controls
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        // HDRI Quick Preset & Asset Library Selector
-                        let mut hdri_to_load = None;
-                        let mut trigger_import = false;
-                        let mut trigger_open_folder = false;
-                        let mut trigger_refresh = false;
+                        let opt_icons = self.icons.as_ref();
 
-                        let active_name = self.asset_manager.active_entry().map(|e| e.name.clone()).unwrap_or_else(|| self.renderer.hdri.preset.name());
-                        egui::ComboBox::from_id_source("hdri_preset_quick_select")
-                            .selected_text(&active_name)
-                            .width(135.0)
-                            .show_ui(ui, |ui| {
-                                ui.label(egui::RichText::new("DISK LIBRARY (assets/hdris)").small().strong().color(Color32::from_rgb(140, 145, 155)));
-                                for entry in &self.asset_manager.hdris {
-                                    let is_active = self.renderer.hdri.custom_hdr_path.as_ref() == Some(&entry.path);
-                                    let tag = if entry.is_builtin { "Built-in" } else { &entry.size_formatted() };
-                                    let label = format!("{} ({})", entry.name, tag);
-                                    if ui.selectable_label(is_active, label).clicked() {
-                                        hdri_to_load = Some(entry.path.clone());
-                                    }
-                                }
-
-                                ui.separator();
-                                if ui.button("+ Import HDRI...").clicked() {
-                                    trigger_import = true;
-                                    ui.close_menu();
-                                }
-                                if ui.button("Open HDRI Folder (assets/hdris)...").clicked() {
-                                    trigger_open_folder = true;
-                                    ui.close_menu();
-                                }
-                                if ui.button("↻ Refresh Folder").clicked() {
-                                    trigger_refresh = true;
-                                    ui.close_menu();
-                                }
-                            });
-                        ui.label("HDRI:");
-
-                        if let Some(path) = hdri_to_load {
-                            self.activate_hdri_file(&path);
-                        }
-                        if trigger_import {
-                            if let Some(path) = rfd::FileDialog::new()
-                                .add_filter("HDRI Environments", &["hdr", "png", "jpg", "jpeg", "exr"])
-                                .set_title("Import HDRI to assets/hdris")
-                                .pick_file()
-                            {
-                                if let Ok(entry) = self.asset_manager.import_hdri_file(&path) {
-                                    self.activate_hdri_file(&entry.path);
-                                    self.status_message = format!("Imported and activated HDRI: {}", entry.name);
-                                }
-                            }
-                        }
-                        if trigger_open_folder {
-                            let _ = self.asset_manager.open_hdri_folder();
-                        }
-                        if trigger_refresh {
-                            self.asset_manager.refresh_hdris();
-                            self.status_message = format!("Refreshed HDRI assets: {} environments ready", self.asset_manager.hdris.len());
+                        // 1. Shelf Toggle Button
+                        let shelf_btn_text = if self.show_shelf { "Shelf [v]" } else { "Shelf [^]" };
+                        if ui.selectable_label(self.show_shelf, shelf_btn_text).on_hover_text("Toggle Shelf Assets Panel").clicked() {
+                            self.show_shelf = !self.show_shelf;
                         }
 
                         ui.separator();
-                        // View Mode / Channel Dropdown
+
+                        // 2. Viewport Settings Button
+                        let vp_btn = if let Some(icons) = opt_icons {
+                            egui::Button::image_and_text((icons.viewport_settings.id(), egui::vec2(13.0, 13.0)), "Viewport Settings")
+                        } else {
+                            egui::Button::new("Viewport Settings")
+                        };
+                        if ui.add(vp_btn).on_hover_text("Open Viewport Camera, Navigation, HDRI, and Display settings").clicked() {
+                            self.show_viewport_settings_modal = true;
+                        }
+
+                        // 3. Shaders Button
+                        let shaders_btn = if let Some(icons) = opt_icons {
+                            egui::Button::image_and_text((icons.shaders.id(), egui::vec2(13.0, 13.0)), "Shaders")
+                        } else {
+                            egui::Button::new("Shaders")
+                        };
+                        if ui.add(shaders_btn).on_hover_text("Open Shader, Presets, and Post-Processing settings").clicked() {
+                            self.show_shader_settings_modal = true;
+                        }
+
+                        ui.separator();
+
+                        // 4. Viewport Layout Mode (3D | 3D|2D | 2D)
+                        if ui.selectable_label(self.layout == ViewLayout::View2DOnly, "2D").on_hover_text("2D UV Texture View").clicked() {
+                            self.layout = ViewLayout::View2DOnly;
+                        }
+                        if ui.selectable_label(self.layout == ViewLayout::SplitDualView, "3D|2D").on_hover_text("Split 3D & 2D Dual View").clicked() {
+                            self.layout = ViewLayout::SplitDualView;
+                        }
+                        if ui.selectable_label(self.layout == ViewLayout::View3DOnly, "3D").on_hover_text("3D Viewport Only").clicked() {
+                            self.layout = ViewLayout::View3DOnly;
+                        }
+
+                        ui.separator();
+
+                        // 5. View Mode / Channel Dropdown
                         egui::ComboBox::from_id_source("viewport_mode_select")
                             .selected_text(self.view_mode.name())
-                            .width(105.0)
+                            .width(115.0)
                             .show_ui(ui, |ui| {
                                 ui.selectable_value(&mut self.view_mode, ViewportChannelMode::Material, "Lit Material (PBR) [M]");
                                 ui.selectable_value(&mut self.view_mode, ViewportChannelMode::BaseColor, "Base Color");
@@ -1472,35 +1448,9 @@ impl eframe::App for PaintcraftApp {
                             });
                         ui.label("Channel:");
 
-                        ui.separator();
-                        let is_ortho = self.camera.is_orthographic;
-                        if ui.selectable_label(is_ortho, "Ortho").clicked() {
-                            self.camera.is_orthographic = !is_ortho;
-                        }
-                        if ui.button("Cam [F]").on_hover_text("Reset Camera (F)").clicked() {
+                        // 6. Camera reset quick button
+                        if ui.small_button("Cam [F]").on_hover_text("Reset Camera (F)").clicked() {
                             self.camera.reset();
-                        }
-
-                        ui.separator();
-                        let shelf_btn_text = if self.show_shelf { "Shelf [v]" } else { "Shelf [^]" };
-                        if ui.selectable_label(self.show_shelf, shelf_btn_text).clicked() {
-                            self.show_shelf = !self.show_shelf;
-                        }
-
-                        ui.separator();
-                        if ui.selectable_label(self.layout == ViewLayout::View2DOnly, "2D").clicked() {
-                            self.layout = ViewLayout::View2DOnly;
-                        }
-                        if ui.selectable_label(self.layout == ViewLayout::SplitDualView, "3D|2D").clicked() {
-                            self.layout = ViewLayout::SplitDualView;
-                        }
-                        if ui.selectable_label(self.layout == ViewLayout::View3DOnly, "3D").clicked() {
-                            self.layout = ViewLayout::View3DOnly;
-                        }
-
-                        ui.separator();
-                        if ui.checkbox(&mut self.renderer.show_wireframe, "Wire").changed() {
-                            self.show_uv_wireframe = self.renderer.show_wireframe;
                         }
                     });
                 });
@@ -1533,18 +1483,18 @@ impl eframe::App for PaintcraftApp {
                         let btn_size = egui::vec2(34.0, 34.0);
                         let (rect, resp) = ui.allocate_exact_size(btn_size, egui::Sense::click());
                         let bg = if active {
-                            Color32::from_rgb(44, 48, 56)
+                            Color32::from_rgb(52, 56, 65)
                         } else if resp.hovered() {
                             Color32::from_rgb(38, 41, 48)
                         } else {
-                            Color32::from_rgb(28, 30, 34)
+                            Color32::from_rgb(26, 28, 32)
                         };
                         let stroke = if active {
-                            egui::Stroke::new(1.8_f32, Color32::from_rgb(243, 94, 24))
+                            egui::Stroke::new(1.5_f32, Color32::from_rgb(180, 185, 195))
                         } else if resp.hovered() {
-                            egui::Stroke::new(1.0_f32, Color32::from_rgb(70, 75, 85))
+                            egui::Stroke::new(1.0_f32, Color32::from_rgb(60, 65, 75))
                         } else {
-                            egui::Stroke::new(1.0_f32, Color32::from_rgb(38, 40, 46))
+                            egui::Stroke::new(1.0_f32, Color32::from_rgb(34, 36, 40))
                         };
 
                         ui.painter().rect(rect, 3.0, bg, stroke);
@@ -1555,7 +1505,7 @@ impl eframe::App for PaintcraftApp {
                                 tex_id,
                                 icon_rect,
                                 egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                                if active { Color32::WHITE } else { Color32::from_rgba_unmultiplied(210, 215, 225, 220) },
+                                if active { Color32::WHITE } else { Color32::from_rgba_unmultiplied(190, 195, 205, 220) },
                             );
                         } else {
                             // Tool glyph centered top
@@ -1565,7 +1515,7 @@ impl eframe::App for PaintcraftApp {
                                 egui::Align2::CENTER_CENTER,
                                 fallback_glyph,
                                 egui::FontId::proportional(11.0),
-                                if active { Color32::WHITE } else { Color32::from_rgb(200, 205, 215) },
+                                if active { Color32::WHITE } else { Color32::from_rgb(190, 195, 205) },
                             );
                         }
 
@@ -1576,7 +1526,7 @@ impl eframe::App for PaintcraftApp {
                             egui::Align2::CENTER_CENTER,
                             label,
                             egui::FontId::proportional(7.5),
-                            if active { Color32::from_rgb(243, 94, 24) } else { Color32::from_rgb(130, 135, 145) },
+                            if active { Color32::from_rgb(235, 240, 250) } else { Color32::from_rgb(130, 135, 145) },
                         );
 
                         resp.on_hover_text(tip).clicked()
@@ -2798,21 +2748,14 @@ impl eframe::App for PaintcraftApp {
                                         if layer.channel_flags.base_color {
                                             ui.horizontal(|ui| {
                                                 ui.label("Base Color:");
-                                                let mut col = [
-                                                    (layer.fill_color.x * 255.0) as u8,
-                                                    (layer.fill_color.y * 255.0) as u8,
-                                                    (layer.fill_color.z * 255.0) as u8,
-                                                ];
-                                                if ui.color_edit_button_srgb(&mut col).changed() {
-                                                    layer.fill_color = Vec4::new(
-                                                        col[0] as f32 / 255.0,
-                                                        col[1] as f32 / 255.0,
-                                                        col[2] as f32 / 255.0,
-                                                        layer.fill_color.w,
-                                                    );
+                                                if crate::color_picker::color_picker_button_vec4(
+                                                    ui,
+                                                    egui::Id::new(format!("layer_base_col_{}", layer.id)),
+                                                    &mut layer.fill_color,
+                                                ) {
                                                     prop_changed = true;
                                                 }
-                                                ui.label(format!("#{:02X}{:02X}{:02X}", col[0], col[1], col[2]));
+                                                ui.label(crate::color_picker::rgb_to_hex(layer.fill_color.x, layer.fill_color.y, layer.fill_color.z));
                                             });
                                             ui.horizontal(|ui| {
                                                 if layer.fill_color_tex.is_some() {
@@ -2925,20 +2868,14 @@ impl eframe::App for PaintcraftApp {
                                         if layer.channel_flags.emission {
                                             ui.horizontal(|ui| {
                                                 ui.label("Emission:");
-                                                let mut col = [
-                                                    (layer.fill_emissive.x * 255.0) as u8,
-                                                    (layer.fill_emissive.y * 255.0) as u8,
-                                                    (layer.fill_emissive.z * 255.0) as u8,
-                                                ];
-                                                if ui.color_edit_button_srgb(&mut col).changed() {
-                                                    layer.fill_emissive = Vec4::new(
-                                                        col[0] as f32 / 255.0,
-                                                        col[1] as f32 / 255.0,
-                                                        col[2] as f32 / 255.0,
-                                                        layer.fill_emissive.w,
-                                                    );
+                                                if crate::color_picker::color_picker_button_vec4(
+                                                    ui,
+                                                    egui::Id::new(format!("layer_emissive_col_{}", layer.id)),
+                                                    &mut layer.fill_emissive,
+                                                ) {
                                                     prop_changed = true;
                                                 }
+                                                ui.label(crate::color_picker::rgb_to_hex(layer.fill_emissive.x, layer.fill_emissive.y, layer.fill_emissive.z));
                                             });
                                             ui.horizontal(|ui| {
                                                 ui.label("Emission Intensity:");
@@ -3148,21 +3085,18 @@ impl eframe::App for PaintcraftApp {
                                         });
     
                                         if self.brush_engine.settings.channels.base_color {
-                                            let mut col = [
-                                                (self.brush_engine.settings.paint_color.x * 255.0) as u8,
-                                                (self.brush_engine.settings.paint_color.y * 255.0) as u8,
-                                                (self.brush_engine.settings.paint_color.z * 255.0) as u8,
-                                            ];
                                             ui.horizontal(|ui| {
                                                 ui.label("Base Color:");
-                                                if ui.color_edit_button_srgb(&mut col).changed() {
-                                                    self.brush_engine.settings.paint_color = Vec4::new(
-                                                        col[0] as f32 / 255.0,
-                                                        col[1] as f32 / 255.0,
-                                                        col[2] as f32 / 255.0,
-                                                        1.0,
-                                                    );
-                                                }
+                                                crate::color_picker::color_picker_button_vec4(
+                                                    ui,
+                                                    egui::Id::new("brush_paint_base_color"),
+                                                    &mut self.brush_engine.settings.paint_color,
+                                                );
+                                                ui.label(crate::color_picker::rgb_to_hex(
+                                                    self.brush_engine.settings.paint_color.x,
+                                                    self.brush_engine.settings.paint_color.y,
+                                                    self.brush_engine.settings.paint_color.z,
+                                                ));
                                             });
                                         }
     
@@ -3176,21 +3110,18 @@ impl eframe::App for PaintcraftApp {
                                             ui.add(egui::Slider::new(&mut self.brush_engine.settings.paint_height, 0.0..=1.0).text("Height"));
                                         }
                                         if self.brush_engine.settings.channels.emission {
-                                            let mut col = [
-                                                (self.brush_engine.settings.paint_emissive.x * 255.0) as u8,
-                                                (self.brush_engine.settings.paint_emissive.y * 255.0) as u8,
-                                                (self.brush_engine.settings.paint_emissive.z * 255.0) as u8,
-                                            ];
                                             ui.horizontal(|ui| {
                                                 ui.label("Emission:");
-                                                if ui.color_edit_button_srgb(&mut col).changed() {
-                                                    self.brush_engine.settings.paint_emissive = Vec4::new(
-                                                        col[0] as f32 / 255.0,
-                                                        col[1] as f32 / 255.0,
-                                                        col[2] as f32 / 255.0,
-                                                        self.brush_engine.settings.paint_emissive.w,
-                                                    );
-                                                }
+                                                crate::color_picker::color_picker_button_vec4(
+                                                    ui,
+                                                    egui::Id::new("brush_paint_emissive_color"),
+                                                    &mut self.brush_engine.settings.paint_emissive,
+                                                );
+                                                ui.label(crate::color_picker::rgb_to_hex(
+                                                    self.brush_engine.settings.paint_emissive.x,
+                                                    self.brush_engine.settings.paint_emissive.y,
+                                                    self.brush_engine.settings.paint_emissive.z,
+                                                ));
                                             });
                                             ui.add(egui::Slider::new(&mut self.brush_engine.settings.paint_emissive.w, 0.0..=10.0).text("Emission Intensity"));
                                         }
@@ -3811,28 +3742,72 @@ impl eframe::App for PaintcraftApp {
                     ui.add(egui::Slider::new(&mut self.bg_opacity, 0.0..=1.0).text("HDRI Backdrop Opacity"));
                     ui.add(egui::Slider::new(&mut self.bg_blur, 0.0..=1.0).text("HDRI Background Blur"));
 
+                    // HDRI Quick Preset & Asset Library Selector
+                    let mut hdri_to_load = None;
+                    let mut trigger_import = false;
+                    let mut trigger_open_folder = false;
+                    let mut trigger_refresh = false;
+
+                    let active_name = self.asset_manager.active_entry().map(|e| e.name.clone()).unwrap_or_else(|| self.renderer.hdri.preset.name());
                     ui.horizontal(|ui| {
-                        if ui.button("Load Custom HDRI (.hdr)...").clicked() {
-                            if let Some(path) = rfd::FileDialog::new().add_filter("Radiance HDR", &["hdr"]).pick_file() {
-                                match self.renderer.hdri.load_custom_hdr(&path) {
-                                    Ok(()) => {
-                                        if let Some(wgpu) = &mut self.wgpu_viewport {
-                                            let (w, h, hdri_data) = crate::hdri_generator::generate_hdri_texture(&self.renderer.hdri, 1024, 512);
-                                            wgpu.load_environment(w, h, &hdri_data);
-                                        }
-                                        self.status_message = format!("Loaded custom HDRI: {:?}", path.file_name().unwrap_or_default());
-                                    }
-                                    Err(e) => {
-                                        self.status_message = format!("Failed to load HDR: {}", e);
+                        ui.label("Environment Map:");
+                        egui::ComboBox::from_id_source("vp_modal_hdri_select")
+                            .selected_text(&active_name)
+                            .width(180.0)
+                            .show_ui(ui, |ui| {
+                                ui.label(egui::RichText::new("DISK LIBRARY (assets/hdris)").small().strong().color(Color32::from_rgb(140, 145, 155)));
+                                for entry in &self.asset_manager.hdris {
+                                    let is_active = self.renderer.hdri.custom_hdr_path.as_ref() == Some(&entry.path);
+                                    let tag = if entry.is_builtin { "Built-in" } else { &entry.size_formatted() };
+                                    let label = format!("{} ({})", entry.name, tag);
+                                    if ui.selectable_label(is_active, label).clicked() {
+                                        hdri_to_load = Some(entry.path.clone());
                                     }
                                 }
+
+                                ui.separator();
+                                if ui.button("+ Import HDRI...").clicked() {
+                                    trigger_import = true;
+                                    ui.close_menu();
+                                }
+                                if ui.button("Open HDRI Folder (assets/hdris)...").clicked() {
+                                    trigger_open_folder = true;
+                                    ui.close_menu();
+                                }
+                                if ui.button("↻ Refresh Folder").clicked() {
+                                    trigger_refresh = true;
+                                    ui.close_menu();
+                                }
+                            });
+                    });
+
+                    if let Some(path) = hdri_to_load {
+                        self.activate_hdri_file(&path);
+                    }
+                    if trigger_import {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("HDRI Environments", &["hdr", "png", "jpg", "jpeg", "exr"])
+                            .set_title("Import HDRI to assets/hdris")
+                            .pick_file()
+                        {
+                            if let Ok(entry) = self.asset_manager.import_hdri_file(&path) {
+                                self.activate_hdri_file(&entry.path);
+                                self.status_message = format!("Imported and activated HDRI: {}", entry.name);
                             }
                         }
-                    });
+                    }
+                    if trigger_open_folder {
+                        let _ = self.asset_manager.open_hdri_folder();
+                    }
+                    if trigger_refresh {
+                        self.asset_manager.refresh_hdris();
+                        self.status_message = format!("Refreshed HDRI assets: {} environments ready", self.asset_manager.hdris.len());
+                    }
 
                     ui.horizontal(|ui| {
                         ui.label("Clear Backdrop Color:");
-                        ui.color_edit_button_rgb(&mut self.viewport_bg_color);
+                        crate::color_picker::color_picker_button_rgb(ui, egui::Id::new("vp_clear_color"), &mut self.viewport_bg_color);
+                        ui.label(crate::color_picker::rgb_to_hex(self.viewport_bg_color[0], self.viewport_bg_color[1], self.viewport_bg_color[2]));
                     });
 
                     ui.separator();
@@ -4473,39 +4448,7 @@ impl PaintcraftApp {
             eframe::egui::Color32::from_rgba_unmultiplied(220, 220, 220, 180),
         );
 
-        // Top-right 3D viewport quick controls pill
-        let vp_hud_pos = rect.right_top() + egui::vec2(-330.0, 10.0);
-        let vp_hud_rect = egui::Rect::from_min_size(vp_hud_pos, egui::vec2(320.0, 30.0));
-        ui.painter().rect_filled(vp_hud_rect, egui::Rounding::same(15.0), egui::Color32::from_rgba_unmultiplied(28, 30, 36, 225));
-        ui.painter().rect_stroke(vp_hud_rect, egui::Rounding::same(15.0), egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(58, 62, 74)));
 
-        let opt_icons = self.icons.as_ref();
-        ui.allocate_ui_at_rect(vp_hud_rect, |ui| {
-            ui.horizontal_centered(|ui| {
-                ui.add_space(8.0);
-                if ui.small_button("Fit (F)").on_hover_text("Fit model in 3D view (F)").clicked() {
-                    self.camera.reset();
-                }
-                ui.separator();
-                let shaders_btn = if let Some(icons) = opt_icons {
-                    egui::Button::image_and_text((icons.shaders.id(), egui::vec2(13.0, 13.0)), "Shaders...")
-                } else {
-                    egui::Button::new("Shaders...")
-                };
-                if ui.add(shaders_btn).on_hover_text("Open Shader, Presets, and Post-Processing settings").clicked() {
-                    self.show_shader_settings_modal = true;
-                }
-
-                let vp_btn = if let Some(icons) = opt_icons {
-                    egui::Button::image_and_text((icons.viewport_settings.id(), egui::vec2(13.0, 13.0)), "Viewport Settings...")
-                } else {
-                    egui::Button::new("Viewport Settings...")
-                };
-                if ui.add(vp_btn).on_hover_text("Open Viewport Camera, Navigation, Backdrop, and Overlay settings").clicked() {
-                    self.show_viewport_settings_modal = true;
-                }
-            });
-        });
 
         // --- REAL-TIME PERFORMANCE & HARDWARE DIAGNOSTICS HUD ---
         if self.perf_metrics.show_debug_hud {
@@ -6857,6 +6800,18 @@ mod tests {
         proj.rebuild_composite();
         assert!(proj.is_dirty);
         assert!(proj.gpu_sync_needed);
+    }
+
+    #[test]
+    fn test_color_picker_hex_and_brush_conversion() {
+        let v = glam::Vec4::new(0.2, 0.4, 0.8, 1.0);
+        let hex = crate::color_picker::rgb_to_hex(v.x, v.y, v.z);
+        assert_eq!(hex, "#3366CC");
+
+        let parsed = crate::color_picker::parse_hex_color(&hex).unwrap();
+        assert!((parsed[0] - 0.2).abs() < 0.01);
+        assert!((parsed[1] - 0.4).abs() < 0.01);
+        assert!((parsed[2] - 0.8).abs() < 0.01);
     }
 }
 
