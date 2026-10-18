@@ -257,11 +257,15 @@ impl HdriEnvironment {
         hemi * self.exposure
     }
 
-    /// Evaluate prefiltered specular reflection based on reflection vector and roughness
     pub fn evaluate_specular(&self, reflection_dir: Vec3, roughness: f32) -> Vec3 {
+        let gloss = (1.0 - roughness).clamp(0.0, 1.0);
+        if gloss <= 0.005 {
+            return self.evaluate_diffuse(reflection_dir);
+        }
         if let Some(col) = self.sample_equirectangular(reflection_dir) {
-            let gloss = (1.0 - roughness).clamp(0.0, 1.0);
-            return col * self.exposure * (gloss * 0.8 + 0.2);
+            let diff = self.evaluate_diffuse(reflection_dir);
+            let spec = col * self.exposure;
+            return diff.lerp(spec, gloss * gloss);
         }
 
         let r_dir = self.rotate_dir(reflection_dir);
@@ -354,8 +358,10 @@ impl HdriEnvironment {
             HdriPreset::Custom(_) => Vec3::ZERO,
         };
 
-        // When roughness approaches 0 (gloss -> 1), mirror reflection is intense and pin-sharp!
-        let spec_radiance = base_env + highlight * (gloss * 0.9 + 0.1);
+        // When roughness approaches 0 (gloss -> 1), mirror reflection is intense and pin-sharp
+        // When roughness is 1.0 (gloss -> 0), highlight is 0 and base_env smoothly equals evaluate_diffuse
+        let diff_rad = self.evaluate_diffuse(reflection_dir);
+        let spec_radiance = base_env.lerp(diff_rad, 1.0 - gloss) + highlight * (gloss * gloss);
         spec_radiance * self.exposure
     }
 }

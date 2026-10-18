@@ -284,6 +284,7 @@ pub struct PaintcraftApp {
     pub iray_max_samples: u32,
     pub iray_max_bounces: u32,
     pub iray_samples_per_frame: u32,
+    pub iray_denoise: bool,
     pub last_iray_texture_revision: u64,
 }
 
@@ -553,6 +554,7 @@ impl PaintcraftApp {
             iray_max_samples: 256,
             iray_max_bounces: 2,
             iray_samples_per_frame: 1,
+            iray_denoise: true,
             last_iray_texture_revision: 0,
         }
     }
@@ -2432,6 +2434,14 @@ impl eframe::App for PaintcraftApp {
                             }
                         }
                         if self.iray_mode {
+                            let denoise_label = if self.iray_denoise { "Denoise: ON" } else { "Denoise: OFF" };
+                            if ui.selectable_label(self.iray_denoise, denoise_label).on_hover_text("Toggle Normal-Guided Bilateral Denoiser for Iray").clicked() {
+                                self.iray_denoise = !self.iray_denoise;
+                                if let Some(pt) = &mut self.path_tracer {
+                                    pt.denoiser_enabled = self.iray_denoise;
+                                    pt.update_color_buffer();
+                                }
+                            }
                             if ui.small_button("Save PNG").on_hover_text("Save converged path-traced render to PNG file").clicked() {
                                 if let Some(path) = rfd::FileDialog::new()
                                     .add_filter("PNG Image", &["png"])
@@ -5225,6 +5235,12 @@ impl eframe::App for PaintcraftApp {
                         ui.add(egui::Slider::new(&mut self.iray_max_samples, 16..=1024).text("Max Samples"));
                         ui.add(egui::Slider::new(&mut self.iray_max_bounces, 1..=6).text("Max Bounces"));
                         ui.add(egui::Slider::new(&mut self.iray_samples_per_frame, 1..=8).text("Samples / Frame"));
+                        if ui.checkbox(&mut self.iray_denoise, "Enable Normal-Guided Bilateral Denoiser").changed() {
+                            if let Some(pt) = &mut self.path_tracer {
+                                pt.denoiser_enabled = self.iray_denoise;
+                                pt.update_color_buffer();
+                            }
+                        }
                         ui.horizontal(|ui| {
                             if ui.button("Restart Render").clicked() {
                                 if let Some(pt) = &mut self.path_tracer {
@@ -5814,6 +5830,7 @@ impl PaintcraftApp {
                 pt.resize(pt_w, pt_h);
                 pt.max_samples = self.iray_max_samples;
                 pt.max_bounces = self.iray_max_bounces;
+                pt.denoiser_enabled = self.iray_denoise;
 
                 if camera_changed || hdri_changed || textures_changed {
                     pt.reset();
@@ -5911,12 +5928,14 @@ impl PaintcraftApp {
                 (0, 256, 0.0)
             };
             let status = if pct >= 100.0 { "Converged" } else { "Sampling..." };
+            let denoise_badge = if self.iray_denoise { "Denoise: ON" } else { "Denoise: OFF" };
             let iray_hud_text = format!(
-                "[IRAY MONTE CARLO PATH TRACER] | Sample: {} / {} ({:.1}%) - {} | HDRI: {} ({:.0}°) | [F10 or Esc to Exit]",
+                "[IRAY MONTE CARLO PATH TRACER] | Sample: {} / {} ({:.1}%) - {} | {} | HDRI: {} ({:.0}°) | [F10 or Esc to Exit]",
                 sample_cur,
                 sample_max,
                 pct,
                 status,
+                denoise_badge,
                 self.renderer.hdri.preset.name(),
                 self.renderer.hdri.rotation,
             );

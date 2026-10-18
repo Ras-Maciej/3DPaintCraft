@@ -89,15 +89,18 @@ pub fn tonemap_aces(v: Vec3) -> Vec3 {
     ((v * (a * v + b)) / (v * (c * v + d) + e)).clamp(Vec3::ZERO, Vec3::ONE)
 }
 
-/// Progressive Monte Carlo Path Tracer
+/// Progressive Monte Carlo Path Tracer with Edge-Preserving Denoiser
 #[derive(Clone, Debug)]
 pub struct PathTracer {
     pub width: u32,
     pub height: u32,
     pub accumulation_buffer: Vec<Vec3>,
+    pub normal_buffer: Vec<Vec3>,
+    pub denoised_buffer: Vec<Vec3>,
     pub sample_count: u32,
     pub max_samples: u32,
     pub max_bounces: u32,
+    pub denoiser_enabled: bool,
     pub color_buffer: Vec<u8>, // RGBA8 format
 }
 
@@ -108,9 +111,12 @@ impl PathTracer {
             width,
             height,
             accumulation_buffer: vec![Vec3::ZERO; count],
+            normal_buffer: vec![Vec3::ZERO; count],
+            denoised_buffer: vec![Vec3::ZERO; count],
             sample_count: 0,
             max_samples: 256,
             max_bounces: 2,
+            denoiser_enabled: true,
             color_buffer: vec![0u8; count * 4],
         }
     }
@@ -122,6 +128,8 @@ impl PathTracer {
             self.height = new_height;
             let count = (new_width * new_height) as usize;
             self.accumulation_buffer = vec![Vec3::ZERO; count];
+            self.normal_buffer = vec![Vec3::ZERO; count];
+            self.denoised_buffer = vec![Vec3::ZERO; count];
             self.color_buffer = vec![0u8; count * 4];
             self.sample_count = 0;
         }
@@ -130,6 +138,8 @@ impl PathTracer {
     /// Reset accumulation when camera, scene, or materials change
     pub fn reset(&mut self) {
         self.accumulation_buffer.fill(Vec3::ZERO);
+        self.normal_buffer.fill(Vec3::ZERO);
+        self.denoised_buffer.fill(Vec3::ZERO);
         self.sample_count = 0;
     }
 
@@ -145,6 +155,80 @@ impl PathTracer {
         } else {
             ((self.sample_count as f32 / self.max_samples as f32).min(1.0)) * 100.0
         }
+    }
+
+    /// Apply edge-preserving normal-guided bilateral denoiser across all scanlines in parallel
+    pub fn denoise_buffer(
+        accum: &[Vec3],
+        s_count_f32: f32,
+        normals: &[Vec3],
+        output: &mut [Vec3],
+        width: u32,
+        height: u32,
+        sample_count: u32,
+    ) {
+        let w = width as i32;
+        let h = height as i32;
+
+        // Adaptive color threshold that tightens as Monte Carlo variance drops
+        let sigma_color = (1.2 / (sample_count as f32).sqrt().max(1.0)).max(0.12);
+        let inv_sigma_color_sq = 1.0 / (2.0 * sigma_color * sigma_color);
+
+        const RADIUS: i32 = 2; // 5x5 bilateral filter window
+
+        output
+            .par_chunks_mut(width as usize)
+            .enumerate()
+            .for_each(|(y_idx, out_scanline)| {
+                let cy = y_idx as i32;
+                for cx in 0..w {
+                    let center_idx = (cy * w + cx) as usize;
+                    let center_col = accum[center_idx] / s_count_f32;
+                    let center_norm = normals[center_idx];
+
+                    // If background (no surface hit), pass raw sky radiance
+                    if center_norm.length_squared() < 0.1 {
+                        out_scanline[cx as usize] = center_col;
+                        continue;
+                    }
+
+                    let mut total_col = Vec3::ZERO;
+                    let mut total_weight = 0.0f32;
+
+                    for dy in -RADIUS..=RADIUS {
+                        let ny = (cy + dy).clamp(0, h - 1);
+                        for dx in -RADIUS..=RADIUS {
+                            let nx = (cx + dx).clamp(0, w - 1);
+                            let neighbor_idx = (ny * w + nx) as usize;
+                            let neighbor_col = accum[neighbor_idx] / s_count_f32;
+                            let neighbor_norm = normals[neighbor_idx];
+
+                            // 1. Spatial Gaussian distance weight
+                            let dist_sq = (dx * dx + dy * dy) as f32;
+                            let w_spatial = (-dist_sq / 3.0).exp();
+
+                            // 2. Normal preservation weight: zero weight across geometry edges and silhouettes
+                            let n_dot = center_norm.dot(neighbor_norm).max(0.0);
+                            let w_normal = n_dot.powi(16);
+
+                            // 3. Color difference weight: stops bleeding across high-contrast texture seams
+                            let diff = neighbor_col - center_col;
+                            let c_diff = (diff.x * diff.x + diff.y * diff.y + diff.z * diff.z) / 3.0;
+                            let w_color = (-c_diff * inv_sigma_color_sq).exp();
+
+                            let weight = w_spatial * w_normal * w_color;
+                            total_col += neighbor_col * weight;
+                            total_weight += weight;
+                        }
+                    }
+
+                    if total_weight > 1e-5 {
+                        out_scanline[cx as usize] = total_col / total_weight;
+                    } else {
+                        out_scanline[cx as usize] = center_col;
+                    }
+                }
+            });
     }
 
     /// Render progressive samples across all scanlines in parallel via Rayon
@@ -165,6 +249,8 @@ impl PathTracer {
         let total_pixels = (w * h) as usize;
         if self.accumulation_buffer.len() != total_pixels {
             self.accumulation_buffer.resize(total_pixels, Vec3::ZERO);
+            self.normal_buffer.resize(total_pixels, Vec3::ZERO);
+            self.denoised_buffer.resize(total_pixels, Vec3::ZERO);
             self.color_buffer.resize(total_pixels * 4, 0);
         }
 
@@ -178,11 +264,15 @@ impl PathTracer {
         let w_f32 = w as f32;
         let h_f32 = h as f32;
 
-        self.accumulation_buffer
+        let accum_slice = &mut self.accumulation_buffer;
+        let norm_slice = &mut self.normal_buffer;
+
+        accum_slice
             .par_chunks_mut(w as usize)
+            .zip(norm_slice.par_chunks_mut(w as usize))
             .enumerate()
-            .for_each(|(y, scanline)| {
-                for (x, accum) in scanline.iter_mut().enumerate() {
+            .for_each(|(y, (accum_scanline, norm_scanline))| {
+                for x in 0..w as usize {
                     let mut rng = XorShift64::new(
                         ((y as u64) * (w as u64) + (x as u64) + 1)
                             ^ (((current_sample + 1) as u64).wrapping_mul(0x9e3779b97f4a7c15)),
@@ -193,7 +283,7 @@ impl PathTracer {
                         let subpixel_y = y as f32 + rng.next_f32();
                         let primary_ray = camera.screen_to_ray(subpixel_x, subpixel_y, w_f32, h_f32);
 
-                        let sample_color = trace_path(
+                        let (sample_color, primary_normal) = trace_path(
                             primary_ray,
                             mesh,
                             textures,
@@ -202,26 +292,60 @@ impl PathTracer {
                             &mut rng,
                         );
 
-                        *accum += sample_color;
+                        accum_scanline[x] += sample_color;
+                        if primary_normal.length_squared() > 0.1 {
+                            norm_scanline[x] = primary_normal;
+                        }
                     }
                 }
             });
 
         self.sample_count += samples_to_run;
+        self.update_color_buffer();
+    }
+
+    /// Re-filter and tonemap the accumulated samples into the display color buffer
+    pub fn update_color_buffer(&mut self) {
+        if self.sample_count == 0 || self.width == 0 || self.height == 0 {
+            return;
+        }
+
+        let w = self.width;
+        let h = self.height;
         let s_count_f32 = self.sample_count.max(1) as f32;
 
-        // ACES Filmic tonemapping and display sRGB conversion into color_buffer
         let accum_buf = &self.accumulation_buffer;
+        let norm_buf = &self.normal_buffer;
+
+        // Apply edge-preserving normal-guided bilateral denoiser if enabled
+        if self.denoiser_enabled {
+            Self::denoise_buffer(
+                accum_buf,
+                s_count_f32,
+                norm_buf,
+                &mut self.denoised_buffer,
+                w,
+                h,
+                self.sample_count,
+            );
+        }
+
+        let denoised_buf = &self.denoised_buffer;
+        let use_denoiser = self.denoiser_enabled;
+
+        // ACES Filmic tonemapping and display sRGB conversion into color_buffer
         self.color_buffer
             .par_chunks_exact_mut(4)
             .enumerate()
             .for_each(|(idx, rgba)| {
-                let mean_rad = accum_buf[idx] / s_count_f32;
+                let mean_rad = if use_denoiser {
+                    denoised_buf[idx]
+                } else {
+                    accum_buf[idx] / s_count_f32
+                };
 
-                // ACES Filmic tonemapping
                 let mapped = tonemap_aces(mean_rad);
 
-                // Convert linear photometric radiance to display sRGB
                 let inv_gamma = 1.0 / 2.2;
                 let r = (mapped.x.clamp(0.0, 1.0).powf(inv_gamma) * 255.0 + 0.5) as u8;
                 let g = (mapped.y.clamp(0.0, 1.0).powf(inv_gamma) * 255.0 + 0.5) as u8;
@@ -259,10 +383,11 @@ fn trace_path(
     hdri: &HdriEnvironment,
     max_bounces: u32,
     rng: &mut XorShift64,
-) -> Vec3 {
+) -> (Vec3, Vec3) {
     let mut ray = initial_ray;
     let mut throughput = Vec3::ONE;
     let mut radiance = Vec3::ZERO;
+    let mut primary_hit_normal = Vec3::ZERO;
 
     for bounce in 0..=max_bounces {
         let hit_opt = mesh.bvh.raycast(&ray, &mesh.vertices, &mesh.indices);
@@ -350,6 +475,10 @@ fn trace_path(
             shaded_normal
         };
 
+        if bounce == 0 {
+            primary_hit_normal = normal;
+        }
+
         let hit_pos = hit.point + normal * 0.0005;
         let v_dir = -ray.direction;
         let n_dot_v = normal.dot(v_dir).max(1e-4);
@@ -357,11 +486,11 @@ fn trace_path(
         // Dielectric F0 is 0.04, metal F0 is tinted by linear albedo
         let f0 = Vec3::splat(0.04).lerp(albedo, metallic);
 
-        // Physical Matte Attenuation:
-        // As roughness approaches 1.0 on dielectrics, microfacets completely scatter specular into diffuse
+        // Physical Specular Attenuation with Roughness:
+        // As roughness approaches 1.0 (gloss -> 0.0), microfacets completely scatter directional reflection
+        // into diffuse reflection. Specular reflection drops to 0 at roughness = 1.0 for a true matte finish.
         let gloss = (1.0 - roughness).clamp(0.0, 1.0);
-        let dielectric_falloff = gloss.powf(1.5);
-        let matte_factor = dielectric_falloff * (1.0 - metallic) + metallic;
+        let spec_intensity = gloss * gloss;
 
         // 1. Direct Emissive illumination
         radiance += throughput * emissive_lin;
@@ -394,7 +523,8 @@ fn trace_path(
                 let g1_l = n_dot_l / (n_dot_l * (1.0 - k) + k);
                 let g = g1_v * g1_l;
 
-                let spec = (d * g) / (4.0 * n_dot_v * n_dot_l).max(1e-4) * f_sun * matte_factor;
+                // Specular glint strictly vanishes as roughness approaches 1.0
+                let spec = (d * g) / (4.0 * n_dot_v * n_dot_l).max(1e-4) * f_sun * spec_intensity;
                 let diff = (Vec3::ONE - f_sun) * (1.0 - metallic) * albedo / std::f32::consts::PI;
 
                 let light_color = hdri.key_light_color();
@@ -407,55 +537,52 @@ fn trace_path(
         let ibl_diffuse = (Vec3::ONE - f0) * (1.0 - metallic) * albedo * diffuse_irradiance * ao;
         radiance += throughput * ibl_diffuse;
 
+        // On metals, scattered energy from microfacet roughness blends into diffuse tinted irradiance
+        if metallic > 0.0 && spec_intensity < 1.0 {
+            let scattered_metal = (1.0 - spec_intensity) * metallic * albedo * diffuse_irradiance * ao;
+            radiance += throughput * scattered_metal;
+        }
+
         // 4. Environment Specular Reflection via GGX Microfacet Importance Sampling
-        // Samples the HDRI along the physical microfacet distribution parameterized by roughness
-        let h_microfacet = sample_ggx(normal, roughness, rng);
-        let r_spec = (2.0 * v_dir.dot(h_microfacet) * h_microfacet - v_dir).normalize_or_zero();
+        // Only evaluate directional specular reflection when spec_intensity > 0 (completely off at roughness = 1.0)
+        if spec_intensity > 0.002 {
+            let h_microfacet = sample_ggx(normal, roughness, rng);
+            let r_spec = (2.0 * v_dir.dot(h_microfacet) * h_microfacet - v_dir).normalize_or_zero();
 
-        if r_spec.dot(normal) > 0.0 {
-            let v_dot_hm = v_dir.dot(h_microfacet).max(0.0);
-            let f_spec = f0 + (Vec3::ONE - f0) * (1.0 - v_dot_hm).powf(5.0);
+            if r_spec.dot(normal) > 0.0 {
+                let v_dot_hm = v_dir.dot(h_microfacet).max(0.0);
+                let f_spec = f0 + (Vec3::ONE - f0) * (1.0 - v_dot_hm).powf(5.0);
 
-            // Cast specular ray to test for self-reflection vs environment
-            let spec_ray = Ray::new(hit_pos, r_spec);
-            let spec_hit = mesh.bvh.raycast(&spec_ray, &mesh.vertices, &mesh.indices);
+                let spec_ray = Ray::new(hit_pos, r_spec);
+                let spec_hit = mesh.bvh.raycast(&spec_ray, &mesh.vertices, &mesh.indices);
 
-            let spec_incoming = match spec_hit {
-                Some(sh) => {
-                    // Reflected light from another surface on the mesh
-                    let s_uv = sh.uv;
-                    let s_base = textures.base_color.sample_bilinear(s_uv).truncate();
-                    let s_albedo = Vec3::new(s_base.x.powf(2.2), s_base.y.powf(2.2), s_base.z.powf(2.2));
-                    let s_diff = hdri.evaluate_diffuse(sh.normal);
-                    s_albedo * s_diff * 0.5
-                }
-                None => {
-                    // Reflected light from the HDRI environment
-                    if let Some(c) = hdri.sample_equirectangular(r_spec) {
-                        c * hdri.exposure
-                    } else {
+                let spec_incoming = match spec_hit {
+                    Some(sh) => {
+                        let s_uv = sh.uv;
+                        let s_base = textures.base_color.sample_bilinear(s_uv).truncate();
+                        let s_albedo = Vec3::new(s_base.x.powf(2.2), s_base.y.powf(2.2), s_base.z.powf(2.2));
+                        let s_diff = hdri.evaluate_diffuse(sh.normal);
+                        s_albedo * s_diff * 0.5
+                    }
+                    None => {
                         hdri.evaluate_specular(r_spec, roughness)
                     }
-                }
-            };
+                };
 
-            radiance += throughput * spec_incoming * f_spec * matte_factor * ao;
+                radiance += throughput * spec_incoming * f_spec * spec_intensity * ao;
+            }
         }
 
         // 5. Clearcoat specular reflection layer
         let clearcoat = textures.clearcoat.sample_bilinear(uv);
-        if clearcoat > 0.01 {
+        if clearcoat > 0.01 && spec_intensity > 0.01 {
             let cc_h = sample_ggx(normal, 0.08, rng);
             let cc_r = (2.0 * v_dir.dot(cc_h) * cc_h - v_dir).normalize_or_zero();
             if cc_r.dot(normal) > 0.0 {
-                let cc_sky = if let Some(c) = hdri.sample_equirectangular(cc_r) {
-                    c * hdri.exposure
-                } else {
-                    hdri.evaluate_specular(cc_r, 0.08)
-                };
+                let cc_sky = hdri.evaluate_specular(cc_r, 0.08);
                 let v_dot_cch = v_dir.dot(cc_h).max(0.0);
                 let f_cc = 0.04 + (1.0 - 0.04) * (1.0 - v_dot_cch).powf(5.0);
-                radiance += throughput * cc_sky * f_cc * clearcoat;
+                radiance += throughput * cc_sky * f_cc * clearcoat * spec_intensity;
             }
         }
 
@@ -479,7 +606,7 @@ fn trace_path(
         }
     }
 
-    radiance
+    (radiance, primary_hit_normal)
 }
 
 #[cfg(test)]
@@ -545,6 +672,8 @@ mod tests {
         let mut pt = PathTracer::new(64, 64);
         assert_eq!(pt.sample_count, 0);
         assert_eq!(pt.accumulation_buffer.len(), 64 * 64);
+        assert_eq!(pt.normal_buffer.len(), 64 * 64);
+        assert_eq!(pt.denoised_buffer.len(), 64 * 64);
         assert_eq!(pt.color_buffer.len(), 64 * 64 * 4);
 
         let camera = Camera::default();
@@ -565,6 +694,7 @@ mod tests {
         pt.reset();
         assert_eq!(pt.sample_count, 0);
         assert!(pt.accumulation_buffer.iter().all(|v| *v == Vec3::ZERO));
+        assert!(pt.normal_buffer.iter().all(|v| *v == Vec3::ZERO));
     }
 
     #[test]
@@ -577,12 +707,14 @@ mod tests {
         tex_smooth.roughness.data.fill(0.02);
 
         let mut tex_rough = CompositeTextureSet::new(64, 64);
-        tex_rough.roughness.data.fill(0.95);
+        tex_rough.roughness.data.fill(0.98);
 
         let mut pt_smooth = PathTracer::new(32, 32);
+        pt_smooth.denoiser_enabled = false;
         pt_smooth.render_samples(&camera, &mesh, &tex_smooth, &hdri, 4);
 
         let mut pt_rough = PathTracer::new(32, 32);
+        pt_rough.denoiser_enabled = false;
         pt_rough.render_samples(&camera, &mesh, &tex_rough, &hdri, 4);
 
         // Calculate differences between the smooth mirror and rough matte renders
@@ -592,6 +724,40 @@ mod tests {
             .map(|(a, b)| (*a as i32 - *b as i32).abs())
             .sum();
 
-        assert!(diff > 500, "Smooth and rough materials must produce visibly distinct path-traced buffers (diff: {})", diff);
+        assert!(diff > 500, "Smooth mirror and rough matte materials must produce visibly distinct path-traced buffers (diff: {})", diff);
+    }
+
+    #[test]
+    fn test_denoiser_smooths_noise_while_preserving_edges() {
+        let width = 32u32;
+        let height = 32u32;
+        let total = (width * height) as usize;
+
+        let mut accum = vec![Vec3::splat(1.0); total];
+        let mut normals = vec![Vec3::Y; total];
+
+        // Add a vertical geometry edge in normals down the middle (x = 16)
+        for y in 0..height {
+            for x in 16..width {
+                let idx = (y * width + x) as usize;
+                normals[idx] = Vec3::X;
+                accum[idx] = Vec3::splat(0.0);
+            }
+        }
+
+        // Add noise to the left side
+        accum[5 * width as usize + 5] = Vec3::splat(3.0); // Firefly spike
+
+        let mut denoised = vec![Vec3::ZERO; total];
+        PathTracer::denoise_buffer(&accum, 1.0, &normals, &mut denoised, width, height, 1);
+
+        // Firefly must be smoothed down significantly
+        assert!(denoised[5 * width as usize + 5].x < 2.2);
+
+        // Edge between x=15 and x=16 must stay sharp (no bleeding across normal boundary)
+        let left_edge = denoised[10 * width as usize + 15].x;
+        let right_edge = denoised[10 * width as usize + 16].x;
+        assert!(left_edge > 0.85);
+        assert!(right_edge < 0.15);
     }
 }
