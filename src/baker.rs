@@ -71,6 +71,131 @@ impl Default for BakeCageConfig {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BakeSettingsTab {
+    Common,
+    TangentNormal,
+    WorldNormal,
+    AmbientOcclusion,
+    Curvature,
+    Position,
+    Thickness,
+    IdMap,
+}
+
+impl BakeSettingsTab {
+    #[allow(dead_code)]
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Common => "Common Parameters",
+            Self::TangentNormal => "Normal (Tangent Space)",
+            Self::WorldNormal => "World Space Normal",
+            Self::AmbientOcclusion => "Ambient Occlusion",
+            Self::Curvature => "Curvature",
+            Self::Position => "Position (World Space)",
+            Self::Thickness => "Thickness",
+            Self::IdMap => "ID Map",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AoBakeConfig {
+    pub samples: usize,
+    pub max_distance: f32,
+    pub ray_bias: f32,
+    pub spread: f32,
+    pub contrast: f32,
+}
+
+impl Default for AoBakeConfig {
+    fn default() -> Self {
+        Self {
+            samples: 64,
+            max_distance: 0.35,
+            ray_bias: 0.008,
+            spread: 1.0,
+            contrast: 1.0,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ThicknessBakeConfig {
+    pub samples: usize,
+    pub max_distance: f32,
+    pub ray_bias: f32,
+    pub invert: bool,
+}
+
+impl Default for ThicknessBakeConfig {
+    fn default() -> Self {
+        Self {
+            samples: 32,
+            max_distance: 0.60,
+            ray_bias: 0.005,
+            invert: false,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CurvatureBakeConfig {
+    pub intensity: f32,
+    pub contrast: f32,
+    pub dihedral_weight: f32,
+    pub deflection_weight: f32,
+    pub blur_passes: usize,
+}
+
+impl Default for CurvatureBakeConfig {
+    fn default() -> Self {
+        Self {
+            intensity: 1.0,
+            contrast: 1.0,
+            dihedral_weight: 0.40,
+            deflection_weight: 0.25,
+            blur_passes: 1,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NormalBakeConfig {
+    pub frontal_distance: f32,
+    pub rear_distance: f32,
+    pub invert_green: bool,
+}
+
+impl Default for NormalBakeConfig {
+    fn default() -> Self {
+        Self {
+            frontal_distance: 0.1,
+            rear_distance: 0.1,
+            invert_green: false,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PositionNormalizationMode {
+    BoundingBox,
+    WorldUnits,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PositionBakeConfig {
+    pub mode: PositionNormalizationMode,
+}
+
+impl Default for PositionBakeConfig {
+    fn default() -> Self {
+        Self {
+            mode: PositionNormalizationMode::BoundingBox,
+        }
+    }
+}
+
 
 pub fn strip_mesh_suffix(name: &str, suffix: &str) -> String {
     let lower_name = name.to_lowercase();
@@ -310,6 +435,16 @@ impl Baker {
 
     /// Bake Curvature map (Convex edges = white, Crevices = black, Flat = 0.5 gray)
     pub fn bake_curvature(mesh: &Mesh, width: u32, height: u32) -> ScalarBuffer {
+        Self::bake_curvature_with_options(mesh, width, height, &CurvatureBakeConfig::default())
+    }
+
+    /// Bake Curvature map with custom algorithm weights, intensity, contrast and blur passes
+    pub fn bake_curvature_with_options(
+        mesh: &Mesh,
+        width: u32,
+        height: u32,
+        config: &CurvatureBakeConfig,
+    ) -> ScalarBuffer {
         let mut buffer = ScalarBuffer::new(width, height, 0.5);
         let vert_count = mesh.vertices.len();
         if vert_count == 0 || mesh.indices.is_empty() {
@@ -465,8 +600,12 @@ impl Baker {
                 0.0
             };
 
-            let curv_signal = avg_dih * 0.40 + avg_deflect * 0.25;
-            let val = (0.5 + curv_signal).clamp(0.0, 1.0);
+            let curv_signal = (avg_dih * config.dihedral_weight + avg_deflect * config.deflection_weight) * config.intensity;
+            let val = if (config.contrast - 1.0).abs() > 0.01 {
+                (0.5 + curv_signal * config.contrast).clamp(0.0, 1.0)
+            } else {
+                (0.5 + curv_signal).clamp(0.0, 1.0)
+            };
             canonical_curvature[i] = val;
         }
 
@@ -496,55 +635,71 @@ impl Baker {
         // 8. Dilate 16px into empty space so edge blur doesn't bleed into 0.5 background
         Self::dilate_scalar(&mut buffer, &mut written_mask, 16);
 
-        // 9. 2-Pass Separable Gaussian Blur for smooth edge gradients
-        let mut blurred = buffer.clone();
-        let w = width as i32;
-        let h = height as i32;
-        let weights = [0.06136f32, 0.24477, 0.38774, 0.24477, 0.06136];
+        // 9. Configurable Separable Gaussian Blur for smooth edge gradients
+        let mut current_buf = buffer.clone();
+        if config.blur_passes > 0 {
+            let w = width as i32;
+            let h = height as i32;
+            let weights = [0.06136f32, 0.24477, 0.38774, 0.24477, 0.06136];
 
-        // Horizontal pass
-        for y in 0..h {
-            for x in 0..w {
-                let mut sum = 0.0f32;
-                for (k, &wt) in weights.iter().enumerate() {
-                    let sample_x = (x + (k as i32 - 2)).clamp(0, w - 1) as u32;
-                    sum += buffer.get_pixel(sample_x, y as u32) * wt;
+            for _ in 0..config.blur_passes {
+                let mut temp_h = current_buf.clone();
+                // Horizontal pass
+                for y in 0..h {
+                    for x in 0..w {
+                        let mut sum = 0.0f32;
+                        for (k, &wt) in weights.iter().enumerate() {
+                            let sample_x = (x + (k as i32 - 2)).clamp(0, w - 1) as u32;
+                            sum += current_buf.get_pixel(sample_x, y as u32) * wt;
+                        }
+                        temp_h.set_pixel(x as u32, y as u32, sum);
+                    }
                 }
-                blurred.set_pixel(x as u32, y as u32, sum);
-            }
-        }
 
-        // Vertical pass
-        let mut final_buf = blurred.clone();
-        for y in 0..h {
-            for x in 0..w {
-                let mut sum = 0.0f32;
-                for (k, &wt) in weights.iter().enumerate() {
-                    let sample_y = (y + (k as i32 - 2)).clamp(0, h - 1) as u32;
-                    sum += blurred.get_pixel(x as u32, sample_y) * wt;
+                // Vertical pass
+                for y in 0..h {
+                    for x in 0..w {
+                        let mut sum = 0.0f32;
+                        for (k, &wt) in weights.iter().enumerate() {
+                            let sample_y = (y + (k as i32 - 2)).clamp(0, h - 1) as u32;
+                            sum += temp_h.get_pixel(x as u32, sample_y) * wt;
+                        }
+                        current_buf.set_pixel(x as u32, y as u32, sum);
+                    }
                 }
-                final_buf.set_pixel(x as u32, y as u32, sum);
             }
         }
 
         // 10. Dilate again so bilinear filtering outside UV borders is completely smooth
-        Self::dilate_scalar(&mut final_buf, &mut written_mask, 16);
+        Self::dilate_scalar(&mut current_buf, &mut written_mask, 16);
 
-        final_buf
+        current_buf
     }
 
     /// Bake Ambient Occlusion map via Monte Carlo Hemisphere Occlusion with smoothed normal consideration
     pub fn bake_ao(mesh: &Mesh, width: u32, height: u32) -> ScalarBuffer {
-        Self::bake_ao_with_cage(mesh, width, height, &BakeCageConfig::default())
+        Self::bake_ao_with_options(mesh, width, height, &BakeCageConfig::default(), &AoBakeConfig::default())
             .unwrap_or_else(|_| ScalarBuffer::new(width, height, 1.0))
     }
 
     /// Bake Ambient Occlusion map with optional cage envelope support
+    #[allow(dead_code)]
     pub fn bake_ao_with_cage(
         mesh: &Mesh,
         width: u32,
         height: u32,
         cage_config: &BakeCageConfig,
+    ) -> Result<ScalarBuffer, String> {
+        Self::bake_ao_with_options(mesh, width, height, cage_config, &AoBakeConfig::default())
+    }
+
+    /// Bake Ambient Occlusion map with customizable samples, distances, bias, spread and contrast
+    pub fn bake_ao_with_options(
+        mesh: &Mesh,
+        width: u32,
+        height: u32,
+        cage_config: &BakeCageConfig,
+        ao_config: &AoBakeConfig,
     ) -> Result<ScalarBuffer, String> {
         let mut buffer = ScalarBuffer::new(width, height, 1.0);
         let tri_count = mesh.indices.len() / 3;
@@ -554,8 +709,7 @@ impl Baker {
 
         let cage_verts = Self::compute_cage_vertices(mesh, cage_config)?;
 
-        // 32 sample hemisphere directions via Fibonacci spiral
-        let sample_count = 32usize;
+        let sample_count = ao_config.samples.clamp(4, 1024);
         let mut hemisphere_samples = Vec::with_capacity(sample_count);
         for i in 0..sample_count {
             let u1 = (i as f32 + 0.5) / sample_count as f32;
@@ -569,9 +723,9 @@ impl Baker {
 
         let extents = mesh.aabb_max - mesh.aabb_min;
         let diag = extents.length();
-        let max_dist = (diag * 0.35).max(0.1);
-        let min_self_dist = (diag * 0.03).max(0.008);
-        let ray_offset = (diag * 0.008).max(0.003);
+        let max_dist = (diag * ao_config.max_distance).max(0.01);
+        let ray_offset = (diag * ao_config.ray_bias).max(0.001);
+        let min_self_dist = (ray_offset * 3.75).max(0.004);
 
         // Rayon parallel computation of vertex AO with smoothed normals and cage envelope
         let vert_ao: Vec<f32> = mesh.vertices.par_iter().enumerate().map(|(vi, v)| {
@@ -609,8 +763,14 @@ impl Baker {
                     let is_neighbor_facet = hit.t < min_self_dist && hit.normal.dot(normal) > 0.4;
 
                     if is_front_facing && !is_neighbor_facet && hit.t > 0.002 && hit.t < max_dist {
-                        let occ = (1.0 - hit.t / max_dist).clamp(0.0, 1.0);
-                        unoccluded += 1.0 - occ * 0.85;
+                        let raw_occ = (1.0 - hit.t / max_dist).clamp(0.0, 1.0);
+                        let shaped_occ = if (ao_config.spread - 1.0).abs() > 0.01 {
+                            raw_occ.powf(ao_config.spread.max(0.05))
+                        } else {
+                            raw_occ
+                        };
+                        let occ = (shaped_occ * 0.85 * ao_config.contrast).clamp(0.0, 1.0);
+                        unoccluded += 1.0 - occ;
                     } else {
                         unoccluded += 1.0;
                     }
@@ -674,6 +834,31 @@ impl Baker {
         height: u32,
         match_config: &BakeMatchConfig,
         cage_config: &BakeCageConfig,
+    ) -> Result<RgbaBuffer, String> {
+        Self::bake_tangent_normals_with_options(
+            mesh,
+            high_poly,
+            frontal_dist,
+            rear_dist,
+            width,
+            height,
+            match_config,
+            cage_config,
+            false,
+        )
+    }
+
+    /// Bake Tangent Space Normal map with cage envelope projection, matching mode, and optional DirectX green channel inversion
+    pub fn bake_tangent_normals_with_options(
+        mesh: &Mesh,
+        high_poly: Option<&Mesh>,
+        frontal_dist: f32,
+        rear_dist: f32,
+        width: u32,
+        height: u32,
+        match_config: &BakeMatchConfig,
+        cage_config: &BakeCageConfig,
+        invert_green: bool,
     ) -> Result<RgbaBuffer, String> {
         let mut buffer = RgbaBuffer::new(width, height, Vec4::new(0.5, 0.5, 1.0, 1.0));
         let tri_count = mesh.indices.len() / 3;
@@ -787,7 +972,8 @@ impl Baker {
                                     let tw = if tan.w < 0.0 { -1.0 } else { 1.0 };
                                     let b = n.cross(t) * tw;
                                     let ts_norm = Vec3::new(hp_norm.dot(t), hp_norm.dot(b), hp_norm.dot(n)).normalize_or_zero();
-                                    buffer.set_pixel(x, y, Vec4::new(ts_norm.x * 0.5 + 0.5, ts_norm.y * 0.5 + 0.5, ts_norm.z * 0.5 + 0.5, 1.0));
+                                    let ny = if invert_green { -ts_norm.y } else { ts_norm.y };
+                                    buffer.set_pixel(x, y, Vec4::new(ts_norm.x * 0.5 + 0.5, ny * 0.5 + 0.5, ts_norm.z * 0.5 + 0.5, 1.0));
                                     continue;
                                 }
                             }
@@ -807,6 +993,16 @@ impl Baker {
 
     /// Bake World Position Object (WPO) / Position map normalized to [0, 1] bounding box
     pub fn bake_position(mesh: &Mesh, width: u32, height: u32) -> RgbaBuffer {
+        Self::bake_position_with_options(mesh, width, height, &PositionBakeConfig::default())
+    }
+
+    /// Bake World Position Object (WPO) / Position map with configurable normalization mode
+    pub fn bake_position_with_options(
+        mesh: &Mesh,
+        width: u32,
+        height: u32,
+        config: &PositionBakeConfig,
+    ) -> RgbaBuffer {
         let mut buffer = RgbaBuffer::new(width, height, Vec4::new(0.5, 0.5, 0.5, 1.0));
         let tri_count = mesh.indices.len() / 3;
 
@@ -852,7 +1048,14 @@ impl Baker {
             for x in 0..width {
                 let idx = (y * width + x) as usize;
                 if let Some(pos) = pos_buf[idx] {
-                    let norm_pos = ((pos - min_bound) / extents).clamp(Vec3::ZERO, Vec3::ONE);
+                    let norm_pos = match config.mode {
+                        PositionNormalizationMode::BoundingBox => {
+                            ((pos - min_bound) / extents).clamp(Vec3::ZERO, Vec3::ONE)
+                        }
+                        PositionNormalizationMode::WorldUnits => {
+                            (pos * 0.5 + Vec3::splat(0.5)).clamp(Vec3::ZERO, Vec3::ONE)
+                        }
+                    };
                     buffer.set_pixel(x, y, Vec4::new(norm_pos.x, norm_pos.y, norm_pos.z, 1.0));
                 }
             }
@@ -1026,16 +1229,28 @@ impl Baker {
 
     /// Bake Surface Thickness map for subsurface scattering and light transmission
     pub fn bake_thickness(mesh: &Mesh, width: u32, height: u32) -> ScalarBuffer {
-        Self::bake_thickness_with_cage(mesh, width, height, &BakeCageConfig::default())
+        Self::bake_thickness_with_options(mesh, width, height, &BakeCageConfig::default(), &ThicknessBakeConfig::default())
             .unwrap_or_else(|_| ScalarBuffer::new(width, height, 1.0))
     }
 
     /// Bake Surface Thickness map with optional cage envelope support
+    #[allow(dead_code)]
     pub fn bake_thickness_with_cage(
         mesh: &Mesh,
         width: u32,
         height: u32,
         cage_config: &BakeCageConfig,
+    ) -> Result<ScalarBuffer, String> {
+        Self::bake_thickness_with_options(mesh, width, height, cage_config, &ThicknessBakeConfig::default())
+    }
+
+    /// Bake Surface Thickness map with customizable sample count, ray reach, bias, and invert option
+    pub fn bake_thickness_with_options(
+        mesh: &Mesh,
+        width: u32,
+        height: u32,
+        cage_config: &BakeCageConfig,
+        config: &ThicknessBakeConfig,
     ) -> Result<ScalarBuffer, String> {
         let mut buffer = ScalarBuffer::new(width, height, 1.0);
         let tri_count = mesh.indices.len() / 3;
@@ -1045,8 +1260,7 @@ impl Baker {
 
         let cage_verts = Self::compute_cage_vertices(mesh, cage_config)?;
 
-        // 16 sample directions via Fibonacci spiral in inward hemisphere
-        let sample_count = 16usize;
+        let sample_count = config.samples.clamp(4, 1024);
         let mut hemisphere_samples = Vec::with_capacity(sample_count);
         for i in 0..sample_count {
             let u1 = (i as f32 + 0.5) / sample_count as f32;
@@ -1061,9 +1275,9 @@ impl Baker {
 
         let extents = mesh.aabb_max - mesh.aabb_min;
         let diag = extents.length();
-        let max_dist = (diag * 0.6).max(0.1);
-        let min_self_dist = (diag * 0.01).max(0.005);
-        let ray_offset = (diag * 0.005).max(0.002);
+        let max_dist = (diag * config.max_distance).max(0.01);
+        let ray_offset = (diag * config.ray_bias).max(0.001);
+        let min_self_dist = (ray_offset * 2.0).max(0.003);
 
         // Rayon parallel computation of vertex thickness
         let vert_thickness: Vec<f32> = mesh.vertices.par_iter().enumerate().map(|(vi, v)| {
@@ -1134,6 +1348,9 @@ impl Baker {
         }
 
         Self::dilate_scalar(&mut buffer, &mut written_mask, 16);
+        if config.invert {
+            buffer.invert();
+        }
         Ok(buffer)
     }
 
@@ -1775,6 +1992,102 @@ mod tests {
         let thick_map = Baker::bake_thickness_with_cage(&cube_low, 16, 16, &cage_config).expect("Thickness bake with cage must succeed");
         assert_eq!(thick_map.width, 16);
         assert_eq!(thick_map.height, 16);
+    }
+
+    #[test]
+    fn test_baker_configurable_map_options() {
+        let sphere = Mesh::create_sphere(1.0, 16, 12);
+
+        // Test configurable AO samples and parameters
+        let ao_low = Baker::bake_ao_with_options(
+            &sphere,
+            16,
+            16,
+            &BakeCageConfig::default(),
+            &AoBakeConfig {
+                samples: 16,
+                max_distance: 0.2,
+                ray_bias: 0.01,
+                spread: 1.2,
+                contrast: 1.5,
+            },
+        ).expect("AO with options should succeed");
+        assert_eq!(ao_low.width, 16);
+        assert_eq!(ao_low.height, 16);
+
+        let ao_high = Baker::bake_ao_with_options(
+            &sphere,
+            16,
+            16,
+            &BakeCageConfig::default(),
+            &AoBakeConfig {
+                samples: 128,
+                max_distance: 0.5,
+                ray_bias: 0.005,
+                spread: 0.8,
+                contrast: 1.0,
+            },
+        ).expect("AO with 128 samples should succeed");
+        assert_eq!(ao_high.width, 16);
+        assert_eq!(ao_high.height, 16);
+
+        // Test configurable Thickness samples and invert
+        let th_norm = Baker::bake_thickness_with_options(
+            &sphere,
+            16,
+            16,
+            &BakeCageConfig::default(),
+            &ThicknessBakeConfig {
+                samples: 16,
+                max_distance: 0.5,
+                ray_bias: 0.005,
+                invert: false,
+            },
+        ).expect("Thickness normal should succeed");
+
+        let th_inv = Baker::bake_thickness_with_options(
+            &sphere,
+            16,
+            16,
+            &BakeCageConfig::default(),
+            &ThicknessBakeConfig {
+                samples: 16,
+                max_distance: 0.5,
+                ray_bias: 0.005,
+                invert: true,
+            },
+        ).expect("Thickness inverted should succeed");
+
+        // First non-border pixel should satisfy invert
+        let val_norm = th_norm.get_pixel(8, 8);
+        let val_inv = th_inv.get_pixel(8, 8);
+        assert!((val_norm + val_inv - 1.0).abs() < 1e-4, "Inverted thickness should equal 1.0 - normal");
+
+        // Test Curvature options
+        let curv_custom = Baker::bake_curvature_with_options(
+            &sphere,
+            16,
+            16,
+            &CurvatureBakeConfig {
+                intensity: 1.5,
+                contrast: 1.2,
+                dihedral_weight: 0.5,
+                deflection_weight: 0.3,
+                blur_passes: 2,
+            },
+        );
+        assert_eq!(curv_custom.width, 16);
+
+        // Test Position options
+        let pos_world = Baker::bake_position_with_options(
+            &sphere,
+            16,
+            16,
+            &PositionBakeConfig {
+                mode: PositionNormalizationMode::WorldUnits,
+            },
+        );
+        assert_eq!(pos_world.width, 16);
     }
 }
 

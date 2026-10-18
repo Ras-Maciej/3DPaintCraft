@@ -225,6 +225,12 @@ pub struct PaintcraftApp {
     pub bake_cage_mode: crate::baker::BakeCageMode,
     pub bake_cage_inflation: f32,
     pub bake_cage_path: String,
+    pub bake_active_settings_tab: crate::baker::BakeSettingsTab,
+    pub bake_ao_config: crate::baker::AoBakeConfig,
+    pub bake_thickness_config: crate::baker::ThicknessBakeConfig,
+    pub bake_curvature_config: crate::baker::CurvatureBakeConfig,
+    pub bake_normal_config: crate::baker::NormalBakeConfig,
+    pub bake_position_config: crate::baker::PositionBakeConfig,
     pub bg_blur: f32,
     pub bg_opacity: f32,
     pub layer_stack_channel: crate::channel::ChannelType,
@@ -526,6 +532,12 @@ impl PaintcraftApp {
             bake_cage_mode: crate::baker::BakeCageMode::None,
             bake_cage_inflation: 0.02,
             bake_cage_path: String::new(),
+            bake_active_settings_tab: crate::baker::BakeSettingsTab::Common,
+            bake_ao_config: crate::baker::AoBakeConfig::default(),
+            bake_thickness_config: crate::baker::ThicknessBakeConfig::default(),
+            bake_curvature_config: crate::baker::CurvatureBakeConfig::default(),
+            bake_normal_config: crate::baker::NormalBakeConfig::default(),
+            bake_position_config: crate::baker::PositionBakeConfig::default(),
             bg_blur: 0.0,
             bg_opacity: 1.0,
             layer_stack_channel: crate::channel::ChannelType::BaseColor,
@@ -8946,6 +8958,15 @@ impl PaintcraftApp {
             },
         };
 
+        let ao_config = self.bake_ao_config.clone();
+        let mut thickness_config = self.bake_thickness_config.clone();
+        if bake_thickness_invert {
+            thickness_config.invert = true;
+        }
+        let curvature_config = self.bake_curvature_config.clone();
+        let normal_config = self.bake_normal_config.clone();
+        let position_config = self.bake_position_config.clone();
+
         let mesh = self.project.mesh.clone();
         let high_poly = self.project.high_poly_mesh.clone();
 
@@ -8993,7 +9014,7 @@ impl PaintcraftApp {
                     st.step_name = format!("[{}/{}] Baking Tangent Space Normal Map...", completed_tasks + 1, total_tasks);
                     st.progress = (completed_tasks as f32) / (total_tasks as f32).max(1.0);
                 }
-                result.tangent_normal = match crate::baker::Baker::bake_tangent_normals_with_cage(
+                result.tangent_normal = match crate::baker::Baker::bake_tangent_normals_with_options(
                     &mesh,
                     high_poly.as_ref(),
                     frontal,
@@ -9002,6 +9023,7 @@ impl PaintcraftApp {
                     res,
                     &match_config,
                     &cage_config,
+                    normal_config.invert_green,
                 ) {
                     Ok(buf) => Some(buf),
                     Err(e) => {
@@ -9038,7 +9060,7 @@ impl PaintcraftApp {
                     st.step_name = format!("[{}/{}] Baking Ambient Occlusion (Raycasting)...", completed_tasks + 1, total_tasks);
                     st.progress = (completed_tasks as f32) / (total_tasks as f32).max(1.0);
                 }
-                let mut ao = crate::baker::Baker::bake_ao_with_cage(&mesh, res, res, &cage_config)
+                let mut ao = crate::baker::Baker::bake_ao_with_options(&mesh, res, res, &cage_config, &ao_config)
                     .unwrap_or_else(|_| crate::baker::Baker::bake_ao(&mesh, res, res));
                 if denoise {
                     {
@@ -9058,7 +9080,7 @@ impl PaintcraftApp {
                     st.step_name = format!("[{}/{}] Baking Curvature Map...", completed_tasks + 1, total_tasks);
                     st.progress = (completed_tasks as f32) / (total_tasks as f32).max(1.0);
                 }
-                let mut curv = crate::baker::Baker::bake_curvature(&mesh, res, res);
+                let mut curv = crate::baker::Baker::bake_curvature_with_options(&mesh, res, res, &curvature_config);
                 if denoise {
                     {
                         let mut st = state_clone.lock().unwrap();
@@ -9077,7 +9099,7 @@ impl PaintcraftApp {
                     st.step_name = format!("[{}/{}] Baking World Position (WPO)...", completed_tasks + 1, total_tasks);
                     st.progress = (completed_tasks as f32) / (total_tasks as f32).max(1.0);
                 }
-                result.position = Some(crate::baker::Baker::bake_position(&mesh, res, res));
+                result.position = Some(crate::baker::Baker::bake_position_with_options(&mesh, res, res, &position_config));
                 completed_tasks += 1;
             }
 
@@ -9088,13 +9110,10 @@ impl PaintcraftApp {
                     st.step_name = format!("[{}/{}] Baking Thickness Map...", completed_tasks + 1, total_tasks);
                     st.progress = (completed_tasks as f32) / (total_tasks as f32).max(1.0);
                 }
-                let mut th = crate::baker::Baker::bake_thickness_with_cage(&mesh, res, res, &cage_config)
+                let mut th = crate::baker::Baker::bake_thickness_with_options(&mesh, res, res, &cage_config, &thickness_config)
                     .unwrap_or_else(|_| crate::baker::Baker::bake_thickness(&mesh, res, res));
                 if denoise {
                     crate::baker::Baker::denoise_scalar_buffer(&mut th, result.world_space_normal.as_ref(), 1, 2, 1.2, 24.0);
-                }
-                if bake_thickness_invert {
-                    th.invert();
                 }
                 result.thickness = Some(th);
                 completed_tasks += 1;
@@ -9135,8 +9154,8 @@ impl PaintcraftApp {
         egui::Window::new("Bake Mesh Maps")
             .collapsible(false)
             .resizable(true)
-            .default_width(880.0)
-            .default_height(600.0)
+            .default_width(960.0)
+            .default_height(620.0)
             .show(ctx, |ui| {
                 // Header Banner
                 ui.horizontal(|ui| {
@@ -9199,39 +9218,48 @@ impl PaintcraftApp {
 
                     ui.separator();
 
-                    // Column 2: Mesh Maps Selection
+                    // Column 2: Mesh Maps Selection & Navigation
                     ui.allocate_ui_with_layout(
-                        egui::vec2(250.0, avail_h),
+                        egui::vec2(230.0, avail_h),
                         egui::Layout::top_down(egui::Align::Min),
                         |ui| {
-                            ui.strong(egui::RichText::new("Mesh Maps").color(Color32::from_rgb(220, 225, 235)));
+                            ui.strong(egui::RichText::new("Bake Settings").color(Color32::from_rgb(220, 225, 235)));
                             ui.add_space(4.0);
 
-                            ui.checkbox(&mut self.bake_opt_tangent_normal, "Normal (Tangent Space)")
-                                .on_hover_text("Bakes high-poly surface detail and bevels into tangent space normal map");
-                            ui.checkbox(&mut self.bake_opt_world_normal, "World Space Normal")
-                                .on_hover_text("Used for directional dust, weathering, and vertical gradients");
-                            ui.checkbox(&mut self.bake_opt_ao, "Ambient Occlusion")
-                                .on_hover_text("Ray-marched cavity contact shadows, powers Crevice Dirt generator");
-                            ui.checkbox(&mut self.bake_opt_curvature, "Curvature")
-                                .on_hover_text("Convex edges and concave seams, powers Smart Edge Wear generator");
-                            ui.checkbox(&mut self.bake_opt_position, "Position (World Space)")
-                                .on_hover_text("World position gradient, powers Position Gradient generator");
-                            ui.checkbox(&mut self.bake_opt_thickness, "Thickness")
-                                .on_hover_text("Subsurface light penetration for translucency and skin");
-                            if self.bake_opt_thickness {
+                            let is_common = self.bake_active_settings_tab == crate::baker::BakeSettingsTab::Common;
+                            if ui.selectable_label(is_common, "⚙ Common Parameters").clicked() {
+                                self.bake_active_settings_tab = crate::baker::BakeSettingsTab::Common;
+                            }
+                            ui.add_space(4.0);
+                            ui.separator();
+                            ui.add_space(2.0);
+
+                            ui.strong(egui::RichText::new("Mesh Maps").color(Color32::from_rgb(200, 205, 215)));
+                            ui.add_space(2.0);
+
+                            let maps = [
+                                (crate::baker::BakeSettingsTab::TangentNormal, "Normal (Tangent Space)", &mut self.bake_opt_tangent_normal),
+                                (crate::baker::BakeSettingsTab::WorldNormal, "World Space Normal", &mut self.bake_opt_world_normal),
+                                (crate::baker::BakeSettingsTab::AmbientOcclusion, "Ambient Occlusion", &mut self.bake_opt_ao),
+                                (crate::baker::BakeSettingsTab::Curvature, "Curvature", &mut self.bake_opt_curvature),
+                                (crate::baker::BakeSettingsTab::Position, "Position (World Space)", &mut self.bake_opt_position),
+                                (crate::baker::BakeSettingsTab::Thickness, "Thickness", &mut self.bake_opt_thickness),
+                                (crate::baker::BakeSettingsTab::IdMap, "ID Map (Submeshes)", &mut self.bake_opt_id_map),
+                            ];
+
+                            for (tab, label, opt_ref) in maps {
+                                let is_active = self.bake_active_settings_tab == tab;
                                 ui.horizontal(|ui| {
-                                    ui.add_space(16.0);
-                                    ui.checkbox(&mut self.bake_opt_thickness_invert, "Invert (White = Thin)")
-                                        .on_hover_text("Invert values so thin areas are white (high transmission) and thick areas are black");
+                                    ui.checkbox(opt_ref, "");
+                                    if ui.selectable_label(is_active, label).clicked() {
+                                        self.bake_active_settings_tab = tab;
+                                    }
                                 });
                             }
-                            ui.checkbox(&mut self.bake_opt_id_map, "ID Map (Submesh / Material IDs)")
-                                .on_hover_text("Bakes high-contrast unique colors per submesh or UV island for color selection masks");
 
                             ui.add_space(8.0);
                             ui.separator();
-                            ui.strong(egui::RichText::new("Map Quality").color(Color32::from_rgb(180, 185, 195)));
+                            ui.strong(egui::RichText::new("Global Denoising").color(Color32::from_rgb(180, 185, 195)));
                             ui.add_space(2.0);
                             ui.checkbox(&mut self.bake_denoise, "Denoise Mesh Maps")
                                 .on_hover_text("Edge-preserving bilateral filter cleans ray-march noise on AO and Curvature while preserving sharp bevels");
@@ -9246,124 +9274,364 @@ impl PaintcraftApp {
 
                     ui.separator();
 
-                    // Column 3: Common Parameters & High-Poly Mesh
+                    // Column 3: Active Map & Common Parameters Panel
                     ui.allocate_ui_with_layout(
-                        egui::vec2(360.0, avail_h),
+                        egui::vec2(ui.available_width().max(380.0), avail_h),
                         egui::Layout::top_down(egui::Align::Min),
                         |ui| {
-                            ui.strong(egui::RichText::new("Common Parameters").color(Color32::from_rgb(220, 225, 235)));
-                            ui.add_space(4.0);
-
-                            ui.horizontal(|ui| {
-                                ui.label("Output Size:");
-                                egui::ComboBox::from_id_source("bake_size_combo")
-                                    .selected_text(format!("{} x {}", self.bake_res, self.bake_res))
-                                    .show_ui(ui, |ui| {
-                                        ui.selectable_value(&mut self.bake_res, 512, "512 x 512");
-                                        ui.selectable_value(&mut self.bake_res, 1024, "1024 x 1024 (1K)");
-                                        ui.selectable_value(&mut self.bake_res, 2048, "2048 x 2048 (2K)");
-                                        ui.selectable_value(&mut self.bake_res, 4096, "4096 x 4096 (4K)");
-                                    });
-                            });
-
-                            ui.add_space(6.0);
-                            ui.separator();
-                            ui.strong("High Definition Meshes:");
-                            ui.horizontal(|ui| {
-                                ui.text_edit_singleline(&mut self.bake_highpoly_path);
-                                if ui.button("Browse...").clicked() {
-                                    if let Some(path) = rfd::FileDialog::new().add_filter("3D Models (OBJ, glTF, GLB)", &["obj", "gltf", "glb"]).pick_file() {
-                                        self.bake_highpoly_path = path.to_string_lossy().to_string();
-                                        if let Ok(mesh) = crate::mesh::Mesh::load_file(&path) {
-                                            self.project.high_poly_mesh = Some(mesh);
-                                            self.status_message = format!("Loaded High-Poly Mesh: {:?}", path.file_name().unwrap_or_default());
-                                        }
+                            // Top Tab Strip
+                            ui.horizontal_wrapped(|ui| {
+                                let tabs = [
+                                    (crate::baker::BakeSettingsTab::Common, "⚙ Common"),
+                                    (crate::baker::BakeSettingsTab::TangentNormal, "Normal"),
+                                    (crate::baker::BakeSettingsTab::WorldNormal, "World Normal"),
+                                    (crate::baker::BakeSettingsTab::AmbientOcclusion, "AO"),
+                                    (crate::baker::BakeSettingsTab::Curvature, "Curvature"),
+                                    (crate::baker::BakeSettingsTab::Position, "Position"),
+                                    (crate::baker::BakeSettingsTab::Thickness, "Thickness"),
+                                    (crate::baker::BakeSettingsTab::IdMap, "ID Map"),
+                                ];
+                                for (tab, name) in tabs {
+                                    let is_active = self.bake_active_settings_tab == tab;
+                                    if ui.selectable_label(is_active, name).clicked() {
+                                        self.bake_active_settings_tab = tab;
                                     }
                                 }
-                                if self.project.high_poly_mesh.is_some() && ui.button("Clear").clicked() {
-                                    self.project.high_poly_mesh = None;
-                                    self.bake_highpoly_path.clear();
-                                }
                             });
-                            if let Some(ref hp) = self.project.high_poly_mesh {
-                                ui.colored_label(Color32::from_rgb(100, 220, 140), format!("Loaded: {} ({} tris)", hp.name, hp.indices.len() / 3));
-                            } else {
-                                ui.label(egui::RichText::new("Using low-poly base mesh as high-definition geometry").small().color(Color32::from_rgb(150, 155, 165)));
-                            }
-
-                            ui.add_space(6.0);
+                            ui.add_space(2.0);
                             ui.separator();
-                            ui.strong("Ray Distances:");
-                            ui.horizontal(|ui| {
-                                ui.label("Max Frontal Distance:");
-                                ui.add(egui::Slider::new(&mut self.bake_frontal, 0.001..=0.5).logarithmic(true));
-                            });
-                            ui.horizontal(|ui| {
-                                ui.label("Max Rear Distance:");
-                                ui.add(egui::Slider::new(&mut self.bake_rear, 0.001..=0.5).logarithmic(true));
-                            });
+                            ui.add_space(4.0);
 
-                            ui.add_space(6.0);
-                            ui.separator();
-                            ui.strong("Cage Envelope & Ray Origin:");
-                            ui.horizontal(|ui| {
-                                ui.label("Mode:");
-                                egui::ComboBox::from_id_source("bake_cage_mode_combo")
-                                    .selected_text(self.bake_cage_mode.name())
-                                    .show_ui(ui, |ui| {
-                                        ui.selectable_value(&mut self.bake_cage_mode, crate::baker::BakeCageMode::None, "None (Ray Distances)");
-                                        ui.selectable_value(&mut self.bake_cage_mode, crate::baker::BakeCageMode::ParametricInflation, "Parametric Cage (Inflation)");
-                                        ui.selectable_value(&mut self.bake_cage_mode, crate::baker::BakeCageMode::ExternalCage, "External Cage Mesh (.obj)");
-                                    });
-                            });
+                            egui::ScrollArea::vertical()
+                                .id_source("bake_settings_panel_scroll")
+                                .auto_shrink([false, false])
+                                .show(ui, |ui| {
+                                    match self.bake_active_settings_tab {
+                                        crate::baker::BakeSettingsTab::Common => {
+                                            ui.strong(egui::RichText::new("Common Parameters").color(Color32::from_rgb(220, 225, 235)));
+                                            ui.add_space(4.0);
 
-                            match self.bake_cage_mode {
-                                crate::baker::BakeCageMode::None => {
-                                    ui.label(egui::RichText::new("Casting rays along vertex normals using frontal and rear distances.").small().color(Color32::from_rgb(150, 155, 165)));
-                                }
-                                crate::baker::BakeCageMode::ParametricInflation => {
-                                    ui.horizontal(|ui| {
-                                        ui.label("Cage Inflation Offset:");
-                                        ui.add(egui::Slider::new(&mut self.bake_cage_inflation, 0.001..=0.5).logarithmic(true));
-                                    });
-                                    ui.label(egui::RichText::new("Generates a seamless averaged normal envelope to eliminate ray-crossing on bevels and corners.").small().color(Color32::from_rgb(150, 155, 165)));
-                                }
-                                crate::baker::BakeCageMode::ExternalCage => {
-                                    ui.horizontal(|ui| {
-                                        ui.text_edit_singleline(&mut self.bake_cage_path);
-                                        if ui.button("Browse...").clicked() {
-                                            if let Some(path) = rfd::FileDialog::new().add_filter("OBJ Mesh (*.obj)", &["obj"]).pick_file() {
-                                                self.bake_cage_path = path.to_string_lossy().to_string();
+                                            ui.horizontal(|ui| {
+                                                ui.label("Output Size:");
+                                                egui::ComboBox::from_id_source("bake_size_combo")
+                                                    .selected_text(format!("{} x {}", self.bake_res, self.bake_res))
+                                                    .show_ui(ui, |ui| {
+                                                        ui.selectable_value(&mut self.bake_res, 512, "512 x 512");
+                                                        ui.selectable_value(&mut self.bake_res, 1024, "1024 x 1024 (1K)");
+                                                        ui.selectable_value(&mut self.bake_res, 2048, "2048 x 2048 (2K)");
+                                                        ui.selectable_value(&mut self.bake_res, 4096, "4096 x 4096 (4K)");
+                                                    });
+                                            });
+
+                                            ui.add_space(6.0);
+                                            ui.separator();
+                                            ui.strong("High Definition Meshes:");
+                                            ui.horizontal(|ui| {
+                                                ui.text_edit_singleline(&mut self.bake_highpoly_path);
+                                                if ui.button("Browse...").clicked() {
+                                                    if let Some(path) = rfd::FileDialog::new().add_filter("3D Models (OBJ, glTF, GLB)", &["obj", "gltf", "glb"]).pick_file() {
+                                                        self.bake_highpoly_path = path.to_string_lossy().to_string();
+                                                        if let Ok(mesh) = crate::mesh::Mesh::load_file(&path) {
+                                                            self.project.high_poly_mesh = Some(mesh);
+                                                            self.status_message = format!("Loaded High-Poly Mesh: {:?}", path.file_name().unwrap_or_default());
+                                                        }
+                                                    }
+                                                }
+                                                if self.project.high_poly_mesh.is_some() && ui.button("Clear").clicked() {
+                                                    self.project.high_poly_mesh = None;
+                                                    self.bake_highpoly_path.clear();
+                                                }
+                                            });
+                                            if let Some(ref hp) = self.project.high_poly_mesh {
+                                                ui.colored_label(Color32::from_rgb(100, 220, 140), format!("Loaded: {} ({} tris)", hp.name, hp.indices.len() / 3));
+                                            } else {
+                                                ui.label(egui::RichText::new("Using low-poly base mesh as high-definition geometry").small().color(Color32::from_rgb(150, 155, 165)));
+                                            }
+
+                                            ui.add_space(6.0);
+                                            ui.separator();
+                                            ui.strong("Ray Distances:");
+                                            ui.horizontal(|ui| {
+                                                ui.label("Max Frontal Distance:");
+                                                ui.add(egui::Slider::new(&mut self.bake_frontal, 0.001..=0.5).logarithmic(true));
+                                            });
+                                            ui.horizontal(|ui| {
+                                                ui.label("Max Rear Distance:");
+                                                ui.add(egui::Slider::new(&mut self.bake_rear, 0.001..=0.5).logarithmic(true));
+                                            });
+
+                                            ui.add_space(6.0);
+                                            ui.separator();
+                                            ui.strong("Cage Envelope & Ray Origin:");
+                                            ui.horizontal(|ui| {
+                                                ui.label("Mode:");
+                                                egui::ComboBox::from_id_source("bake_cage_mode_combo")
+                                                    .selected_text(self.bake_cage_mode.name())
+                                                    .show_ui(ui, |ui| {
+                                                        ui.selectable_value(&mut self.bake_cage_mode, crate::baker::BakeCageMode::None, "None (Ray Distances)");
+                                                        ui.selectable_value(&mut self.bake_cage_mode, crate::baker::BakeCageMode::ParametricInflation, "Parametric Cage (Inflation)");
+                                                        ui.selectable_value(&mut self.bake_cage_mode, crate::baker::BakeCageMode::ExternalCage, "External Cage Mesh (.obj)");
+                                                    });
+                                            });
+
+                                            match self.bake_cage_mode {
+                                                crate::baker::BakeCageMode::None => {
+                                                    ui.label(egui::RichText::new("Casting rays along vertex normals using frontal and rear distances.").small().color(Color32::from_rgb(150, 155, 165)));
+                                                }
+                                                crate::baker::BakeCageMode::ParametricInflation => {
+                                                    ui.horizontal(|ui| {
+                                                        ui.label("Cage Inflation Offset:");
+                                                        ui.add(egui::Slider::new(&mut self.bake_cage_inflation, 0.001..=0.5).logarithmic(true));
+                                                    });
+                                                    ui.label(egui::RichText::new("Generates a seamless averaged normal envelope to eliminate ray-crossing on bevels and corners.").small().color(Color32::from_rgb(150, 155, 165)));
+                                                }
+                                                crate::baker::BakeCageMode::ExternalCage => {
+                                                    ui.horizontal(|ui| {
+                                                        ui.text_edit_singleline(&mut self.bake_cage_path);
+                                                        if ui.button("Browse...").clicked() {
+                                                            if let Some(path) = rfd::FileDialog::new().add_filter("OBJ Mesh (*.obj)", &["obj"]).pick_file() {
+                                                                self.bake_cage_path = path.to_string_lossy().to_string();
+                                                            }
+                                                        }
+                                                        if !self.bake_cage_path.is_empty() && ui.button("Clear").clicked() {
+                                                            self.bake_cage_path.clear();
+                                                        }
+                                                    });
+                                                    ui.label(egui::RichText::new("Cage OBJ must have matching topology (identical vertex count and faces) as the low-poly mesh.").small().color(Color32::from_rgb(150, 155, 165)));
+                                                }
+                                            }
+
+                                            ui.add_space(6.0);
+                                            ui.separator();
+                                            ui.strong("Mesh Matching:");
+                                            ui.horizontal(|ui| {
+                                                ui.label("Match:");
+                                                egui::ComboBox::from_id_source("bake_match_mode_combo")
+                                                    .selected_text(self.bake_match_mode.name())
+                                                    .show_ui(ui, |ui| {
+                                                        ui.selectable_value(&mut self.bake_match_mode, crate::baker::BakeMatchMode::Always, "Always");
+                                                        ui.selectable_value(&mut self.bake_match_mode, crate::baker::BakeMatchMode::ByMeshName, "By Mesh Name");
+                                                    });
+                                            });
+                                            if self.bake_match_mode == crate::baker::BakeMatchMode::ByMeshName {
+                                                ui.horizontal(|ui| {
+                                                    ui.label("Low Suffix:");
+                                                    ui.add(egui::TextEdit::singleline(&mut self.bake_low_suffix).desired_width(70.0));
+                                                    ui.label("High Suffix:");
+                                                    ui.add(egui::TextEdit::singleline(&mut self.bake_high_suffix).desired_width(70.0));
+                                                });
                                             }
                                         }
-                                        if !self.bake_cage_path.is_empty() && ui.button("Clear").clicked() {
-                                            self.bake_cage_path.clear();
-                                        }
-                                    });
-                                    ui.label(egui::RichText::new("Cage OBJ must have matching topology (identical vertex count and faces) as the low-poly mesh.").small().color(Color32::from_rgb(150, 155, 165)));
-                                }
-                            }
 
-                            ui.add_space(6.0);
-                            ui.separator();
-                            ui.strong("Mesh Matching:");
-                            ui.horizontal(|ui| {
-                                ui.label("Match:");
-                                egui::ComboBox::from_id_source("bake_match_mode_combo")
-                                    .selected_text(self.bake_match_mode.name())
-                                    .show_ui(ui, |ui| {
-                                        ui.selectable_value(&mut self.bake_match_mode, crate::baker::BakeMatchMode::Always, "Always");
-                                        ui.selectable_value(&mut self.bake_match_mode, crate::baker::BakeMatchMode::ByMeshName, "By Mesh Name");
-                                    });
-                            });
-                            if self.bake_match_mode == crate::baker::BakeMatchMode::ByMeshName {
-                                ui.horizontal(|ui| {
-                                    ui.label("Low Suffix:");
-                                    ui.add(egui::TextEdit::singleline(&mut self.bake_low_suffix).desired_width(70.0));
-                                    ui.label("High Suffix:");
-                                    ui.add(egui::TextEdit::singleline(&mut self.bake_high_suffix).desired_width(70.0));
+                                        crate::baker::BakeSettingsTab::AmbientOcclusion => {
+                                            ui.strong(egui::RichText::new("Ambient Occlusion Parameters").color(Color32::from_rgb(220, 225, 235)));
+                                            ui.add_space(4.0);
+
+                                            ui.checkbox(&mut self.bake_opt_ao, "Enable Ambient Occlusion Bake");
+                                            ui.add_space(4.0);
+
+                                            ui.horizontal(|ui| {
+                                                ui.label("Secondary Rays (Samples):");
+                                                egui::ComboBox::from_id_source("bake_ao_samples_combo")
+                                                    .selected_text(format!("{} Rays", self.bake_ao_config.samples))
+                                                    .show_ui(ui, |ui| {
+                                                        ui.selectable_value(&mut self.bake_ao_config.samples, 16, "16 Rays (Fast Draft)");
+                                                        ui.selectable_value(&mut self.bake_ao_config.samples, 32, "32 Rays (Preview)");
+                                                        ui.selectable_value(&mut self.bake_ao_config.samples, 64, "64 Rays (Default)");
+                                                        ui.selectable_value(&mut self.bake_ao_config.samples, 128, "128 Rays (High Quality)");
+                                                        ui.selectable_value(&mut self.bake_ao_config.samples, 256, "256 Rays (Ultra Detail)");
+                                                    });
+                                            });
+                                            ui.horizontal(|ui| {
+                                                ui.label("Fine Sample Count:");
+                                                ui.add(egui::Slider::new(&mut self.bake_ao_config.samples, 8..=512));
+                                            });
+                                            ui.label(egui::RichText::new("Number of Monte Carlo hemisphere occlusion test rays cast per vertex. Higher values yield cleaner, noise-free contact shadows.").small().color(Color32::from_rgb(150, 155, 165)));
+
+                                            ui.add_space(6.0);
+                                            ui.separator();
+                                            ui.horizontal(|ui| {
+                                                ui.label("Max Distance:");
+                                                ui.add(egui::Slider::new(&mut self.bake_ao_config.max_distance, 0.01..=1.5).text("x Bounding Diag"));
+                                            });
+                                            ui.label(egui::RichText::new("Maximum reach of occlusion rays. Smaller values create tight contact shadows; larger values catch broad cavity occlusion.").small().color(Color32::from_rgb(150, 155, 165)));
+
+                                            ui.add_space(6.0);
+                                            ui.horizontal(|ui| {
+                                                ui.label("Ray Bias / Offset:");
+                                                ui.add(egui::Slider::new(&mut self.bake_ao_config.ray_bias, 0.001..=0.05).logarithmic(true));
+                                            });
+                                            ui.label(egui::RichText::new("Surface normal offset distance to prevent self-shadowing on curved facets.").small().color(Color32::from_rgb(150, 155, 165)));
+
+                                            ui.add_space(6.0);
+                                            ui.horizontal(|ui| {
+                                                ui.label("Spread / Attenuation:");
+                                                ui.add(egui::Slider::new(&mut self.bake_ao_config.spread, 0.2..=2.0));
+                                            });
+
+                                            ui.add_space(4.0);
+                                            ui.horizontal(|ui| {
+                                                ui.label("Occlusion Contrast:");
+                                                ui.add(egui::Slider::new(&mut self.bake_ao_config.contrast, 0.1..=3.0));
+                                            });
+                                        }
+
+                                        crate::baker::BakeSettingsTab::Thickness => {
+                                            ui.strong(egui::RichText::new("Thickness Parameters").color(Color32::from_rgb(220, 225, 235)));
+                                            ui.add_space(4.0);
+
+                                            ui.checkbox(&mut self.bake_opt_thickness, "Enable Thickness Bake");
+                                            ui.add_space(4.0);
+
+                                            ui.horizontal(|ui| {
+                                                ui.label("Secondary Rays (Samples):");
+                                                egui::ComboBox::from_id_source("bake_th_samples_combo")
+                                                    .selected_text(format!("{} Rays", self.bake_thickness_config.samples))
+                                                    .show_ui(ui, |ui| {
+                                                        ui.selectable_value(&mut self.bake_thickness_config.samples, 16, "16 Rays (Fast Draft)");
+                                                        ui.selectable_value(&mut self.bake_thickness_config.samples, 32, "32 Rays (Standard)");
+                                                        ui.selectable_value(&mut self.bake_thickness_config.samples, 64, "64 Rays (High Quality)");
+                                                        ui.selectable_value(&mut self.bake_thickness_config.samples, 128, "128 Rays (Ultra Detail)");
+                                                    });
+                                            });
+                                            ui.horizontal(|ui| {
+                                                ui.label("Fine Sample Count:");
+                                                ui.add(egui::Slider::new(&mut self.bake_thickness_config.samples, 8..=256));
+                                            });
+                                            ui.label(egui::RichText::new("Number of inward transmission rays cast into the mesh interior for subsurface light penetration.").small().color(Color32::from_rgb(150, 155, 165)));
+
+                                            ui.add_space(6.0);
+                                            ui.separator();
+                                            ui.horizontal(|ui| {
+                                                ui.label("Max Distance:");
+                                                ui.add(egui::Slider::new(&mut self.bake_thickness_config.max_distance, 0.05..=2.0).text("x Bounding Diag"));
+                                            });
+                                            ui.label(egui::RichText::new("Maximum penetration depth to search for interior surfaces.").small().color(Color32::from_rgb(150, 155, 165)));
+
+                                            ui.add_space(6.0);
+                                            ui.horizontal(|ui| {
+                                                ui.label("Ray Bias / Offset:");
+                                                ui.add(egui::Slider::new(&mut self.bake_thickness_config.ray_bias, 0.001..=0.05).logarithmic(true));
+                                            });
+
+                                            ui.add_space(6.0);
+                                            ui.checkbox(&mut self.bake_opt_thickness_invert, "Invert (White = Thin)")
+                                                .on_hover_text("Invert values so thin translucent areas are white (high transmission) and thick volume areas are black");
+                                        }
+
+                                        crate::baker::BakeSettingsTab::Curvature => {
+                                            ui.strong(egui::RichText::new("Curvature Parameters").color(Color32::from_rgb(220, 225, 235)));
+                                            ui.add_space(4.0);
+
+                                            ui.checkbox(&mut self.bake_opt_curvature, "Enable Curvature Bake");
+                                            ui.add_space(4.0);
+
+                                            ui.horizontal(|ui| {
+                                                ui.label("Curvature Intensity:");
+                                                ui.add(egui::Slider::new(&mut self.bake_curvature_config.intensity, 0.1..=3.0));
+                                            });
+                                            ui.label(egui::RichText::new("Overall strength of convex ridge highlights and concave crevice shadows.").small().color(Color32::from_rgb(150, 155, 165)));
+
+                                            ui.add_space(6.0);
+                                            ui.horizontal(|ui| {
+                                                ui.label("Curvature Contrast:");
+                                                ui.add(egui::Slider::new(&mut self.bake_curvature_config.contrast, 0.1..=3.0));
+                                            });
+                                            ui.label(egui::RichText::new("Expands dynamic range away from neutral 0.5 flat gray.").small().color(Color32::from_rgb(150, 155, 165)));
+
+                                            ui.add_space(6.0);
+                                            ui.separator();
+                                            ui.horizontal(|ui| {
+                                                ui.label("Dihedral Weight (Edges):");
+                                                ui.add(egui::Slider::new(&mut self.bake_curvature_config.dihedral_weight, 0.0..=1.0));
+                                            });
+                                            ui.label(egui::RichText::new("Sensitivity to hard polygonal edge angles and sharp bevels.").small().color(Color32::from_rgb(150, 155, 165)));
+
+                                            ui.add_space(6.0);
+                                            ui.horizontal(|ui| {
+                                                ui.label("Deflection Weight (Smooth):");
+                                                ui.add(egui::Slider::new(&mut self.bake_curvature_config.deflection_weight, 0.0..=1.0));
+                                            });
+                                            ui.label(egui::RichText::new("Sensitivity to gradual surface bending across 1-ring vertex neighbors.").small().color(Color32::from_rgb(150, 155, 165)));
+
+                                            ui.add_space(6.0);
+                                            ui.horizontal(|ui| {
+                                                ui.label("Blur Smoothing Passes:");
+                                                ui.add(egui::Slider::new(&mut self.bake_curvature_config.blur_passes, 0..=4));
+                                            });
+                                            ui.label(egui::RichText::new("Separable Gaussian blur passes to smooth edge gradients and eliminate pixel stepping.").small().color(Color32::from_rgb(150, 155, 165)));
+                                        }
+
+                                        crate::baker::BakeSettingsTab::TangentNormal => {
+                                            ui.strong(egui::RichText::new("Normal (Tangent Space) Parameters").color(Color32::from_rgb(220, 225, 235)));
+                                            ui.add_space(4.0);
+
+                                            ui.checkbox(&mut self.bake_opt_tangent_normal, "Enable Normal Map Bake");
+                                            ui.add_space(4.0);
+
+                                            ui.horizontal(|ui| {
+                                                ui.label("Max Frontal Distance:");
+                                                ui.add(egui::Slider::new(&mut self.bake_frontal, 0.001..=0.5).logarithmic(true));
+                                            });
+                                            ui.horizontal(|ui| {
+                                                ui.label("Max Rear Distance:");
+                                                ui.add(egui::Slider::new(&mut self.bake_rear, 0.001..=0.5).logarithmic(true));
+                                            });
+
+                                            ui.add_space(6.0);
+                                            ui.horizontal(|ui| {
+                                                ui.label("Normal Format:");
+                                                egui::ComboBox::from_id_source("bake_normal_format_combo")
+                                                    .selected_text(if self.bake_normal_config.invert_green { "DirectX (Y- Invert Green)" } else { "OpenGL (Y+ Up)" })
+                                                    .show_ui(ui, |ui| {
+                                                        ui.selectable_value(&mut self.bake_normal_config.invert_green, false, "OpenGL (Y+ Up, Default)");
+                                                        ui.selectable_value(&mut self.bake_normal_config.invert_green, true, "DirectX (Y- Invert Green)");
+                                                    });
+                                            });
+                                            ui.label(egui::RichText::new("OpenGL (Y+) is used by Blender, Godot, and 3D Paintcraft. DirectX (Y-) is used by Unreal Engine and 3ds Max.").small().color(Color32::from_rgb(150, 155, 165)));
+                                        }
+
+                                        crate::baker::BakeSettingsTab::WorldNormal => {
+                                            ui.strong(egui::RichText::new("World Space Normal Parameters").color(Color32::from_rgb(220, 225, 235)));
+                                            ui.add_space(4.0);
+
+                                            ui.checkbox(&mut self.bake_opt_world_normal, "Enable World Space Normal Bake");
+                                            ui.add_space(6.0);
+                                            ui.label(egui::RichText::new("Bakes the 3D surface orientation in world space encoded as RGB values. Used for directional effects (such as top-down snow, dust accumulation, bottom ground splash) and as the guide normal for edge-preserving bilateral denoising.").color(Color32::from_rgb(180, 185, 195)));
+                                        }
+
+                                        crate::baker::BakeSettingsTab::Position => {
+                                            ui.strong(egui::RichText::new("Position (World Space) Parameters").color(Color32::from_rgb(220, 225, 235)));
+                                            ui.add_space(4.0);
+
+                                            ui.checkbox(&mut self.bake_opt_position, "Enable Position Map Bake");
+                                            ui.add_space(4.0);
+
+                                            ui.horizontal(|ui| {
+                                                ui.label("Normalization Mode:");
+                                                egui::ComboBox::from_id_source("bake_pos_mode_combo")
+                                                    .selected_text(match self.bake_position_config.mode {
+                                                        crate::baker::PositionNormalizationMode::BoundingBox => "Bounding Box [0, 1] (Default)",
+                                                        crate::baker::PositionNormalizationMode::WorldUnits => "World Space Coordinates",
+                                                    })
+                                                    .show_ui(ui, |ui| {
+                                                        ui.selectable_value(&mut self.bake_position_config.mode, crate::baker::PositionNormalizationMode::BoundingBox, "Bounding Box [0, 1] (Default)");
+                                                        ui.selectable_value(&mut self.bake_position_config.mode, crate::baker::PositionNormalizationMode::WorldUnits, "World Space Coordinates");
+                                                    });
+                                            });
+                                            ui.label(egui::RichText::new("Encodes 3D vertex positions into RGB color. Bounding Box maps [min, max] to [0, 1], powering 3D Position Gradient generators and height-based masking.").small().color(Color32::from_rgb(150, 155, 165)));
+                                        }
+
+                                        crate::baker::BakeSettingsTab::IdMap => {
+                                            ui.strong(egui::RichText::new("ID Map Parameters").color(Color32::from_rgb(220, 225, 235)));
+                                            ui.add_space(4.0);
+
+                                            ui.checkbox(&mut self.bake_opt_id_map, "Enable ID Map Bake");
+                                            ui.add_space(6.0);
+                                            ui.label(egui::RichText::new("Bakes distinct high-contrast colors per submesh/geometry element. Used with the Color Selection Mask effect to isolate and paint specific parts of complex meshes with one click.").color(Color32::from_rgb(180, 185, 195)));
+                                        }
+                                    }
                                 });
-                            }
                         },
                     );
                 });
@@ -9611,6 +9879,58 @@ mod tests {
         assert_eq!(parametric_cfg.mode.name(), "Parametric Cage (Inflation)");
         assert_eq!(crate::baker::BakeCageMode::ExternalCage.name(), "External Cage Mesh");
         assert_eq!(crate::baker::BakeCageMode::None.name(), "None (Ray Distances)");
+    }
+
+    #[test]
+    fn test_app_baker_map_settings_and_tabs() {
+        let mut tab = crate::baker::BakeSettingsTab::Common;
+        assert_eq!(tab, crate::baker::BakeSettingsTab::Common);
+
+        // Switch through map tabs
+        tab = crate::baker::BakeSettingsTab::AmbientOcclusion;
+        assert_eq!(tab, crate::baker::BakeSettingsTab::AmbientOcclusion);
+
+        // Customize AO samples and reach
+        let mut ao_config = crate::baker::AoBakeConfig::default();
+        assert_eq!(ao_config.samples, 64);
+        ao_config.samples = 128;
+        ao_config.max_distance = 0.5;
+        ao_config.ray_bias = 0.01;
+        ao_config.spread = 1.4;
+        ao_config.contrast = 1.2;
+        assert_eq!(ao_config.samples, 128);
+
+        // Customize Thickness samples and invert
+        let mut th_config = crate::baker::ThicknessBakeConfig::default();
+        assert_eq!(th_config.samples, 32);
+        th_config.samples = 64;
+        th_config.max_distance = 0.8;
+        th_config.ray_bias = 0.006;
+        th_config.invert = true;
+        assert_eq!(th_config.samples, 64);
+        assert!(th_config.invert);
+
+        // Customize Curvature settings
+        let mut curv_config = crate::baker::CurvatureBakeConfig::default();
+        assert_eq!(curv_config.intensity, 1.0);
+        curv_config.intensity = 1.6;
+        curv_config.contrast = 1.3;
+        curv_config.dihedral_weight = 0.45;
+        curv_config.deflection_weight = 0.35;
+        curv_config.blur_passes = 2;
+        assert_eq!(curv_config.blur_passes, 2);
+
+        // Customize Normal Map format
+        let mut normal_config = crate::baker::NormalBakeConfig::default();
+        assert!(!normal_config.invert_green);
+        normal_config.invert_green = true;
+        assert!(normal_config.invert_green);
+
+        // Customize Position mode
+        let mut pos_config = crate::baker::PositionBakeConfig::default();
+        assert_eq!(pos_config.mode, crate::baker::PositionNormalizationMode::BoundingBox);
+        pos_config.mode = crate::baker::PositionNormalizationMode::WorldUnits;
+        assert_eq!(pos_config.mode, crate::baker::PositionNormalizationMode::WorldUnits);
     }
 
     #[test]
