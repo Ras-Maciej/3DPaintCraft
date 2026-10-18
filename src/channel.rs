@@ -16,6 +16,7 @@ pub enum ChannelType {
     Emission,
     Opacity,
     Clearcoat,
+    Anisotropy,
 }
 
 #[allow(dead_code)]
@@ -31,6 +32,7 @@ impl ChannelType {
             Self::Emission => "Emission",
             Self::Opacity => "Opacity",
             Self::Clearcoat => "Clearcoat",
+            Self::Anisotropy => "Anisotropy",
         }
     }
 
@@ -45,6 +47,7 @@ impl ChannelType {
             Self::Emission => "Emis",
             Self::Opacity => "Opac",
             Self::Clearcoat => "Coat",
+            Self::Anisotropy => "Aniso",
         }
     }
 }
@@ -61,6 +64,7 @@ pub struct ChannelFlags {
     pub emission: bool,
     pub opacity: bool,
     pub clearcoat: bool,
+    pub anisotropy: bool,
 }
 
 impl Default for ChannelFlags {
@@ -75,6 +79,7 @@ impl Default for ChannelFlags {
             emission: false,
             opacity: false,
             clearcoat: false,
+            anisotropy: false,
         }
     }
 }
@@ -92,6 +97,7 @@ impl ChannelFlags {
             emission: true,
             opacity: true,
             clearcoat: true,
+            anisotropy: true,
         }
     }
 }

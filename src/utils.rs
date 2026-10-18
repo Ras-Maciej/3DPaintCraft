@@ -346,6 +346,100 @@ impl NoiseGenerator {
         };
         (pit * 0.65 + spots * 0.35 + fbm * 0.15).clamp(0.0, 1.0)
     }
+
+    /// Substance Painter BnW Spots 1: Multi-scale Voronoi cellular spots with smooth luminance gradient falloff
+    pub fn bnw_spots_1_2d(x: f32, y: f32) -> f32 {
+        let (d1, _) = Self::voronoi_2d(x * 5.0, y * 5.0);
+        let (d2, _) = Self::voronoi_2d(x * 12.0 + 3.7, y * 12.0 + 7.1);
+        let v1 = (1.0 - (d1 * 1.6).clamp(0.0, 1.0)).powi(2);
+        let v2 = (1.0 - (d2 * 1.8).clamp(0.0, 1.0)).powi(2);
+        let p = (Self::perlin_2d(x * 6.0, y * 6.0) * 0.5 + 0.5) * 0.25;
+        (v1 * 0.65 + v2 * 0.35 + p).clamp(0.0, 1.0)
+    }
+
+    /// Substance Painter BnW Spots 2: Irregular clustered cellular spots with high contrast and sharp flake borders
+    pub fn bnw_spots_2_2d(x: f32, y: f32) -> f32 {
+        let (d1, d2) = Self::voronoi_2d(x * 8.0, y * 8.0);
+        let edge = (d2 - d1).clamp(0.0, 1.0);
+        let cell_h = Self::hash_2d((x * 8.0).floor() as i32, (y * 8.0).floor() as i32);
+        let s = if cell_h > 0.45 {
+            let r = (1.0 - d1 * 2.2).clamp(0.0, 1.0);
+            r * r * (0.4 + 0.6 * cell_h)
+        } else {
+            0.0
+        };
+        let micro = Self::fbm_2d(x * 24.0, y * 24.0, 2, 2.0, 0.5) * 0.15;
+        (s * 0.85 + (1.0 - edge) * 0.25 + micro).clamp(0.0, 1.0)
+    }
+
+    /// Substance Painter BnW Spots 3: High-density granular pore noise / micro-dots distribution
+    pub fn bnw_spots_3_2d(x: f32, y: f32) -> f32 {
+        let (d1, _) = Self::voronoi_2d(x * 22.0, y * 22.0);
+        let s1 = (1.0 - (d1 * 2.5).clamp(0.0, 1.0)).powi(3);
+        let (d2, _) = Self::voronoi_2d(x * 45.0 + 13.0, y * 45.0 + 29.0);
+        let s2 = (1.0 - (d2 * 3.0).clamp(0.0, 1.0)).powi(2);
+        let grain = Self::value_noise_2d(x * 60.0, y * 60.0) * 0.2;
+        (s1 * 0.55 + s2 * 0.45 + grain).clamp(0.0, 1.0)
+    }
+
+    /// Substance Painter Grunge 004/005: Multi-scale layered domain-warped FBM with high-frequency micro dirt grit
+    pub fn grunge_map_2d(x: f32, y: f32) -> f32 {
+        let warp_x = Self::fbm_2d(x * 2.5, y * 2.5, 3, 2.0, 0.5);
+        let warp_y = Self::fbm_2d(x * 2.5 + 4.3, y * 2.5 + 2.1, 3, 2.0, 0.5);
+        let macro_grunge = Self::fbm_2d(x * 3.0 + warp_x * 2.0, y * 3.0 + warp_y * 2.0, 4, 2.0, 0.5);
+        let micro_grit = Self::fbm_perlin_2d(x * 18.0, y * 18.0, 3, 2.0, 0.5);
+        let spots = Self::splatter_spots_2d(x * 6.0, y * 6.0);
+        (macro_grunge * 0.6 + micro_grit * 0.25 + spots * 0.25).clamp(0.0, 1.0)
+    }
+
+    /// Substance Painter Directional Noise: Stretched anisotropic streaks along an angle with multi-octave FBM
+    pub fn directional_noise_2d(x: f32, y: f32, angle: f32) -> f32 {
+        let cos_a = angle.cos();
+        let sin_a = angle.sin();
+        let rx = x * cos_a - y * sin_a;
+        let ry = x * sin_a + y * cos_a;
+        let wobble = Self::fbm_2d(rx * 0.5, ry * 2.0, 2, 2.0, 0.5) * 0.3;
+        let streak_x = rx * 32.0 + wobble;
+        let streak_y = ry * 0.75;
+        let fbm = Self::fbm_2d(streak_x, streak_y, 4, 2.2, 0.45);
+        let fine = Self::value_noise_2d(streak_x * 2.0, streak_y * 0.5) * 0.3;
+        (fbm * 0.75 + fine).clamp(0.0, 1.0)
+    }
+
+    /// Substance Painter Fractal Clouds: Atmospheric billowy 5-octave turbulence noise
+    pub fn clouds_noise_2d(x: f32, y: f32) -> f32 {
+        let t1 = Self::billow_2d(x * 2.0, y * 2.0, 4, 2.0, 0.5);
+        let t2 = Self::fbm_perlin_2d(x * 5.0, y * 5.0, 3, 2.0, 0.5);
+        let soft = (t1 * 0.7 + t2 * 0.3).powf(0.85);
+        soft.clamp(0.0, 1.0)
+    }
+
+    /// Substance Painter Marble Veins: Domain-warped ridged multifractal veins with sharp dendritic cracks
+    pub fn marble_veins_2d(x: f32, y: f32) -> f32 {
+        let qx = Self::fbm_2d(x * 2.0, y * 2.0, 3, 2.0, 0.5);
+        let qy = Self::fbm_2d(x * 2.0 + 5.2, y * 2.0 + 1.3, 3, 2.0, 0.5);
+        let wx = x * 3.0 + 3.0 * qx;
+        let wy = y * 3.0 + 3.0 * qy;
+        let ridged = Self::ridged_fbm_2d(wx, wy, 4, 2.1, 0.55);
+        let veins = (1.0 - (1.0 - ridged).abs()).powf(2.5);
+        let strata = ((wy * 8.0 + qx * 4.0).sin() * 0.5 + 0.5) * 0.2;
+        (veins * 0.8 + strata).clamp(0.0, 1.0)
+    }
+
+    /// Substance Painter Moisture: Fluid condensation stains with circular meniscus rims
+    pub fn moisture_noise_2d(x: f32, y: f32) -> f32 {
+        let (d1, _) = Self::voronoi_2d(x * 6.0, y * 6.0);
+        let drop = if d1 < 0.28 {
+            let norm_d = d1 / 0.28;
+            let rim = ((norm_d - 0.75).abs() * 4.0).clamp(0.0, 1.0);
+            (1.0 - rim) * 0.85 + (1.0 - norm_d) * 0.35
+        } else {
+            0.0
+        };
+        let splatter = Self::splatter_spots_2d(x * 10.0, y * 10.0) * 0.3;
+        let fbm = Self::fbm_2d(x * 14.0, y * 14.0, 2, 2.0, 0.5) * 0.1;
+        (drop * 0.75 + splatter + fbm).clamp(0.0, 1.0)
+    }
 }
 
 /// Convert sRGB [0.0, 1.0] to Linear RGB [0.0, 1.0]
@@ -428,6 +522,30 @@ mod tests {
 
                 let weave = NoiseGenerator::fabric_weave_2d(x, y);
                 assert!((0.0..=1.0).contains(&weave));
+
+                let spots1 = NoiseGenerator::bnw_spots_1_2d(x, y);
+                assert!((0.0..=1.0).contains(&spots1));
+
+                let spots2 = NoiseGenerator::bnw_spots_2_2d(x, y);
+                assert!((0.0..=1.0).contains(&spots2));
+
+                let spots3 = NoiseGenerator::bnw_spots_3_2d(x, y);
+                assert!((0.0..=1.0).contains(&spots3));
+
+                let grunge = NoiseGenerator::grunge_map_2d(x, y);
+                assert!((0.0..=1.0).contains(&grunge));
+
+                let dir_n = NoiseGenerator::directional_noise_2d(x, y, 0.785);
+                assert!((0.0..=1.0).contains(&dir_n));
+
+                let clouds = NoiseGenerator::clouds_noise_2d(x, y);
+                assert!((0.0..=1.0).contains(&clouds));
+
+                let marble = NoiseGenerator::marble_veins_2d(x, y);
+                assert!((0.0..=1.0).contains(&marble));
+
+                let moisture = NoiseGenerator::moisture_noise_2d(x, y);
+                assert!((0.0..=1.0).contains(&moisture));
             }
         }
     }

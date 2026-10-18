@@ -135,6 +135,14 @@ pub enum ProceduralGenerator {
     RustPits,
     MetalEdgeHighlight,
     GroundSplash,
+    BnWSpots1,
+    BnWSpots2,
+    BnWSpots3,
+    GrungeMap,
+    DirectionalNoise,
+    Clouds,
+    MarbleVeins,
+    MoistureNoise,
 }
 
 impl ProceduralGenerator {
@@ -165,6 +173,14 @@ impl ProceduralGenerator {
             Self::RustPits => "Rust Pits & Oxidation Craters",
             Self::MetalEdgeHighlight => "Metal Edge Highlight (Polished)",
             Self::GroundSplash => "Ground Dirt & Mud Splash",
+            Self::BnWSpots1 => "BnW Spots 1 (Substance)",
+            Self::BnWSpots2 => "BnW Spots 2 (Substance)",
+            Self::BnWSpots3 => "BnW Spots 3 (Substance)",
+            Self::GrungeMap => "Grunge Map (Substance)",
+            Self::DirectionalNoise => "Directional Noise / Brushed",
+            Self::Clouds => "Fractal Clouds (Substance)",
+            Self::MarbleVeins => "Marble Veins / Strata",
+            Self::MoistureNoise => "Moisture / Condensation",
         }
     }
 
@@ -194,6 +210,14 @@ impl ProceduralGenerator {
             Self::RustPits,
             Self::MetalEdgeHighlight,
             Self::GroundSplash,
+            Self::BnWSpots1,
+            Self::BnWSpots2,
+            Self::BnWSpots3,
+            Self::GrungeMap,
+            Self::DirectionalNoise,
+            Self::Clouds,
+            Self::MarbleVeins,
+            Self::MoistureNoise,
         ]
     }
 }
@@ -266,6 +290,8 @@ pub struct Layer {
     pub fill_emissive: Vec4,
     pub fill_opacity: f32,
     pub fill_clearcoat: f32,
+    pub fill_anisotropy: f32,
+    pub fill_anisotropy_angle: f32,
     pub fill_generator: ProceduralGenerator,
     pub generator_scale: f32,
     pub generator_contrast: f32,
@@ -300,6 +326,8 @@ pub struct Layer {
     pub emissive_buf: RgbaBuffer,
     pub opacity_buf: ScalarBuffer,
     pub clearcoat_buf: ScalarBuffer,
+    pub anisotropy_buf: ScalarBuffer,
+    pub anisotropy_angle_buf: ScalarBuffer,
 
     // Optional layer mask & Non-destructive mask effect stack
     pub has_mask: bool,
@@ -342,6 +370,8 @@ impl Layer {
             fill_emissive: Vec4::new(0.0, 0.0, 0.0, 1.0),
             fill_opacity: 1.0,
             fill_clearcoat: 0.0,
+            fill_anisotropy: 0.0,
+            fill_anisotropy_angle: 0.0,
             fill_generator: ProceduralGenerator::None,
             generator_scale: 8.0,
             generator_contrast: 1.0,
@@ -367,6 +397,8 @@ impl Layer {
             emissive_buf: RgbaBuffer::new(width, height, Vec4::ZERO),
             opacity_buf: ScalarBuffer::new(width, height, 1.0),
             clearcoat_buf: ScalarBuffer::new(width, height, 0.0),
+            anisotropy_buf: ScalarBuffer::new(width, height, 0.0),
+            anisotropy_angle_buf: ScalarBuffer::new(width, height, 0.0),
 
             has_mask: false,
             mask_buf: ScalarBuffer::new(width, height, 1.0),
@@ -414,6 +446,7 @@ impl Layer {
             emission: false,
             opacity: false,
             clearcoat: false,
+            anisotropy: false,
         };
         layer.evaluate_fill(None);
         layer.mark_dirty_full();
@@ -438,6 +471,8 @@ impl Layer {
         self.emissive_buf.resize_bilinear(new_width, new_height);
         self.opacity_buf.resize_bilinear(new_width, new_height);
         self.clearcoat_buf.resize_bilinear(new_width, new_height);
+        self.anisotropy_buf.resize_bilinear(new_width, new_height);
+        self.anisotropy_angle_buf.resize_bilinear(new_width, new_height);
         self.mask_buf.resize_bilinear(new_width, new_height);
         self.mark_dirty_full();
     }
@@ -463,6 +498,8 @@ impl Layer {
             fill_emissive: self.fill_emissive,
             fill_opacity: self.fill_opacity,
             fill_clearcoat: self.fill_clearcoat,
+            fill_anisotropy: self.fill_anisotropy,
+            fill_anisotropy_angle: self.fill_anisotropy_angle,
             fill_generator: self.fill_generator,
             generator_scale: self.generator_scale,
             generator_contrast: self.generator_contrast,
@@ -488,6 +525,8 @@ impl Layer {
             emissive_buf: self.emissive_buf.clone(),
             opacity_buf: self.opacity_buf.clone(),
             clearcoat_buf: self.clearcoat_buf.clone(),
+            anisotropy_buf: self.anisotropy_buf.clone(),
+            anisotropy_angle_buf: self.anisotropy_angle_buf.clone(),
 
             has_mask: self.has_mask,
             mask_buf: self.mask_buf.clone(),
@@ -512,6 +551,8 @@ impl Layer {
         self.emissive_buf = snapshot.emissive_buf.clone();
         self.opacity_buf = snapshot.opacity_buf.clone();
         self.clearcoat_buf = snapshot.clearcoat_buf.clone();
+        self.anisotropy_buf = snapshot.anisotropy_buf.clone();
+        self.anisotropy_angle_buf = snapshot.anisotropy_angle_buf.clone();
         self.mask_buf = snapshot.mask_buf.clone();
         self.has_mask = snapshot.has_mask;
         self.mask_inverted = snapshot.mask_inverted;
@@ -842,6 +883,30 @@ impl Layer {
                         let fy = (v * sc - (v * sc).floor()) - 0.5;
                         let dist = (fx * fx + fy * fy).sqrt();
                         if dist < 0.32 { 0.0 } else { 1.0 }
+                    }
+                    ProceduralGenerator::BnWSpots1 => {
+                        NoiseGenerator::bnw_spots_1_2d(u * sc, v * sc)
+                    }
+                    ProceduralGenerator::BnWSpots2 => {
+                        NoiseGenerator::bnw_spots_2_2d(u * sc, v * sc)
+                    }
+                    ProceduralGenerator::BnWSpots3 => {
+                        NoiseGenerator::bnw_spots_3_2d(u * sc, v * sc)
+                    }
+                    ProceduralGenerator::GrungeMap => {
+                        NoiseGenerator::grunge_map_2d(u * sc, v * sc)
+                    }
+                    ProceduralGenerator::DirectionalNoise => {
+                        NoiseGenerator::directional_noise_2d(u * sc, v * sc, 0.785)
+                    }
+                    ProceduralGenerator::Clouds => {
+                        NoiseGenerator::clouds_noise_2d(u * sc, v * sc)
+                    }
+                    ProceduralGenerator::MarbleVeins => {
+                        NoiseGenerator::marble_veins_2d(u * sc, v * sc)
+                    }
+                    ProceduralGenerator::MoistureNoise => {
+                        NoiseGenerator::moisture_noise_2d(u * sc, v * sc)
                     }
                 };
                 let with_balance = (raw_val + (balance - 0.5) * 1.5).clamp(0.0, 1.0);
@@ -1510,6 +1575,38 @@ impl Layer {
                             let is_hole = dist < 0.32;
                             (if is_hole { 0.1 } else { 0.9 }, if is_hole { 0.1 } else { 0.55 })
                         }
+                        ProceduralGenerator::BnWSpots1 => {
+                            let n = NoiseGenerator::bnw_spots_1_2d(ru * self.generator_scale, rv * self.generator_scale);
+                            (n, n)
+                        }
+                        ProceduralGenerator::BnWSpots2 => {
+                            let n = NoiseGenerator::bnw_spots_2_2d(ru * self.generator_scale, rv * self.generator_scale);
+                            (n, n)
+                        }
+                        ProceduralGenerator::BnWSpots3 => {
+                            let n = NoiseGenerator::bnw_spots_3_2d(ru * self.generator_scale, rv * self.generator_scale);
+                            (n, n)
+                        }
+                        ProceduralGenerator::GrungeMap => {
+                            let n = NoiseGenerator::grunge_map_2d(ru * self.generator_scale, rv * self.generator_scale);
+                            (n, n)
+                        }
+                        ProceduralGenerator::DirectionalNoise => {
+                            let n = NoiseGenerator::directional_noise_2d(ru * self.generator_scale, rv * self.generator_scale, 0.785);
+                            (n, n)
+                        }
+                        ProceduralGenerator::Clouds => {
+                            let n = NoiseGenerator::clouds_noise_2d(ru * self.generator_scale, rv * self.generator_scale);
+                            (n, n)
+                        }
+                        ProceduralGenerator::MarbleVeins => {
+                            let n = NoiseGenerator::marble_veins_2d(ru * self.generator_scale, rv * self.generator_scale);
+                            (n, n)
+                        }
+                        ProceduralGenerator::MoistureNoise => {
+                            let n = NoiseGenerator::moisture_noise_2d(ru * self.generator_scale, rv * self.generator_scale);
+                            (n, n)
+                        }
                     }
                 };
 
@@ -1600,6 +1697,8 @@ impl Layer {
                 self.emissive_buf.set_pixel(x, y, final_emissive);
                 self.opacity_buf.set_pixel(x, y, final_opacity);
                 self.clearcoat_buf.set_pixel(x, y, self.fill_clearcoat);
+                self.anisotropy_buf.set_pixel(x, y, self.fill_anisotropy);
+                self.anisotropy_angle_buf.set_pixel(x, y, self.fill_anisotropy_angle);
             }
         }
 
@@ -1709,6 +1808,8 @@ pub struct CompositeTextureSet {
     pub emissive: RgbaBuffer,
     pub opacity: ScalarBuffer,
     pub clearcoat: ScalarBuffer,
+    pub anisotropy: ScalarBuffer,
+    pub anisotropy_angle: ScalarBuffer,
 }
 
 impl CompositeTextureSet {
@@ -1725,6 +1826,8 @@ impl CompositeTextureSet {
             emissive: RgbaBuffer::new(width, height, Vec4::ZERO),
             opacity: ScalarBuffer::new(width, height, 1.0),
             clearcoat: ScalarBuffer::new(width, height, 0.0),
+            anisotropy: ScalarBuffer::new(width, height, 0.0),
+            anisotropy_angle: ScalarBuffer::new(width, height, 0.0),
         }
     }
 }
@@ -1749,6 +1852,8 @@ impl CompositeTextureSet {
         let emissive_data = &mut self.emissive.data;
         let opacity_data = &mut self.opacity.data;
         let clearcoat_data = &mut self.clearcoat.data;
+        let aniso_data = &mut self.anisotropy.data;
+        let aniso_ang_data = &mut self.anisotropy_angle.data;
 
         base_col_data.par_chunks_mut(w)
             .zip(rough_data.par_chunks_mut(w))
@@ -1759,8 +1864,10 @@ impl CompositeTextureSet {
             .zip(emissive_data.par_chunks_mut(w))
             .zip(opacity_data.par_chunks_mut(w))
             .zip(clearcoat_data.par_chunks_mut(w))
+            .zip(aniso_data.par_chunks_mut(w))
+            .zip(aniso_ang_data.par_chunks_mut(w))
             .enumerate()
-            .for_each(|(y, ((((((((base_row, rough_row), metal_row), norm_row), height_row), ao_row), emissive_row), opacity_row), clearcoat_row))| {
+            .for_each(|(y, ((((((((((base_row, rough_row), metal_row), norm_row), height_row), ao_row), emissive_row), opacity_row), clearcoat_row), aniso_row), aniso_ang_row))| {
                 for x in 0..w {
                     base_row[x] = glam::Vec4::new(0.5, 0.5, 0.55, 1.0);
                     rough_row[x] = 0.5;
@@ -1771,6 +1878,8 @@ impl CompositeTextureSet {
                     emissive_row[x] = glam::Vec4::ZERO;
                     opacity_row[x] = 1.0;
                     clearcoat_row[x] = 0.0;
+                    aniso_row[x] = 0.0;
+                    aniso_ang_row[x] = 0.0;
                 }
 
                 for layer in layers {
@@ -1857,6 +1966,13 @@ impl CompositeTextureSet {
                         if flags.clearcoat {
                             let src = layer.clearcoat_buf.data[idx2];
                             clearcoat_row[x] = mode.blend_scalar(clearcoat_row[x], src, effective_opacity);
+                        }
+
+                        if flags.anisotropy {
+                            let src_a = layer.anisotropy_buf.data[idx2];
+                            aniso_row[x] = mode.blend_scalar(aniso_row[x], src_a, effective_opacity);
+                            let src_ang = layer.anisotropy_angle_buf.data[idx2];
+                            aniso_ang_row[x] = mode.blend_scalar(aniso_ang_row[x], src_ang, effective_opacity);
                         }
                     }
                 }

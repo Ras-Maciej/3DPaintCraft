@@ -524,6 +524,9 @@ impl PaintcraftApp {
         let height_map = &self.project.composite_textures.height_map;
         let emis_map = &self.project.composite_textures.emissive;
         let opac_map = &self.project.composite_textures.opacity;
+        let cc_map = &self.project.composite_textures.clearcoat;
+        let aniso_map = &self.project.composite_textures.anisotropy;
+        let aniso_ang_map = &self.project.composite_textures.anisotropy_angle;
         let ao_map = self.project.ao_map.as_ref();
         let curv_map = self.project.curvature_map.as_ref();
         let pos_map = self.project.position_map.as_ref();
@@ -617,6 +620,15 @@ impl PaintcraftApp {
                         let o = (opac_map.get_pixel(x as u32, y as u32).clamp(0.0, 1.0) * 255.0) as u8;
                         row[idx] = o; row[idx + 1] = o; row[idx + 2] = o; row[idx + 3] = 255;
                     }
+                    ViewportChannelMode::Clearcoat => {
+                        let c = (cc_map.get_pixel(x as u32, y as u32).clamp(0.0, 1.0) * 255.0) as u8;
+                        row[idx] = c; row[idx + 1] = c; row[idx + 2] = c; row[idx + 3] = 255;
+                    }
+                    ViewportChannelMode::Anisotropy => {
+                        let a = ((aniso_map.get_pixel(x as u32, y as u32) * 0.5 + 0.5).clamp(0.0, 1.0) * 255.0) as u8;
+                        let ang = (aniso_ang_map.get_pixel(x as u32, y as u32).clamp(0.0, 1.0) * 255.0) as u8;
+                        row[idx] = a; row[idx + 1] = ang; row[idx + 2] = 0; row[idx + 3] = 255;
+                    }
                 }
             }
         });
@@ -680,6 +692,8 @@ impl PaintcraftApp {
             ViewportChannelMode::AmbientOcclusion,
             ViewportChannelMode::Emissive,
             ViewportChannelMode::Opacity,
+            ViewportChannelMode::Clearcoat,
+            ViewportChannelMode::Anisotropy,
         ];
         let cur_idx = order.iter().position(|&m| m == self.view_mode).unwrap_or(0);
         let next_idx = if forward {
@@ -1453,6 +1467,8 @@ impl eframe::App for PaintcraftApp {
                                 ui.selectable_value(&mut self.view_mode, ViewportChannelMode::Thickness, "Thickness");
                                 ui.selectable_value(&mut self.view_mode, ViewportChannelMode::Emissive, "Emissive");
                                 ui.selectable_value(&mut self.view_mode, ViewportChannelMode::Opacity, "Opacity");
+                                ui.selectable_value(&mut self.view_mode, ViewportChannelMode::Clearcoat, "Clearcoat");
+                                ui.selectable_value(&mut self.view_mode, ViewportChannelMode::Anisotropy, "Anisotropy");
                             });
                         ui.label("Channel:");
 
@@ -2571,7 +2587,7 @@ impl eframe::App for PaintcraftApp {
                                                         });
                                                         ui.horizontal(|ui| {
                                                             ui.label("Scale:");
-                                                            if ui.add(egui::Slider::new(scale, 0.5..=64.0)).changed() {
+                                                            if ui.add(egui::Slider::new(scale, 0.5..=64.0).clamp_to_range(false)).changed() {
                                                                 prop_changed = true;
                                                             }
                                                         });
@@ -2712,7 +2728,7 @@ impl eframe::App for PaintcraftApp {
                                     ui.collapsing("Transformation (UV Wrap)", |ui| {
                                         ui.horizontal(|ui| {
                                             ui.label("UV Scale / Tiling:");
-                                            if ui.add(egui::Slider::new(&mut layer.uv_scale, 0.2..=32.0).logarithmic(true)).changed() {
+                                            if ui.add(egui::Slider::new(&mut layer.uv_scale, 0.2..=32.0).logarithmic(true).clamp_to_range(false)).changed() {
                                                 prop_changed = true;
                                             }
                                         });
@@ -2768,6 +2784,10 @@ impl eframe::App for PaintcraftApp {
                                             }
                                             if channel_pill_button(ui, "coat", layer.channel_flags.clearcoat).clicked() {
                                                 layer.channel_flags.clearcoat = !layer.channel_flags.clearcoat;
+                                                prop_changed = true;
+                                            }
+                                            if channel_pill_button(ui, "aniso", layer.channel_flags.anisotropy).clicked() {
+                                                layer.channel_flags.anisotropy = !layer.channel_flags.anisotropy;
                                                 prop_changed = true;
                                             }
                                         });
@@ -2957,6 +2977,21 @@ impl eframe::App for PaintcraftApp {
                                                 }
                                             });
                                         }
+
+                                        if layer.channel_flags.anisotropy {
+                                            ui.horizontal(|ui| {
+                                                ui.label("Anisotropy Strength:");
+                                                if ui.add(egui::Slider::new(&mut layer.fill_anisotropy, -1.0..=1.0)).changed() {
+                                                    prop_changed = true;
+                                                }
+                                            });
+                                            ui.horizontal(|ui| {
+                                                ui.label("Anisotropy Angle:");
+                                                if ui.add(egui::Slider::new(&mut layer.fill_anisotropy_angle, 0.0..=1.0)).changed() {
+                                                    prop_changed = true;
+                                                }
+                                            });
+                                        }
                                     });
     
                                     // 4. Procedural Generator / Texture Pattern
@@ -2984,7 +3019,7 @@ impl eframe::App for PaintcraftApp {
                                         if layer.fill_generator != ProceduralGenerator::None {
                                             ui.horizontal(|ui| {
                                                 ui.label("Pattern Scale:");
-                                                if ui.add(egui::Slider::new(&mut layer.generator_scale, 1.0..=64.0)).changed() {
+                                                if ui.add(egui::Slider::new(&mut layer.generator_scale, 1.0..=64.0).clamp_to_range(false)).changed() {
                                                     prop_changed = true;
                                                 }
                                             });
@@ -3107,6 +3142,9 @@ impl eframe::App for PaintcraftApp {
                                             if channel_pill_button(ui, "coat", self.brush_engine.settings.channels.clearcoat).clicked() {
                                                 self.brush_engine.settings.channels.clearcoat = !self.brush_engine.settings.channels.clearcoat;
                                             }
+                                            if channel_pill_button(ui, "aniso", self.brush_engine.settings.channels.anisotropy).clicked() {
+                                                self.brush_engine.settings.channels.anisotropy = !self.brush_engine.settings.channels.anisotropy;
+                                            }
                                         });
     
                                         if self.brush_engine.settings.channels.base_color {
@@ -3172,6 +3210,10 @@ impl eframe::App for PaintcraftApp {
                                         }
                                         if self.brush_engine.settings.channels.clearcoat {
                                             ui.add(egui::Slider::new(&mut self.brush_engine.settings.paint_clearcoat, 0.0..=1.0).text("Clearcoat"));
+                                        }
+                                        if self.brush_engine.settings.channels.anisotropy {
+                                            ui.add(egui::Slider::new(&mut self.brush_engine.settings.paint_anisotropy, -1.0..=1.0).text("Anisotropy"));
+                                            ui.add(egui::Slider::new(&mut self.brush_engine.settings.paint_anisotropy_angle, 0.0..=1.0).text("Aniso Angle"));
                                         }
                                     });
                                 }
@@ -4371,6 +4413,8 @@ impl PaintcraftApp {
                 ViewportChannelMode::Height => 10,
                 ViewportChannelMode::Emissive => 11,
                 ViewportChannelMode::Opacity => 12,
+                ViewportChannelMode::Clearcoat => 13,
+                ViewportChannelMode::Anisotropy => 14,
             };
             let t_rnd = std::time::Instant::now();
             wgpu.render(vp, eye_vec4, self.renderer.hdri.rotation.to_radians(), mode_u32, self.bg_blur, self.bg_opacity, &frame_settings, self.renderer.show_wireframe);

@@ -268,6 +268,8 @@ pub struct WgpuViewport {
     tex_environment: wgpu::Texture,
     tex_emissive: wgpu::Texture,
     tex_opacity: wgpu::Texture,
+    tex_clearcoat: wgpu::Texture,
+    tex_anisotropy: wgpu::Texture,
     
     material_bind_group_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
@@ -402,6 +404,16 @@ impl WgpuViewport {
                     ty: wgpu::BindingType::Texture { multisampled: false, view_dimension: wgpu::TextureViewDimension::D2, sample_type: wgpu::TextureSampleType::Float { filterable: true } },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry { // Clearcoat
+                    binding: 10, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture { multisampled: false, view_dimension: wgpu::TextureViewDimension::D2, sample_type: wgpu::TextureSampleType::Float { filterable: true } },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry { // Anisotropy
+                    binding: 11, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture { multisampled: false, view_dimension: wgpu::TextureViewDimension::D2, sample_type: wgpu::TextureSampleType::Float { filterable: true } },
+                    count: None,
+                },
             ],
         });
 
@@ -414,6 +426,8 @@ impl WgpuViewport {
         let tex_baked_ao = device.create_texture(&wgpu::TextureDescriptor { label: Some("Tex BAO"), size: tex_size, mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::Rgba32Float, usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST, view_formats: &[] });
         let tex_emissive = device.create_texture(&wgpu::TextureDescriptor { label: Some("Tex Emis"), size: tex_size, mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::Rgba32Float, usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST, view_formats: &[] });
         let tex_opacity = device.create_texture(&wgpu::TextureDescriptor { label: Some("Tex Opac"), size: tex_size, mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::R32Float, usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST, view_formats: &[] });
+        let tex_clearcoat = device.create_texture(&wgpu::TextureDescriptor { label: Some("Tex Clearcoat"), size: tex_size, mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::R32Float, usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST, view_formats: &[] });
+        let tex_anisotropy = device.create_texture(&wgpu::TextureDescriptor { label: Some("Tex Aniso"), size: tex_size, mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::Rgba32Float, usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST, view_formats: &[] });
         
         let env_size = wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 };
         let tex_environment = device.create_texture(&wgpu::TextureDescriptor { label: Some("Tex Env"), size: env_size, mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::Rgba32Float, usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST, view_formats: &[] });
@@ -450,6 +464,8 @@ impl WgpuViewport {
                 wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&tex_baked_ao.create_view(&Default::default())) },
                 wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::TextureView(&tex_emissive.create_view(&Default::default())) },
                 wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(&tex_opacity.create_view(&Default::default())) },
+                wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::TextureView(&tex_clearcoat.create_view(&Default::default())) },
+                wgpu::BindGroupEntry { binding: 11, resource: wgpu::BindingResource::TextureView(&tex_anisotropy.create_view(&Default::default())) },
             ],
         });
 
@@ -833,6 +849,8 @@ impl WgpuViewport {
             tex_environment,
             tex_emissive,
             tex_opacity,
+            tex_clearcoat,
+            tex_anisotropy,
             material_bind_group_layout,
             sampler,
             pbr_tex_width: 512,
@@ -866,6 +884,8 @@ impl WgpuViewport {
                 wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&self.tex_baked_ao.create_view(&Default::default())) },
                 wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::TextureView(&self.tex_emissive.create_view(&Default::default())) },
                 wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(&self.tex_opacity.create_view(&Default::default())) },
+                wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::TextureView(&self.tex_clearcoat.create_view(&Default::default())) },
+                wgpu::BindGroupEntry { binding: 11, resource: wgpu::BindingResource::TextureView(&self.tex_anisotropy.create_view(&Default::default())) },
             ],
         });
     }
@@ -884,6 +904,8 @@ impl WgpuViewport {
         self.tex_metallic = self.device.create_texture(&wgpu::TextureDescriptor { label: Some("Tex M"), size: tex_size, mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::R32Float, usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST, view_formats: &[] });
         self.tex_emissive = self.device.create_texture(&wgpu::TextureDescriptor { label: Some("Tex Emis"), size: tex_size, mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::Rgba32Float, usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST, view_formats: &[] });
         self.tex_opacity = self.device.create_texture(&wgpu::TextureDescriptor { label: Some("Tex Opac"), size: tex_size, mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::R32Float, usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST, view_formats: &[] });
+        self.tex_clearcoat = self.device.create_texture(&wgpu::TextureDescriptor { label: Some("Tex Clearcoat"), size: tex_size, mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::R32Float, usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST, view_formats: &[] });
+        self.tex_anisotropy = self.device.create_texture(&wgpu::TextureDescriptor { label: Some("Tex Aniso"), size: tex_size, mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::Rgba32Float, usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST, view_formats: &[] });
 
         self.rebuild_material_bind_group();
         self.gpu_brush.resize(w, h);
@@ -996,6 +1018,34 @@ impl WgpuViewport {
                 wgpu::ImageCopyTexture { texture: &self.tex_opacity, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
                 bytemuck::cast_slice(&project.composite_textures.opacity.data),
                 wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(w * 4), rows_per_image: Some(h) },
+                size,
+            );
+        }
+        if project.composite_textures.clearcoat.width == w && project.composite_textures.clearcoat.height == h {
+            self.queue.write_texture(
+                wgpu::ImageCopyTexture { texture: &self.tex_clearcoat, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                bytemuck::cast_slice(&project.composite_textures.clearcoat.data),
+                wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(w * 4), rows_per_image: Some(h) },
+                size,
+            );
+        }
+        if project.composite_textures.anisotropy.width == w && project.composite_textures.anisotropy.height == h {
+            let total = (w * h) as usize;
+            let mut packed_aniso = vec![0.0f32; total * 4];
+            let aniso_data = &project.composite_textures.anisotropy.data;
+            let angle_data = &project.composite_textures.anisotropy_angle.data;
+            for i in 0..total {
+                let a = if i < aniso_data.len() { aniso_data[i] } else { 0.0 };
+                let ang = if i < angle_data.len() { angle_data[i] } else { 0.0 };
+                packed_aniso[i * 4 + 0] = a;
+                packed_aniso[i * 4 + 1] = ang;
+                packed_aniso[i * 4 + 2] = 0.0;
+                packed_aniso[i * 4 + 3] = 1.0;
+            }
+            self.queue.write_texture(
+                wgpu::ImageCopyTexture { texture: &self.tex_anisotropy, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                bytemuck::cast_slice(&packed_aniso),
+                wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(w * 16), rows_per_image: Some(h) },
                 size,
             );
         }

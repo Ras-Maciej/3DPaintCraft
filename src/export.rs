@@ -199,6 +199,8 @@ impl TextureExporter {
                     ("AO", &textures.ao),
                     ("Opacity", &textures.opacity),
                     ("Clearcoat", &textures.clearcoat),
+                    ("Anisotropy", &textures.anisotropy),
+                    ("AnisotropyAngle", &textures.anisotropy_angle),
                 ];
                 for (suffix, buf) in scalar_maps {
                     let path = output_dir.join(format!("{}_{}.png", clean_name, suffix));

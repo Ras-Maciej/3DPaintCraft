@@ -152,150 +152,7 @@ pub fn get_shelf_assets() -> Vec<ShelfAsset> {
         },
 
         // --- 2. SMART MATERIALS ---
-        ShelfAsset {
-            id: "worn_painted_steel",
-            name: "Worn Painted Steel",
-            category: ShelfCategory::SmartMaterials,
-            preview_color: [230, 180, 20],
-            preview_metallic: 0.6,
-            preview_roughness: 0.38,
-            description: "Industrial yellow paint with primer and exposed chipped steel edges",
-        },
-        ShelfAsset {
-            id: "rusted_cast_iron",
-            name: "Rusted Cast Iron",
-            category: ShelfCategory::SmartMaterials,
-            preview_color: [85, 45, 30],
-            preview_metallic: 0.4,
-            preview_roughness: 0.88,
-            description: "Heavy cast iron with deep pitted cavity rust and surface runoff leaks",
-        },
-        ShelfAsset {
-            id: "smart_rusted_green",
-            name: "Rusted Army Metal",
-            category: ShelfCategory::SmartMaterials,
-            preview_color: [70, 85, 55],
-            preview_metallic: 0.1,
-            preview_roughness: 0.85,
-            description: "Deep pitted rust base with weathered chipped green topcoat",
-        },
-        ShelfAsset {
-            id: "bronze_statue_patina",
-            name: "Ancient Bronze & Patina",
-            category: ShelfCategory::SmartMaterials,
-            preview_color: [55, 175, 150],
-            preview_metallic: 0.75,
-            preview_roughness: 0.45,
-            description: "Polished antique bronze with oxidized crevices and verdigris turquoise patina",
-        },
-        ShelfAsset {
-            id: "scifi_carbon_armor",
-            name: "Sci-Fi Composite Armor",
-            category: ShelfCategory::SmartMaterials,
-            preview_color: [210, 220, 230],
-            preview_metallic: 0.5,
-            preview_roughness: 0.28,
-            description: "Titanium chassis with chipped ceramic white armor and cyan conduits",
-        },
-        ShelfAsset {
-            id: "desert_tactical_camo",
-            name: "Desert Tactical Cerakote",
-            category: ShelfCategory::SmartMaterials,
-            preview_color: [190, 165, 120],
-            preview_metallic: 0.2,
-            preview_roughness: 0.72,
-            description: "Anodized metal with desert tan cerakote, camo pattern, and cavity sand",
-        },
-        ShelfAsset {
-            id: "dirty_machine_plastic",
-            name: "Dirty Machine Plastic",
-            category: ShelfCategory::SmartMaterials,
-            preview_color: [200, 195, 185],
-            preview_metallic: 0.0,
-            preview_roughness: 0.40,
-            description: "White ABS plastic with grime and oil gathered in crevices via AO",
-        },
-        ShelfAsset {
-            id: "gloss_car_paint",
-            name: "Gloss Crimson Car Paint",
-            category: ShelfCategory::SmartMaterials,
-            preview_color: [195, 20, 20],
-            preview_metallic: 0.5,
-            preview_roughness: 0.12,
-            description: "Metallic flake crimson with high-gloss clearcoat and road grime splatter",
-        },
-        ShelfAsset {
-            id: "weathered_wood",
-            name: "Weathered Cedar Wood",
-            category: ShelfCategory::SmartMaterials,
-            preview_color: [125, 105, 80],
-            preview_metallic: 0.0,
-            preview_roughness: 0.70,
-            description: "Aged timber grain with tactile grooves and crevice dirt",
-        },
-        ShelfAsset {
-            id: "tinted_glass_visor",
-            name: "Tinted Glass / Visor",
-            category: ShelfCategory::SmartMaterials,
-            preview_color: [60, 110, 160],
-            preview_metallic: 0.0,
-            preview_roughness: 0.06,
-            description: "Semi-transparent amber/blue tinted visor with smooth specular sheen, smudges, and scuffs",
-        },
-        ShelfAsset {
-            id: "perforated_steel_grate",
-            name: "Perforated Steel Grate",
-            category: ShelfCategory::SmartMaterials,
-            preview_color: [180, 185, 190],
-            preview_metallic: 0.95,
-            preview_roughness: 0.34,
-            description: "PBR steel grating with cutout hexagonal holes, chipped edge highlights, and crevice dirt",
-        },
-        ShelfAsset {
-            id: "torn_camo_fabric",
-            name: "Torn Camo Fabric",
-            category: ShelfCategory::SmartMaterials,
-            preview_color: [95, 105, 70],
-            preview_metallic: 0.0,
-            preview_roughness: 0.85,
-            description: "Military camouflage cloth with ragged frayed tear holes cut out via opacity noise",
-        },
-        ShelfAsset {
-            id: "wire_chainlink_fence",
-            name: "Wire Chainlink Fence",
-            category: ShelfCategory::SmartMaterials,
-            preview_color: [200, 205, 210],
-            preview_metallic: 0.92,
-            preview_roughness: 0.36,
-            description: "Galvanized zinc steel diamond mesh fence with cut-out openings",
-        },
-        ShelfAsset {
-            id: "emerald_crystal_gem",
-            name: "Emerald Crystal Gem",
-            category: ShelfCategory::SmartMaterials,
-            preview_color: [20, 195, 95],
-            preview_metallic: 0.0,
-            preview_roughness: 0.04,
-            description: "Refractive translucent green beryl crystal with physical IOR 1.58 Snell refraction and facet highlights",
-        },
-        ShelfAsset {
-            id: "amber_fossil_resin",
-            name: "Amber Fossil Resin",
-            category: ShelfCategory::SmartMaterials,
-            preview_color: [235, 145, 20],
-            preview_metallic: 0.0,
-            preview_roughness: 0.06,
-            description: "Translucent golden amber resin (IOR 1.54) with Beer-Lambert optical depth and internal inclusions",
-        },
-        ShelfAsset {
-            id: "frosted_ice_glass",
-            name: "Frosted Glacial Ice",
-            category: ShelfCategory::SmartMaterials,
-            preview_color: [180, 230, 245],
-            preview_metallic: 0.0,
-            preview_roughness: 0.38,
-            description: "Sub-zero glacial ice (IOR 1.31) with frosted microscopic microfacet transmission and fracture veins",
-        },
+        // Built-in smart materials removed to allow pure user-defined smart materials
 
         // --- 3. SMART MASKS ---
         ShelfAsset {
@@ -662,6 +519,78 @@ pub fn get_shelf_assets() -> Vec<ShelfAsset> {
             preview_roughness: 0.5,
             description: "Regular aligned grid of circular dot perforations",
         },
+        ShelfAsset {
+            id: "gen_bnw_spots_1",
+            name: "BnW Spots 1 (Substance)",
+            category: ShelfCategory::Generators,
+            preview_color: [125, 125, 130],
+            preview_metallic: 0.0,
+            preview_roughness: 0.5,
+            description: "Multi-scale Voronoi cellular spots with smooth luminance gradient falloff",
+        },
+        ShelfAsset {
+            id: "gen_bnw_spots_2",
+            name: "BnW Spots 2 (Substance)",
+            category: ShelfCategory::Generators,
+            preview_color: [140, 135, 130],
+            preview_metallic: 0.0,
+            preview_roughness: 0.5,
+            description: "Irregular clustered cellular spots with high contrast and sharp flake borders",
+        },
+        ShelfAsset {
+            id: "gen_bnw_spots_3",
+            name: "BnW Spots 3 (Substance)",
+            category: ShelfCategory::Generators,
+            preview_color: [150, 150, 150],
+            preview_metallic: 0.0,
+            preview_roughness: 0.5,
+            description: "High-density granular pore noise and micro-dots distribution",
+        },
+        ShelfAsset {
+            id: "gen_grunge_map",
+            name: "Grunge Map (Substance)",
+            category: ShelfCategory::Generators,
+            preview_color: [110, 105, 100],
+            preview_metallic: 0.0,
+            preview_roughness: 0.65,
+            description: "Substance Grunge 004/005 style domain-warped dirt grit and cavity smudges",
+        },
+        ShelfAsset {
+            id: "gen_directional_noise",
+            name: "Directional Noise / Brushed",
+            category: ShelfCategory::Generators,
+            preview_color: [130, 130, 135],
+            preview_metallic: 0.0,
+            preview_roughness: 0.5,
+            description: "Stretched anisotropic streaks and fibers for brushed metal and directional textures",
+        },
+        ShelfAsset {
+            id: "gen_clouds",
+            name: "Fractal Clouds (Substance)",
+            category: ShelfCategory::Generators,
+            preview_color: [160, 170, 180],
+            preview_metallic: 0.0,
+            preview_roughness: 0.45,
+            description: "Substance Fractal Clouds atmospheric billowy turbulence noise",
+        },
+        ShelfAsset {
+            id: "gen_marble_veins",
+            name: "Marble Veins / Strata",
+            category: ShelfCategory::Generators,
+            preview_color: [180, 180, 185],
+            preview_metallic: 0.0,
+            preview_roughness: 0.35,
+            description: "Domain-warped ridged multifractal veins with sharp dendritic cracks and strata",
+        },
+        ShelfAsset {
+            id: "gen_moisture",
+            name: "Moisture / Condensation",
+            category: ShelfCategory::Generators,
+            preview_color: [100, 130, 160],
+            preview_metallic: 0.0,
+            preview_roughness: 0.25,
+            description: "Fluid condensation stains with circular meniscus rims and water droplets",
+        },
     ]
 }
 
@@ -675,13 +604,11 @@ mod tests {
         assert!(!assets.is_empty(), "Shelf asset library should not be empty");
 
         let has_materials = assets.iter().any(|a| a.category == ShelfCategory::Materials);
-        let has_smart_materials = assets.iter().any(|a| a.category == ShelfCategory::SmartMaterials);
         let has_smart_masks = assets.iter().any(|a| a.category == ShelfCategory::SmartMasks);
         let has_generators = assets.iter().any(|a| a.category == ShelfCategory::Generators);
         let has_alphas = assets.iter().any(|a| a.category == ShelfCategory::Alphas);
 
         assert!(has_materials, "Should have material assets");
-        assert!(has_smart_materials, "Should have smart material assets");
         assert!(has_smart_masks, "Should have smart mask assets");
         assert!(has_generators, "Should have procedural generator noise assets");
         assert!(has_alphas, "Should have brush alpha assets");
@@ -709,6 +636,14 @@ mod tests {
         assert!(generator_ids.contains(&"gen_position"));
         assert!(generator_ids.contains(&"gen_checker"));
         assert!(generator_ids.contains(&"gen_bricks"));
+        assert!(generator_ids.contains(&"gen_bnw_spots_1"));
+        assert!(generator_ids.contains(&"gen_bnw_spots_2"));
+        assert!(generator_ids.contains(&"gen_bnw_spots_3"));
+        assert!(generator_ids.contains(&"gen_grunge_map"));
+        assert!(generator_ids.contains(&"gen_directional_noise"));
+        assert!(generator_ids.contains(&"gen_clouds"));
+        assert!(generator_ids.contains(&"gen_marble_veins"));
+        assert!(generator_ids.contains(&"gen_moisture"));
     }
 }
 

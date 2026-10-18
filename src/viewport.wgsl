@@ -53,6 +53,8 @@ struct CameraUniform {
 @group(1) @binding(7) var tex_baked_ao: texture_2d<f32>;
 @group(1) @binding(8) var tex_emissive: texture_2d<f32>;
 @group(1) @binding(9) var tex_opacity: texture_2d<f32>;
+@group(1) @binding(10) var tex_clearcoat: texture_2d<f32>;
+@group(1) @binding(11) var tex_anisotropy: texture_2d<f32>;
 
 @vertex
 fn vs_main(model: VertexInput) -> VertexOutput {
@@ -70,6 +72,13 @@ const PI: f32 = 3.14159265359;
 fn ndf_ggx(n_dot_h: f32, alpha2: f32) -> f32 {
     let denom = (n_dot_h * n_dot_h * (alpha2 - 1.0) + 1.0);
     return alpha2 / (PI * denom * denom);
+}
+
+fn ndf_ggx_aniso(t_dot_h: f32, b_dot_h: f32, n_dot_h: f32, ax: f32, ay: f32) -> f32 {
+    let term_x = t_dot_h / max(ax, 0.001);
+    let term_y = b_dot_h / max(ay, 0.001);
+    let d = term_x * term_x + term_y * term_y + n_dot_h * n_dot_h;
+    return 1.0 / (PI * ax * ay * max(d * d, 1e-7));
 }
 
 // Lazarov / Karis Split-Sum Environment BRDF Polynomial Approximation
@@ -206,6 +215,10 @@ fn fs_main(@builtin(front_facing) is_front: bool, in: VertexOutput) -> FragmentO
     let ao         = pow(max(baked_maps.r, 0.001), max(camera.ao_intensity, 0.01));
     let curvature  = baked_maps.g;
     let thickness  = baked_maps.b;
+    let clearcoat  = clamp(textureSample(tex_clearcoat, samp_linear, in.uv).r, 0.0, 1.0);
+    let aniso_sample = textureSample(tex_anisotropy, samp_linear, in.uv);
+    let anisotropy = clamp(aniso_sample.r, -1.0, 1.0);
+    let aniso_angle = aniso_sample.g;
 
     // TBN Mapping with robust degenerate tangent handling & Gram-Schmidt orthogonalization
     let n_len = length(in.world_normal);
@@ -232,6 +245,25 @@ fn fs_main(@builtin(front_facing) is_front: bool, in: VertexOutput) -> FragmentO
     let v = normalize(camera.eye_pos.xyz - in.world_pos);
     let n_dot_v = max(dot(world_normal, v), 1e-4);
 
+    // Anisotropic tangent frame rotation & parameters
+    let theta = aniso_angle * 2.0 * PI;
+    let cos_th = cos(theta);
+    let sin_th = sin(theta);
+    let aniso_t = normalize(t * cos_th + b * sin_th);
+    let aniso_b = normalize(cross(world_normal, aniso_t));
+
+    let aniso_abs = abs(anisotropy);
+    let aspect = sqrt(max(1.0 - 0.9 * aniso_abs, 0.001));
+    var ax = roughness / aspect;
+    var ay = roughness * aspect;
+    if anisotropy < 0.0 {
+        let tmp = ax;
+        ax = ay;
+        ay = tmp;
+    }
+    let ax2 = max(ax * ax, 0.001);
+    let ay2 = max(ay * ay, 0.001);
+
     // Substance 3D Painter Standard Metallic/Roughness PBR with Physical Index of Refraction (IOR)
     let ior = max(camera.ior, 1.0);
     let ior_f0 = pow((ior - 1.0) / (ior + 1.0), 2.0);
@@ -255,7 +287,12 @@ fn fs_main(@builtin(front_facing) is_front: bool, in: VertexOutput) -> FragmentO
     let reflection_dir = reflect(-v, world_normal);
     // Microfacet dominant specular reflection vector bends towards macroscopic surface normal as roughness increases
     let dominant_spec_dir = normalize(mix(reflection_dir, world_normal, roughness * roughness * 0.85));
-    let rotated_refl = rot_mat * dominant_spec_dir;
+
+    let aniso_dir = select(aniso_b, aniso_t, anisotropy >= 0.0);
+    let aniso_tangent_refl = cross(cross(aniso_dir, v), aniso_dir);
+    let aniso_refl = normalize(mix(dominant_spec_dir, aniso_tangent_refl, aniso_abs * (1.0 - roughness * 0.5)));
+    let effective_refl = select(dominant_spec_dir, aniso_refl, aniso_abs > 0.01);
+    let rotated_refl = rot_mat * effective_refl;
     let env_uv_spec = dir_to_equirectangular(rotated_refl);
     
     let rotated_norm = rot_mat * world_normal;
@@ -290,7 +327,11 @@ fn fs_main(@builtin(front_facing) is_front: bool, in: VertexOutput) -> FragmentO
     
     let alpha = max(roughness * roughness, 0.001);
     let alpha2 = alpha * alpha;
-    let d = ndf_ggx(n_dot_h, alpha2);
+    let d_iso = ndf_ggx(n_dot_h, alpha2);
+    let t_dot_h = dot(aniso_t, h);
+    let b_dot_h = dot(aniso_b, h);
+    let d_aniso = ndf_ggx_aniso(t_dot_h, b_dot_h, n_dot_h, ax2, ay2);
+    let d = mix(d_iso, d_aniso, aniso_abs);
     
     // Smith GGX direct light shadowing
     let k = (roughness + 1.0) * (roughness + 1.0) / 8.0;
@@ -343,7 +384,34 @@ fn fs_main(@builtin(front_facing) is_front: bool, in: VertexOutput) -> FragmentO
     // For dielectrics, refracted transmission replaces diffuse scattering as transmission increases
     let total_diffuse = ibl_diffuse + dir_diffuse;
     let final_diffuse = mix(total_diffuse, transmitted_color, transmission);
-    let lit_color = ibl_specular + dir_specular + final_diffuse + emissive_radiance;
+
+    // Clearcoat Specular Layer
+    var clearcoat_specular = vec3<f32>(0.0);
+    if clearcoat > 0.001 {
+        let cc_normal = n; // macroscopic surface normal
+        let cc_n_dot_l = max(dot(cc_normal, light_dir), 0.0);
+        let cc_n_dot_v = max(dot(cc_normal, v), 1e-4);
+        let cc_n_dot_h = max(dot(cc_normal, h), 0.0);
+        let cc_v_dot_h = max(dot(v, h), 0.0);
+
+        let cc_alpha = 0.08 * 0.08;
+        let cc_d = ndf_ggx(cc_n_dot_h, cc_alpha * cc_alpha);
+        let cc_f = 0.04 + (1.0 - 0.04) * pow(clamp(1.0 - cc_v_dot_h, 0.0, 1.0), 5.0);
+        let cc_v_term = 0.25 / max(cc_v_dot_h * cc_v_dot_h, 1e-4);
+        let cc_spec_brdf = cc_d * cc_f * cc_v_term;
+        let dir_clearcoat = sun_color * cc_spec_brdf * cc_n_dot_l * camera.sun_intensity;
+
+        let cc_refl = rot_mat * reflect(-v, cc_normal);
+        let cc_env_uv = dir_to_equirectangular(cc_refl);
+        let cc_ibl_spec = textureSampleLevel(tex_environment, samp_linear, cc_env_uv, 0.5).rgb;
+        let cc_env_f = 0.04 + (1.0 - 0.04) * pow(clamp(1.0 - cc_n_dot_v, 0.0, 1.0), 5.0);
+        let ibl_clearcoat = cc_ibl_spec * cc_env_f * camera.env_intensity;
+
+        clearcoat_specular = (dir_clearcoat + ibl_clearcoat) * clearcoat;
+    }
+
+    let base_lit = ibl_specular + dir_specular + final_diffuse;
+    let lit_color = base_lit * (1.0 - clearcoat * 0.04) + clearcoat_specular + emissive_radiance;
     
     // Tone mapping modes
     var final_color = lit_color;
@@ -414,6 +482,14 @@ fn fs_main(@builtin(front_facing) is_front: bool, in: VertexOutput) -> FragmentO
     } else if camera.view_mode == 12u {
         // Opacity channel
         out.color = vec4<f32>(vec3<f32>(opacity), 1.0);
+        return out;
+    } else if camera.view_mode == 13u {
+        // Clearcoat channel
+        out.color = vec4<f32>(vec3<f32>(clearcoat), 1.0);
+        return out;
+    } else if camera.view_mode == 14u {
+        // Anisotropy channel: R = strength (-1..1 mapped to 0..1), G = angle (0..1)
+        out.color = vec4<f32>(anisotropy * 0.5 + 0.5, aniso_angle, 0.0, 1.0);
         return out;
     }
 

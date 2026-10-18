@@ -111,6 +111,8 @@ pub struct BrushSettings {
     pub paint_emissive: Vec4,
     pub paint_opacity: f32,
     pub paint_clearcoat: f32,
+    pub paint_anisotropy: f32,
+    pub paint_anisotropy_angle: f32,
 
     // Polygon Fill Settings
     pub polygon_fill_mode: PolygonFillMode,
@@ -151,6 +153,8 @@ impl Default for BrushSettings {
             paint_emissive: Vec4::new(0.0, 0.0, 0.0, 1.0),
             paint_opacity: 1.0,
             paint_clearcoat: 0.0,
+            paint_anisotropy: 0.0,
+            paint_anisotropy_angle: 0.0,
             polygon_fill_mode: PolygonFillMode::Triangle,
             polygon_fill_value: 1.0,
             mask_paint_value: 1.0,
@@ -393,6 +397,9 @@ impl BrushEngine {
         let h_target = self.settings.paint_height;
         let emis_target = self.settings.paint_emissive;
         let opac_target = self.settings.paint_opacity;
+        let clearcoat_target = self.settings.paint_clearcoat;
+        let aniso_target = self.settings.paint_anisotropy;
+        let aniso_ang_target = self.settings.paint_anisotropy_angle;
         
         let do_color = self.settings.channels.base_color;
         let do_r = self.settings.channels.roughness;
@@ -400,6 +407,8 @@ impl BrushEngine {
         let do_h = self.settings.channels.height;
         let do_emis = self.settings.channels.emission;
         let do_opac = self.settings.channels.opacity;
+        let do_clearcoat = self.settings.channels.clearcoat;
+        let do_aniso = self.settings.channels.anisotropy;
 
         let rect_min_x = min_x as u32;
         let rect_max_x = max_x as u32;
@@ -454,6 +463,12 @@ impl BrushEngine {
                         *layer.emissive_buf.data.get_unchecked_mut(idx) = cur_emis * (1.0 - weight);
                         let cur_opac = *layer.opacity_buf.data.get_unchecked(idx);
                         *layer.opacity_buf.data.get_unchecked_mut(idx) = cur_opac * (1.0 - weight) + 1.0 * weight;
+                        let cur_cc = *layer.clearcoat_buf.data.get_unchecked(idx);
+                        *layer.clearcoat_buf.data.get_unchecked_mut(idx) = cur_cc * (1.0 - weight);
+                        let cur_aniso = *layer.anisotropy_buf.data.get_unchecked(idx);
+                        *layer.anisotropy_buf.data.get_unchecked_mut(idx) = cur_aniso * (1.0 - weight);
+                        let cur_ang = *layer.anisotropy_angle_buf.data.get_unchecked(idx);
+                        *layer.anisotropy_angle_buf.data.get_unchecked_mut(idx) = cur_ang * (1.0 - weight);
                     } else {
                         let cur_col = *layer.base_color_buf.data.get_unchecked(idx);
                         let alpha = (cur_col.w + weight * (1.0 - cur_col.w)).clamp(0.0, 1.0);
@@ -486,6 +501,16 @@ impl BrushEngine {
                         if do_opac {
                             let cur_o = *layer.opacity_buf.data.get_unchecked(idx);
                             *layer.opacity_buf.data.get_unchecked_mut(idx) = cur_o * (1.0 - weight) + opac_target * weight;
+                        }
+                        if do_clearcoat {
+                            let cur_c = *layer.clearcoat_buf.data.get_unchecked(idx);
+                            *layer.clearcoat_buf.data.get_unchecked_mut(idx) = cur_c * (1.0 - weight) + clearcoat_target * weight;
+                        }
+                        if do_aniso {
+                            let cur_a = *layer.anisotropy_buf.data.get_unchecked(idx);
+                            *layer.anisotropy_buf.data.get_unchecked_mut(idx) = cur_a * (1.0 - weight) + aniso_target * weight;
+                            let cur_ang = *layer.anisotropy_angle_buf.data.get_unchecked(idx);
+                            *layer.anisotropy_angle_buf.data.get_unchecked_mut(idx) = cur_ang * (1.0 - weight) + aniso_ang_target * weight;
                         }
                     }
                 }
@@ -571,6 +596,9 @@ pub fn barycentric_3d(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> (f32, f32, f32) {
         let h_target = self.settings.paint_height;
         let emis_target = self.settings.paint_emissive;
         let opac_target = self.settings.paint_opacity;
+        let clearcoat_target = self.settings.paint_clearcoat;
+        let aniso_target = self.settings.paint_anisotropy;
+        let aniso_ang_target = self.settings.paint_anisotropy_angle;
 
         let do_color = self.settings.channels.base_color;
         let do_r = self.settings.channels.roughness;
@@ -578,6 +606,8 @@ pub fn barycentric_3d(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> (f32, f32, f32) {
         let do_h = self.settings.channels.height;
         let do_emis = self.settings.channels.emission;
         let do_opac = self.settings.channels.opacity;
+        let do_clearcoat = self.settings.channels.clearcoat;
+        let do_aniso = self.settings.channels.anisotropy;
 
         let mut overall_min_x = i32::MAX;
         let mut overall_min_y = i32::MAX;
@@ -750,6 +780,12 @@ pub fn barycentric_3d(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> (f32, f32, f32) {
                                     *layer.emissive_buf.data.get_unchecked_mut(idx) = cur_emis * (1.0 - weight);
                                     let cur_opac = *layer.opacity_buf.data.get_unchecked(idx);
                                     *layer.opacity_buf.data.get_unchecked_mut(idx) = cur_opac * (1.0 - weight) + 1.0 * weight;
+                                    let cur_c = *layer.clearcoat_buf.data.get_unchecked(idx);
+                                    *layer.clearcoat_buf.data.get_unchecked_mut(idx) = cur_c * (1.0 - weight);
+                                    let cur_a = *layer.anisotropy_buf.data.get_unchecked(idx);
+                                    *layer.anisotropy_buf.data.get_unchecked_mut(idx) = cur_a * (1.0 - weight);
+                                    let cur_ang = *layer.anisotropy_angle_buf.data.get_unchecked(idx);
+                                    *layer.anisotropy_angle_buf.data.get_unchecked_mut(idx) = cur_ang * (1.0 - weight);
                                 } else {
                                     let cur_col = *layer.base_color_buf.data.get_unchecked(idx);
                                     let alpha = (cur_col.w + weight * (1.0 - cur_col.w)).clamp(0.0, 1.0);
@@ -780,6 +816,16 @@ pub fn barycentric_3d(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> (f32, f32, f32) {
                                     if do_opac {
                                         let cur_o = *layer.opacity_buf.data.get_unchecked(idx);
                                         *layer.opacity_buf.data.get_unchecked_mut(idx) = cur_o * (1.0 - weight) + opac_target * weight;
+                                    }
+                                    if do_clearcoat {
+                                        let cur_c = *layer.clearcoat_buf.data.get_unchecked(idx);
+                                        *layer.clearcoat_buf.data.get_unchecked_mut(idx) = cur_c * (1.0 - weight) + clearcoat_target * weight;
+                                    }
+                                    if do_aniso {
+                                        let cur_a = *layer.anisotropy_buf.data.get_unchecked(idx);
+                                        *layer.anisotropy_buf.data.get_unchecked_mut(idx) = cur_a * (1.0 - weight) + aniso_target * weight;
+                                        let cur_ang = *layer.anisotropy_angle_buf.data.get_unchecked(idx);
+                                        *layer.anisotropy_angle_buf.data.get_unchecked_mut(idx) = cur_ang * (1.0 - weight) + aniso_ang_target * weight;
                                     }
                                 }
                             }
@@ -1204,5 +1250,43 @@ mod tests {
         let pts_offset = engine.get_symmetry_points(hit_pos, hit_norm);
         // mirrored x around 1.0: 2 * 1.0 - 1.5 = 0.5
         assert_eq!(pts_offset[1].0.x, 0.5);
+    }
+
+    #[test]
+    fn test_clearcoat_and_anisotropy_painting_and_erasing() {
+        let mut engine = BrushEngine::new();
+        let mut layer = Layer::new_paint_layer(1, "CoatAnisoTest".to_string(), 64, 64);
+
+        engine.settings.radius = 8.0;
+        engine.settings.flow = 1.0;
+        engine.settings.opacity = 1.0;
+        engine.settings.hardness = 1.0;
+        engine.settings.channels.clearcoat = true;
+        engine.settings.channels.anisotropy = true;
+        engine.settings.paint_clearcoat = 0.95;
+        engine.settings.paint_anisotropy = -0.75;
+        engine.settings.paint_anisotropy_angle = 0.25;
+        engine.update_cache();
+
+        // 1. Paint stamp in 2D
+        engine.stamp_uv(&mut layer, glam::Vec2::new(0.5, 0.5));
+        let painted_cc = layer.clearcoat_buf.get_pixel(32, 32);
+        let painted_aniso = layer.anisotropy_buf.get_pixel(32, 32);
+        let painted_ang = layer.anisotropy_angle_buf.get_pixel(32, 32);
+
+        assert!(painted_cc > 0.8, "Clearcoat should be painted, got {}", painted_cc);
+        assert!(painted_aniso < -0.6, "Anisotropy should be stamped to -0.75, got {}", painted_aniso);
+        assert!((painted_ang - 0.25).abs() < 0.05, "Anisotropy angle should be stamped to 0.25, got {}", painted_ang);
+
+        // 2. Erase stamp in 2D
+        engine.settings.mode = ToolMode::Eraser;
+        engine.stamp_uv(&mut layer, glam::Vec2::new(0.5, 0.5));
+        let erased_cc = layer.clearcoat_buf.get_pixel(32, 32);
+        let erased_aniso = layer.anisotropy_buf.get_pixel(32, 32);
+        let erased_ang = layer.anisotropy_angle_buf.get_pixel(32, 32);
+
+        assert!(erased_cc < 0.15, "Clearcoat should be erased towards 0.0, got {}", erased_cc);
+        assert!(erased_aniso.abs() < 0.15, "Anisotropy should be erased towards 0.0, got {}", erased_aniso);
+        assert!(erased_ang < 0.15, "Anisotropy angle should be erased towards 0.0, got {}", erased_ang);
     }
 }

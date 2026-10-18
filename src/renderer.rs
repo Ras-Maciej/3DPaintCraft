@@ -23,6 +23,8 @@ pub enum ViewportChannelMode {
     Thickness,        // Thickness Map
     Emissive,         // Emissive / Self-Illumination
     Opacity,          // Opacity / Alpha Cutout
+    Clearcoat,        // Clearcoat Specular Layer
+    Anisotropy,       // Anisotropic Specular Map & Direction
 }
 
 impl ViewportChannelMode {
@@ -41,6 +43,8 @@ impl ViewportChannelMode {
             Self::Thickness => "Thickness",
             Self::Emissive => "Emissive",
             Self::Opacity => "Opacity",
+            Self::Clearcoat => "Clearcoat",
+            Self::Anisotropy => "Anisotropy",
         }
     }
 }
@@ -358,9 +362,15 @@ impl ViewportRenderer {
                         }
                         ViewportChannelMode::Emissive => emissive,
                         ViewportChannelMode::Opacity => Vec3::splat(opacity),
+                        ViewportChannelMode::Clearcoat => Vec3::splat(textures.clearcoat.sample_bilinear(uv)),
+                        ViewportChannelMode::Anisotropy => {
+                            let aniso = textures.anisotropy.sample_bilinear(uv);
+                            let angle = textures.anisotropy_angle.sample_bilinear(uv);
+                            Vec3::new(aniso, angle, 0.0)
+                        }
                         ViewportChannelMode::Material => {
                             // Cook-Torrance GGX PBR with selectable HDRI IBL
-                            let lit = self.evaluate_pbr_hdri(
+                            let mut lit = self.evaluate_pbr_hdri(
                                 world_pos,
                                 perturbed_normal,
                                 eye,
@@ -369,6 +379,27 @@ impl ViewportRenderer {
                                 metallic,
                                 ao,
                             );
+                            let clearcoat = textures.clearcoat.sample_bilinear(uv);
+                            if clearcoat > 1e-3 {
+                                let v = (eye - world_pos).normalize_or_zero();
+                                let l = self.hdri.key_light_direction();
+                                let h = (v + l).normalize_or_zero();
+                                let n_dot_h = geo_normal.dot(h).max(0.0);
+                                let v_dot_h = v.dot(h).max(0.0);
+                                let n_dot_l = geo_normal.dot(l).max(0.0);
+                                let n_dot_v = geo_normal.dot(v).max(1e-4);
+                                let f_cc = 0.04 + (1.0 - 0.04) * (1.0 - v_dot_h).powi(5);
+                                let alpha_cc = 0.08 * 0.08;
+                                let denom_term = (n_dot_h * n_dot_h) * (alpha_cc * alpha_cc - 1.0) + 1.0;
+                                let d_cc = (alpha_cc * alpha_cc) / (std::f32::consts::PI * denom_term * denom_term).max(1e-10);
+                                let k_cc = 0.25;
+                                let g_cc = (n_dot_l / (n_dot_l * (1.0 - k_cc) + k_cc)) * (n_dot_v / (n_dot_v * (1.0 - k_cc) + k_cc));
+                                let cc_spec = (d_cc * g_cc * f_cc) / (4.0 * n_dot_l * n_dot_v).max(1e-4);
+                                let direct_cc = cc_spec * self.hdri.key_light_color() * n_dot_l;
+                                let r_cc = (2.0 * geo_normal.dot(v) * geo_normal - v).normalize_or_zero();
+                                let ibl_cc = self.hdri.evaluate_specular(r_cc, 0.08) * f_cc;
+                                lit = lit * (1.0 - clearcoat * 0.04) + (direct_cc + ibl_cc) * clearcoat;
+                            }
                             lit + emissive * 2.0
                         }
                     };
