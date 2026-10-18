@@ -26,6 +26,7 @@ mod utils;
 mod updater;
 pub mod icons;
 pub mod color_picker;
+pub mod path_tracer;
 
 use app::PaintcraftApp;
 use export::ExportPreset;

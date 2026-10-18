@@ -3,6 +3,53 @@ use crate::channel::{RgbaBuffer, ScalarBuffer};
 use crate::mesh::{Mesh, Ray};
 use glam::{Vec2, Vec3, Vec4};
 use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BakeMatchMode {
+    Always,
+    ByMeshName,
+}
+
+impl BakeMatchMode {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Always => "Always",
+            Self::ByMeshName => "By Mesh Name",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BakeMatchConfig {
+    pub mode: BakeMatchMode,
+    pub low_suffix: String,
+    pub high_suffix: String,
+}
+
+impl Default for BakeMatchConfig {
+    fn default() -> Self {
+        Self {
+            mode: BakeMatchMode::Always,
+            low_suffix: "_low".to_string(),
+            high_suffix: "_high".to_string(),
+        }
+    }
+}
+
+pub fn strip_mesh_suffix(name: &str, suffix: &str) -> String {
+    let lower_name = name.to_lowercase();
+    let lower_suffix = suffix.to_lowercase();
+    if !lower_suffix.is_empty() && lower_name.ends_with(&lower_suffix) {
+        name[..name.len() - suffix.len()].trim_end_matches('_').to_string()
+    } else if lower_name.ends_with("_low") {
+        name[..name.len() - 4].trim_end_matches('_').to_string()
+    } else if lower_name.ends_with("_high") {
+        name[..name.len() - 5].trim_end_matches('_').to_string()
+    } else {
+        name.to_string()
+    }
+}
 
 struct SpatialHash {
     cell_size: f32,
@@ -76,7 +123,14 @@ impl SpatialHash {
     if t > 1e-5 { Some((t, u, v)) } else { None }
 }
 
-    pub fn query_ray_closest(&self, origin: Vec3, dir: Vec3, max_dist: f32, mesh: &Mesh) -> Option<(f32, Vec3)> {
+    pub fn query_ray_closest_filtered(
+        &self,
+        origin: Vec3,
+        dir: Vec3,
+        max_dist: f32,
+        mesh: &Mesh,
+        allowed_triangles: Option<&HashSet<usize>>,
+    ) -> Option<(f32, Vec3)> {
         let end_pos = origin + dir * max_dist;
         let r_min = origin.min(end_pos);
         let r_max = origin.max(end_pos);
@@ -100,6 +154,11 @@ impl SpatialHash {
                 for x in min_coord[0]..=max_coord[0] {
                     if let Some(triangles) = self.cells.get(&[x, y, z]) {
                         for &t in triangles {
+                            if let Some(allowed) = allowed_triangles {
+                                if !allowed.contains(&t) {
+                                    continue;
+                                }
+                            }
                             let i0 = mesh.indices[t * 3] as usize;
                             let i1 = mesh.indices[t * 3 + 1] as usize;
                             let i2 = mesh.indices[t * 3 + 2] as usize;
@@ -124,6 +183,11 @@ impl SpatialHash {
         }
         
         best_normal.map(|n| (closest_t, n))
+    }
+
+    #[allow(dead_code)]
+    pub fn query_ray_closest(&self, origin: Vec3, dir: Vec3, max_dist: f32, mesh: &Mesh) -> Option<(f32, Vec3)> {
+        self.query_ray_closest_filtered(origin, dir, max_dist, mesh, None)
     }
 }
 
@@ -449,15 +513,29 @@ impl Baker {
 
     /// Bake Tangent Space Normal map
     pub fn bake_tangent_normals(mesh: &Mesh, high_poly: Option<&Mesh>, frontal_dist: f32, rear_dist: f32, width: u32, height: u32) -> RgbaBuffer {
+        Self::bake_tangent_normals_with_match(mesh, high_poly, frontal_dist, rear_dist, width, height, &BakeMatchConfig::default())
+    }
+
+    /// Bake Tangent Space Normal map with customizable matching mode (_low / _high)
+    pub fn bake_tangent_normals_with_match(
+        mesh: &Mesh,
+        high_poly: Option<&Mesh>,
+        frontal_dist: f32,
+        rear_dist: f32,
+        width: u32,
+        height: u32,
+        match_config: &BakeMatchConfig,
+    ) -> RgbaBuffer {
         let mut buffer = RgbaBuffer::new(width, height, Vec4::new(0.5, 0.5, 1.0, 1.0));
         let tri_count = mesh.indices.len() / 3;
         
         let spatial_hash = high_poly.map(|hp| SpatialHash::new(hp));
 
-        // Generate position, normal and tangent raster buffers for Low Poly
+        // Generate position, normal, tangent and triangle index raster buffers for Low Poly
         let mut pos_buf = vec![None; (width * height) as usize];
         let mut norm_buf = vec![None; (width * height) as usize];
         let mut tan_buf = vec![None; (width * height) as usize];
+        let mut tri_buf = vec![None; (width * height) as usize];
         
         for t in 0..tri_count {
             let i0 = mesh.indices[t * 3] as usize;
@@ -472,6 +550,8 @@ impl Baker {
                 &mut pos_buf,
                 &mut norm_buf,
                 &mut tan_buf,
+                Some(&mut tri_buf),
+                t,
                 width,
                 height,
                 v0.uv, v1.uv, v2.uv,
@@ -480,6 +560,35 @@ impl Baker {
                 v0.tangent, v1.tangent, v2.tangent,
             );
         }
+
+        // Precompute allowed high-poly triangle sets per low-poly submesh for ByMeshName matching
+        let submesh_allowed_hp_tris: Vec<Option<HashSet<usize>>> = if match_config.mode == BakeMatchMode::ByMeshName {
+            if let Some(hp) = high_poly {
+                mesh.submeshes.iter().map(|sm_low| {
+                    let base_low = strip_mesh_suffix(&sm_low.material_name, &match_config.low_suffix);
+                    let mut matched_tris = HashSet::new();
+                    for sm_hp in &hp.submeshes {
+                        let base_hp = strip_mesh_suffix(&sm_hp.material_name, &match_config.high_suffix);
+                        if base_low.eq_ignore_ascii_case(&base_hp) {
+                            let tri_start = sm_hp.start_index / 3;
+                            let tri_count = sm_hp.index_count / 3;
+                            for t in tri_start..(tri_start + tri_count) {
+                                matched_tris.insert(t);
+                            }
+                        }
+                    }
+                    if !matched_tris.is_empty() {
+                        Some(matched_tris)
+                    } else {
+                        None
+                    }
+                }).collect()
+            } else {
+                vec![None; mesh.submeshes.len()]
+            }
+        } else {
+            vec![None; mesh.submeshes.len()]
+        };
 
         // Raycast
         for y in 0..height {
@@ -492,7 +601,15 @@ impl Baker {
                             let ray_orig = pos + norm * frontal_dist;
                             let ray_dir = -norm;
                             
-                            if let Some((_, hp_norm)) = hash.query_ray_closest(ray_orig, ray_dir, frontal_dist + rear_dist, hp) {
+                            let allowed = if match_config.mode == BakeMatchMode::ByMeshName {
+                                tri_buf[idx].and_then(|t| mesh.submesh_index_for_triangle(t))
+                                    .and_then(|sm_idx| submesh_allowed_hp_tris.get(sm_idx))
+                                    .and_then(|opt| opt.as_ref())
+                            } else {
+                                None
+                            };
+
+                            if let Some((_, hp_norm)) = hash.query_ray_closest_filtered(ray_orig, ray_dir, frontal_dist + rear_dist, hp, allowed) {
                                 if let Some(tan) = tan_buf[idx] {
                                     let n = norm.normalize_or_zero();
                                     let t = (tan.truncate() - n * n.dot(tan.truncate())).normalize_or_zero();
@@ -546,6 +663,8 @@ impl Baker {
                 &mut pos_buf,
                 &mut norm_buf,
                 &mut tan_buf,
+                None,
+                t,
                 width,
                 height,
                 v0.uv, v1.uv, v2.uv,
@@ -591,6 +710,8 @@ impl Baker {
                 &mut pos_buf,
                 &mut norm_buf,
                 &mut tan_buf,
+                None,
+                t,
                 width,
                 height,
                 v0.uv, v1.uv, v2.uv,
@@ -611,6 +732,119 @@ impl Baker {
         }
 
         Self::dilate_rgba(&mut buffer, &pos_buf);
+        buffer
+    }
+
+    /// Bake discrete Color ID map for sub-mesh / material selection masks
+    pub fn bake_id_map(mesh: &Mesh, width: u32, height: u32) -> RgbaBuffer {
+        let mut buffer = RgbaBuffer::new(width, height, Vec4::new(0.0, 0.0, 0.0, 1.0));
+        let tri_count = mesh.indices.len() / 3;
+        if tri_count == 0 {
+            return buffer;
+        }
+
+        const PALETTE: [Vec3; 16] = [
+            Vec3::new(0.95, 0.15, 0.15), // Red
+            Vec3::new(0.15, 0.85, 0.15), // Green
+            Vec3::new(0.15, 0.35, 0.95), // Blue
+            Vec3::new(0.95, 0.85, 0.15), // Yellow
+            Vec3::new(0.15, 0.90, 0.90), // Cyan
+            Vec3::new(0.90, 0.15, 0.90), // Magenta
+            Vec3::new(0.95, 0.50, 0.10), // Orange
+            Vec3::new(0.55, 0.15, 0.95), // Purple
+            Vec3::new(0.50, 0.95, 0.15), // Lime
+            Vec3::new(0.10, 0.55, 0.55), // Teal
+            Vec3::new(0.95, 0.40, 0.65), // Pink
+            Vec3::new(0.95, 0.70, 0.10), // Amber
+            Vec3::new(0.30, 0.60, 0.95), // Sky Blue
+            Vec3::new(0.60, 0.35, 0.15), // Brown
+            Vec3::new(0.20, 0.80, 0.50), // Emerald
+            Vec3::new(0.85, 0.85, 0.85), // Silver
+        ];
+
+        let has_submeshes = mesh.submeshes.len() > 1;
+        let mut id_colors = vec![Vec3::ZERO; tri_count];
+
+        if has_submeshes {
+            for t in 0..tri_count {
+                let sm_idx = mesh.submesh_index_for_triangle(t).unwrap_or(0);
+                id_colors[t] = PALETTE[sm_idx % PALETTE.len()];
+            }
+        } else {
+            let mut visited = vec![false; tri_count];
+            let mut island_idx = 0;
+            for t in 0..tri_count {
+                if !visited[t] {
+                    let island = mesh.get_connected_uv_island(t);
+                    let col = PALETTE[island_idx % PALETTE.len()];
+                    for &tri in &island {
+                        if tri < tri_count {
+                            visited[tri] = true;
+                            id_colors[tri] = col;
+                        }
+                    }
+                    island_idx += 1;
+                }
+            }
+        }
+
+        let mut mask_buf: Vec<Option<Vec3>> = vec![None; (width * height) as usize];
+
+        for t in 0..tri_count {
+            let i0 = mesh.indices[t * 3] as usize;
+            let i1 = mesh.indices[t * 3 + 1] as usize;
+            let i2 = mesh.indices[t * 3 + 2] as usize;
+
+            let uv0 = mesh.vertices[i0].uv;
+            let uv1 = mesh.vertices[i1].uv;
+            let uv2 = mesh.vertices[i2].uv;
+            let color = id_colors[t];
+
+            let min_u = uv0.x.min(uv1.x).min(uv2.x).max(0.0);
+            let max_u = uv0.x.max(uv1.x).max(uv2.x).min(1.0);
+            let min_v = uv0.y.min(uv1.y).min(uv2.y).max(0.0);
+            let max_v = uv0.y.max(uv1.y).max(uv2.y).min(1.0);
+
+            let min_x = (min_u * (width as f32)).floor() as u32;
+            let max_x = ((max_u * (width as f32)).ceil() as u32).min(width.saturating_sub(1));
+            let min_y = (min_v * (height as f32)).floor() as u32;
+            let max_y = ((max_v * (height as f32)).ceil() as u32).min(height.saturating_sub(1));
+
+            let p0 = Vec2::new(uv0.x * width as f32, uv0.y * height as f32);
+            let p1 = Vec2::new(uv1.x * width as f32, uv1.y * height as f32);
+            let p2 = Vec2::new(uv2.x * width as f32, uv2.y * height as f32);
+
+            let edge_func = |a: Vec2, b: Vec2, c: Vec2| -> f32 {
+                (c.x - a.x) * (b.y - a.y) - (c.y - a.y) * (b.x - a.x)
+            };
+            let area = edge_func(p0, p1, p2);
+            if area.abs() < 1e-5 {
+                continue;
+            }
+
+            for py in min_y..=max_y {
+                for px in min_x..=max_x {
+                    let p = Vec2::new(px as f32 + 0.5, py as f32 + 0.5);
+                    let w0 = edge_func(p1, p2, p);
+                    let w1 = edge_func(p2, p0, p);
+                    let w2 = edge_func(p0, p1, p);
+
+                    let inside = if area > 0.0 {
+                        w0 >= -0.01 && w1 >= -0.01 && w2 >= -0.01
+                    } else {
+                        w0 <= 0.01 && w1 <= 0.01 && w2 <= 0.01
+                    };
+
+                    if inside {
+                        let idx = (py * width + px) as usize;
+                        mask_buf[idx] = Some(color);
+                        buffer.set_pixel(px, py, Vec4::new(color.x, color.y, color.z, 1.0));
+                    }
+                }
+            }
+        }
+
+        Self::dilate_rgba(&mut buffer, &mask_buf);
         buffer
     }
 
@@ -711,6 +945,8 @@ impl Baker {
         pos_buf: &mut [Option<Vec3>],
         norm_buf: &mut [Option<Vec3>],
         tan_buf: &mut [Option<Vec4>],
+        mut tri_buf: Option<&mut [Option<usize>]>,
+        t_idx: usize,
         width: u32,
         height: u32,
         uv0: Vec2,
@@ -755,6 +991,9 @@ impl Baker {
                     pos_buf[idx] = Some(p0 * w0 + p1 * w1 + p2 * w2);
                     norm_buf[idx] = Some((n0 * w0 + n1 * w1 + n2 * w2).normalize_or_zero());
                     tan_buf[idx] = Some(t0 * w0 + t1 * w1 + t2 * w2);
+                    if let Some(ref mut tb) = tri_buf {
+                        tb[idx] = Some(t_idx);
+                    }
                 }
             }
         }
@@ -1158,6 +1397,49 @@ mod tests {
         for &val in &ao_map.data {
             assert!(!val.is_nan() && !val.is_infinite());
             assert!(val >= 0.95, "Smooth sphere must not suffer facet self-occlusion, got {}", val);
+        }
+    }
+
+    #[test]
+    fn test_baker_id_map() {
+        let cube = Mesh::create_cube_mesh("Cube", 1.0);
+        let id_map = Baker::bake_id_map(&cube, 32, 32);
+
+        assert_eq!(id_map.width, 32);
+        assert_eq!(id_map.height, 32);
+
+        let mut has_non_zero = false;
+        for &px in &id_map.data {
+            assert!(!px.x.is_nan() && !px.y.is_nan() && !px.z.is_nan());
+            assert_eq!(px.w, 1.0, "Alpha must be 1.0");
+            if px.x > 0.01 || px.y > 0.01 || px.z > 0.01 {
+                has_non_zero = true;
+            }
+        }
+        assert!(has_non_zero, "ID map must contain rasterized palette colors for cube faces");
+    }
+
+    #[test]
+    fn test_baker_match_by_mesh_name() {
+        assert_eq!(strip_mesh_suffix("Arm_Armor_low", "_low"), "Arm_Armor");
+        assert_eq!(strip_mesh_suffix("Arm_Armor_high", "_high"), "Arm_Armor");
+        assert_eq!(strip_mesh_suffix("Helmet_LOW", "_low"), "Helmet");
+        assert_eq!(strip_mesh_suffix("Weapon_HIGH", "_high"), "Weapon");
+
+        let cube_low = Mesh::create_cube_mesh("Cube_low", 1.0);
+        let cube_high = Mesh::create_cube_mesh("Cube_high", 1.0);
+
+        let config_by_name = BakeMatchConfig {
+            mode: BakeMatchMode::ByMeshName,
+            low_suffix: "_low".to_string(),
+            high_suffix: "_high".to_string(),
+        };
+
+        let normal_map = Baker::bake_tangent_normals_with_match(&cube_low, Some(&cube_high), 0.1, 0.1, 16, 16, &config_by_name);
+        assert_eq!(normal_map.width, 16);
+        assert_eq!(normal_map.height, 16);
+        for &px in &normal_map.data {
+            assert!(!px.x.is_nan() && !px.y.is_nan() && !px.z.is_nan());
         }
     }
 }

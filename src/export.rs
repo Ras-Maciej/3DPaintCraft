@@ -12,6 +12,7 @@ pub enum ExportPreset {
     UnrealEngine,     // BaseColor, Normal, Packed ORM (R:AO, G:Rough, B:Metal)
     Unity,            // Albedo, MetallicGloss (R:Metal, A:Smoothness), Normal
     BlenderGltf,      // BaseColor, MetallicRoughness (B:Metal, G:Rough), Normal, AO
+    GlbBinary,        // glTF 2.0 Binary (.glb) Mesh with PBR Textures
     IndividualMaps,   // Separate individual textures
 }
 
@@ -22,6 +23,7 @@ impl ExportPreset {
             Self::UnrealEngine => "Unreal Engine (ORM Packed)",
             Self::Unity => "Unity URP / Standard",
             Self::BlenderGltf => "Blender / glTF Standard",
+            Self::GlbBinary => "glTF 2.0 Binary (.glb) with PBR Textures",
             Self::IndividualMaps => "Individual Channel Maps",
         }
     }
@@ -180,6 +182,20 @@ impl TextureExporter {
                 generated_files.push(opac_path);
             }
 
+            ExportPreset::GlbBinary => {
+                let bc_path = output_dir.join(format!("{}_BaseColor.png", clean_name));
+                Self::save_rgba(&textures.base_color, &bc_path, flip_v)?;
+                generated_files.push(bc_path);
+
+                let mr_path = output_dir.join(format!("{}_MetallicRoughness.png", clean_name));
+                Self::save_packed_orm(&textures.ao, &textures.roughness, &textures.metallic, &mr_path, flip_v)?;
+                generated_files.push(mr_path);
+
+                let n_path = output_dir.join(format!("{}_Normal.png", clean_name));
+                Self::save_rgba(&combined_normal, &n_path, flip_v)?;
+                generated_files.push(n_path);
+            }
+
             ExportPreset::IndividualMaps => {
                 let maps = [
                     ("BaseColor", &textures.base_color),
@@ -210,8 +226,13 @@ impl TextureExporter {
             }
         }
 
-        // Export 3D Mesh (.obj + .mtl) alongside textures if requested
+        // Export 3D Mesh (.obj + .mtl, and binary .glb) alongside textures if requested
         if let Some(mesh) = mesh {
+            let glb_path = output_dir.join(format!("{}.glb", clean_name));
+            if mesh.save_to_glb_file(&glb_path).is_ok() {
+                generated_files.push(glb_path);
+            }
+
             let obj_path = output_dir.join(format!("{}.obj", clean_name));
             mesh.save_to_obj_file(&obj_path)?;
             generated_files.push(obj_path);

@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::{BufReader, BufWriter};
 use std::path::Path;
+use std::sync::Arc;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TextureSet {
@@ -52,6 +53,74 @@ impl TextureSet {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProjectResourceType {
+    BakedMap,
+    Texture,
+    Alpha,
+    Hdri,
+}
+
+impl ProjectResourceType {
+    pub fn badge_label(&self) -> &'static str {
+        match self {
+            Self::BakedMap => "BAKED",
+            Self::Texture => "PROJECT",
+            Self::Alpha => "ALPHA",
+            Self::Hdri => "HDRI",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ProjectTextureResource {
+    pub id: String,
+    pub name: String,
+    pub resource_type: ProjectResourceType,
+    pub width: u32,
+    pub height: u32,
+    #[serde(skip)]
+    pub rgba_data: Option<Arc<RgbaBuffer>>,
+    #[serde(skip)]
+    pub scalar_data: Option<Arc<ScalarBuffer>>,
+    pub file_path: Option<String>,
+    pub is_baked: bool,
+}
+
+impl ProjectTextureResource {
+    pub fn badge_label(&self) -> &'static str {
+        self.resource_type.badge_label()
+    }
+
+    pub fn to_rgba_buffer(&self) -> Option<RgbaBuffer> {
+        if let Some(rgba) = &self.rgba_data {
+            return Some((**rgba).clone());
+        }
+        if let Some(scalar) = &self.scalar_data {
+            let mut buf = RgbaBuffer::new(scalar.width, scalar.height, glam::Vec4::ONE);
+            for (dst, &s) in buf.data.iter_mut().zip(&scalar.data) {
+                *dst = glam::Vec4::new(s, s, s, 1.0);
+            }
+            return Some(buf);
+        }
+        None
+    }
+
+    pub fn to_scalar_buffer(&self) -> Option<ScalarBuffer> {
+        if let Some(scalar) = &self.scalar_data {
+            return Some((**scalar).clone());
+        }
+        if let Some(rgba) = &self.rgba_data {
+            let mut buf = ScalarBuffer::new(rgba.width, rgba.height, 0.0);
+            for (dst, pix) in buf.data.iter_mut().zip(&rgba.data) {
+                *dst = 0.2126 * pix.x + 0.7152 * pix.y + 0.0722 * pix.z;
+            }
+            return Some(buf);
+        }
+        None
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct SerializedProject {
     pub name: String,
@@ -65,6 +134,8 @@ pub struct SerializedProject {
     pub texture_sets: Vec<TextureSet>,
     #[serde(default)]
     pub active_texture_set_idx: usize,
+    #[serde(default)]
+    pub resources: Vec<ProjectTextureResource>,
 }
 
 pub struct Project {
@@ -86,6 +157,10 @@ pub struct Project {
     pub world_space_normal_map: Option<RgbaBuffer>,
     pub position_map: Option<RgbaBuffer>, // World Position Object (WPO)
     pub thickness_map: Option<ScalarBuffer>,
+    pub id_map: Option<RgbaBuffer>, // Submesh / Material ID Map
+
+    // Project Asset Shelf Resources
+    pub resources: Vec<ProjectTextureResource>,
 
     pub next_layer_id: u64,
     pub is_dirty: bool,
@@ -116,6 +191,8 @@ impl Project {
             world_space_normal_map: None,
             position_map: None,
             thickness_map: None,
+            id_map: None,
+            resources: Vec::new(),
             next_layer_id: 1,
             is_dirty: true,
             gpu_sync_needed: true,
@@ -408,6 +485,9 @@ impl Project {
         if let Some(ref mut th) = self.thickness_map {
             th.resize_bilinear(new_width, new_height);
         }
+        if let Some(ref mut id_m) = self.id_map {
+            id_m.resize_bilinear(new_width, new_height);
+        }
         self.gpu_mesh_maps_sync_needed = true;
         self.rebuild_composite();
     }
@@ -602,6 +682,7 @@ impl Project {
             next_layer_id: self.next_layer_id,
             texture_sets,
             active_texture_set_idx: self.active_texture_set_idx,
+            resources: self.resources.clone(),
         };
 
         let file = File::create(path).map_err(|e| format!("Failed to create project file: {}", e))?;
@@ -654,6 +735,8 @@ impl Project {
             world_space_normal_map: None,
             position_map: None,
             thickness_map: None,
+            id_map: None,
+            resources: serialized.resources,
             next_layer_id: serialized.next_layer_id,
             is_dirty: false,
             gpu_sync_needed: true,
@@ -661,11 +744,150 @@ impl Project {
             file_path: Some(path.to_string_lossy().to_string()), high_poly_mesh: None,
         };
 
+        // Reload external texture files if missing in-memory buffers
+        for res in &mut proj.resources {
+            if res.rgba_data.is_none() && res.scalar_data.is_none() {
+                if let Some(fp) = &res.file_path {
+                    let p = Path::new(fp);
+                    if p.exists() {
+                        if let Ok(rgba) = RgbaBuffer::from_image_file(p) {
+                            res.rgba_data = Some(Arc::new(rgba));
+                        }
+                    }
+                }
+            }
+        }
+        proj.sync_baked_maps_to_resources();
+
         proj.mesh.rebuild_bvh();
         // proj.bake_mesh_maps();
         proj.rebuild_composite();
 
         Ok(proj)
+    }
+
+    /// Synchronize all current baked mesh maps into the project asset shelf resources
+    pub fn sync_baked_maps_to_resources(&mut self) {
+        if let Some(wn) = &self.world_normal_map {
+            self.upsert_baked_resource("baked_normal", "Baked Tangent Normal", Some(Arc::new(wn.clone())), None, wn.width, wn.height);
+        } else {
+            self.resources.retain(|r| r.id != "baked_normal");
+        }
+        if let Some(wsn) = &self.world_space_normal_map {
+            self.upsert_baked_resource("baked_ws_normal", "Baked World Space Normal", Some(Arc::new(wsn.clone())), None, wsn.width, wsn.height);
+        } else {
+            self.resources.retain(|r| r.id != "baked_ws_normal");
+        }
+        if let Some(ao) = &self.ao_map {
+            self.upsert_baked_resource("baked_ao", "Baked Ambient Occlusion (AO)", None, Some(Arc::new(ao.clone())), ao.width, ao.height);
+        } else {
+            self.resources.retain(|r| r.id != "baked_ao");
+        }
+        if let Some(curv) = &self.curvature_map {
+            self.upsert_baked_resource("baked_curvature", "Baked Curvature", None, Some(Arc::new(curv.clone())), curv.width, curv.height);
+        } else {
+            self.resources.retain(|r| r.id != "baked_curvature");
+        }
+        if let Some(pos) = &self.position_map {
+            self.upsert_baked_resource("baked_position", "Baked Position (WPO)", Some(Arc::new(pos.clone())), None, pos.width, pos.height);
+        } else {
+            self.resources.retain(|r| r.id != "baked_position");
+        }
+        if let Some(th) = &self.thickness_map {
+            self.upsert_baked_resource("baked_thickness", "Baked Thickness", None, Some(Arc::new(th.clone())), th.width, th.height);
+        } else {
+            self.resources.retain(|r| r.id != "baked_thickness");
+        }
+        if let Some(id_m) = &self.id_map {
+            self.upsert_baked_resource("baked_id_map", "Baked ID Map", Some(Arc::new(id_m.clone())), None, id_m.width, id_m.height);
+        } else {
+            self.resources.retain(|r| r.id != "baked_id_map");
+        }
+    }
+
+    /// Update or register a baked mesh map in project shelf resources
+    pub fn upsert_baked_resource(&mut self, id: &str, name: &str, rgba: Option<Arc<RgbaBuffer>>, scalar: Option<Arc<ScalarBuffer>>, w: u32, h: u32) {
+        if let Some(res) = self.resources.iter_mut().find(|r| r.id == id) {
+            res.name = name.to_string();
+            res.resource_type = ProjectResourceType::BakedMap;
+            res.width = w;
+            res.height = h;
+            res.rgba_data = rgba;
+            res.scalar_data = scalar;
+            res.is_baked = true;
+        } else {
+            self.resources.push(ProjectTextureResource {
+                id: id.to_string(),
+                name: name.to_string(),
+                resource_type: ProjectResourceType::BakedMap,
+                width: w,
+                height: h,
+                rgba_data: rgba,
+                scalar_data: scalar,
+                file_path: None,
+                is_baked: true,
+            });
+        }
+    }
+
+    /// Import an image/texture file into the Project Shelf library
+    pub fn import_texture_resource(&mut self, path: &Path, resource_type: ProjectResourceType) -> Result<String, String> {
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("imported_texture");
+        let name = crate::asset_manager::AssetManager::format_display_name(stem);
+        let id = format!("res_{}_{}", stem.to_lowercase().replace(' ', "_").replace('-', "_"), self.resources.len());
+
+        let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
+        let is_hdr = ext == "hdr" || ext == "exr";
+
+        let raw_rgba = crate::channel::RgbaBuffer::from_image_file(path)?;
+        let w = raw_rgba.width;
+        let h = raw_rgba.height;
+        let rgba = Arc::new(raw_rgba);
+
+        let res_type = if is_hdr { ProjectResourceType::Hdri } else { resource_type };
+
+        if let Some(pos) = self.resources.iter().position(|r| r.id == id) {
+            self.resources[pos] = ProjectTextureResource {
+                id: id.clone(),
+                name,
+                resource_type: res_type,
+                width: w,
+                height: h,
+                rgba_data: Some(rgba),
+                scalar_data: None,
+                file_path: Some(path.to_string_lossy().to_string()),
+                is_baked: false,
+            };
+        } else {
+            self.resources.push(ProjectTextureResource {
+                id: id.clone(),
+                name,
+                resource_type: res_type,
+                width: w,
+                height: h,
+                rgba_data: Some(rgba),
+                scalar_data: None,
+                file_path: Some(path.to_string_lossy().to_string()),
+                is_baked: false,
+            });
+        }
+
+        self.is_dirty = true;
+        Ok(id)
+    }
+
+    pub fn get_resource(&self, id: &str) -> Option<&ProjectTextureResource> {
+        self.resources.iter().find(|r| r.id == id)
+    }
+
+    pub fn remove_resource(&mut self, id: &str) -> bool {
+        let initial_len = self.resources.len();
+        self.resources.retain(|r| r.id != id);
+        let removed = self.resources.len() < initial_len;
+        if removed {
+            self.is_dirty = true;
+        }
+        removed
     }
 }
 
@@ -758,6 +980,7 @@ mod tests {
             next_layer_id: proj.next_layer_id,
             texture_sets: proj.texture_sets.clone(),
             active_texture_set_idx: proj.active_texture_set_idx,
+            resources: proj.resources.clone(),
         };
 
         let json_str = serde_json::to_string(&serialized).expect("Serialization failed");
@@ -766,6 +989,45 @@ mod tests {
         assert_eq!(deserialized.texture_sets.len(), 2);
         assert_eq!(deserialized.texture_sets[1].name, "Armor");
         assert_eq!(deserialized.active_texture_set_idx, 1);
+    }
+
+    #[test]
+    fn test_project_texture_resources_and_baked_sync() {
+        let mut proj = Project::new_default(64, 64);
+        assert!(proj.resources.is_empty());
+
+        // Simulate baked tangent normal and AO maps
+        let normal_buf = RgbaBuffer::new(64, 64, glam::Vec4::new(0.5, 0.5, 1.0, 1.0));
+        let ao_buf = ScalarBuffer::new(64, 64, 0.85);
+        proj.world_normal_map = Some(normal_buf);
+        proj.ao_map = Some(ao_buf);
+
+        // Sync baked maps into project resources
+        proj.sync_baked_maps_to_resources();
+        assert_eq!(proj.resources.len(), 2);
+
+        let res_normal = proj.get_resource("baked_normal").expect("Baked normal should exist in resources");
+        assert_eq!(res_normal.name, "Baked Tangent Normal");
+        assert_eq!(res_normal.resource_type, ProjectResourceType::BakedMap);
+        assert!(res_normal.is_baked);
+        assert_eq!(res_normal.badge_label(), "BAKED");
+        assert!(res_normal.to_rgba_buffer().is_some());
+
+        let res_ao = proj.get_resource("baked_ao").expect("Baked AO should exist in resources");
+        assert_eq!(res_ao.name, "Baked Ambient Occlusion (AO)");
+        assert_eq!(res_ao.badge_label(), "BAKED");
+        // Test conversion from scalar to rgba
+        let ao_rgba = res_ao.to_rgba_buffer().expect("Should convert to RGBA");
+        assert_eq!(ao_rgba.get_pixel(0, 0), glam::Vec4::new(0.85, 0.85, 0.85, 1.0));
+
+        // Test manual upsert of project resource
+        proj.upsert_baked_resource("baked_curvature", "Baked Curvature", None, Some(Arc::new(ScalarBuffer::new(64, 64, 0.5))), 64, 64);
+        assert_eq!(proj.resources.len(), 3);
+
+        // Test remove resource
+        assert!(proj.remove_resource("baked_curvature"));
+        assert_eq!(proj.resources.len(), 2);
+        assert!(proj.get_resource("baked_curvature").is_none());
     }
 }
 

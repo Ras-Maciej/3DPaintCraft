@@ -5,6 +5,8 @@
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ShelfCategory {
     All,
+    Project,
+    Textures,
     Materials,
     SmartMaterials,
     SmartMasks,
@@ -18,6 +20,8 @@ impl ShelfCategory {
     pub fn name(&self) -> &'static str {
         match self {
             Self::All => "All",
+            Self::Project => "Project",
+            Self::Textures => "Textures",
             Self::Materials => "Materials",
             Self::SmartMaterials => "Smart Materials",
             Self::SmartMasks => "Smart Masks",
@@ -28,7 +32,7 @@ impl ShelfCategory {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ShelfAsset {
     pub id: &'static str,
     pub name: &'static str,
@@ -39,8 +43,7 @@ pub struct ShelfAsset {
     pub description: &'static str,
 }
 
-pub fn get_shelf_assets() -> Vec<ShelfAsset> {
-    vec![
+pub static SHELF_ASSETS: &[ShelfAsset] = &[
         // --- 1. PBR MATERIALS ---
         ShelfAsset {
             id: "mat_gold",
@@ -591,7 +594,10 @@ pub fn get_shelf_assets() -> Vec<ShelfAsset> {
             preview_roughness: 0.25,
             description: "Fluid condensation stains with circular meniscus rims and water droplets",
         },
-    ]
+];
+
+pub fn get_shelf_assets() -> &'static [ShelfAsset] {
+    SHELF_ASSETS
 }
 
 #[cfg(test)]
@@ -644,6 +650,19 @@ mod tests {
         assert!(generator_ids.contains(&"gen_clouds"));
         assert!(generator_ids.contains(&"gen_marble_veins"));
         assert!(generator_ids.contains(&"gen_moisture"));
+    }
+
+    #[test]
+    fn test_shelf_category_names() {
+        assert_eq!(ShelfCategory::All.name(), "All");
+        assert_eq!(ShelfCategory::Project.name(), "Project");
+        assert_eq!(ShelfCategory::Textures.name(), "Textures");
+        assert_eq!(ShelfCategory::Materials.name(), "Materials");
+        assert_eq!(ShelfCategory::SmartMaterials.name(), "Smart Materials");
+        assert_eq!(ShelfCategory::SmartMasks.name(), "Smart Masks");
+        assert_eq!(ShelfCategory::Generators.name(), "Noises");
+        assert_eq!(ShelfCategory::Alphas.name(), "Alphas");
+        assert_eq!(ShelfCategory::Environments.name(), "Environments (HDRIs)");
     }
 }
 

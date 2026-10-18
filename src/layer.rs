@@ -3,7 +3,7 @@ use rayon::prelude::*;
 // 3D Paintcraft - Multi-channel Layer System & Compositor
 // Pure safe Rust
 
-use crate::channel::{ChannelFlags, RgbaBuffer, ScalarBuffer};
+use crate::channel::{ChannelFlags, ChannelType, RgbaBuffer, ScalarBuffer};
 use crate::utils::NoiseGenerator;
 use glam::{Vec3, Vec4};
 use serde::{Deserialize, Serialize};
@@ -19,6 +19,7 @@ pub enum BlendMode {
     Darken,
     Lighten,
     Replace,
+    PassThrough,
 }
 
 impl BlendMode {
@@ -33,6 +34,7 @@ impl BlendMode {
             Self::Darken => "Darken",
             Self::Lighten => "Lighten",
             Self::Replace => "Replace",
+            Self::PassThrough => "Pass Through",
         }
     }
 
@@ -44,7 +46,7 @@ impl BlendMode {
         }
 
         let blended_rgb = match self {
-            Self::Normal => src.truncate(),
+            Self::Normal | Self::PassThrough => src.truncate(),
             Self::Replace => src.truncate(),
             Self::Multiply => dst.truncate() * src.truncate(),
             Self::Screen => {
@@ -81,7 +83,7 @@ impl BlendMode {
     #[inline]
     pub fn blend_scalar(&self, dst: f32, src: f32, opacity: f32) -> f32 {
         let blended = match self {
-            Self::Normal | Self::Replace => src,
+            Self::Normal | Self::PassThrough | Self::Replace => src,
             Self::Multiply => dst * src,
             Self::Screen => 1.0 - (1.0 - dst) * (1.0 - src),
             Self::Overlay => {
@@ -98,6 +100,70 @@ impl BlendMode {
         };
 
         dst * (1.0 - opacity) + blended * opacity
+    }
+}
+
+/// Per-channel blend modes matching Substance 3D Painter
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChannelBlendModes {
+    pub base_color: BlendMode,
+    pub roughness: BlendMode,
+    pub metallic: BlendMode,
+    pub normal: BlendMode,
+    pub height: BlendMode,
+    pub ao: BlendMode,
+    pub emission: BlendMode,
+    pub opacity: BlendMode,
+    pub clearcoat: BlendMode,
+    pub anisotropy: BlendMode,
+}
+
+impl Default for ChannelBlendModes {
+    fn default() -> Self {
+        Self {
+            base_color: BlendMode::Normal,
+            roughness: BlendMode::Normal,
+            metallic: BlendMode::Normal,
+            normal: BlendMode::Normal,
+            height: BlendMode::Add,
+            ao: BlendMode::Multiply,
+            emission: BlendMode::Normal,
+            opacity: BlendMode::Normal,
+            clearcoat: BlendMode::Normal,
+            anisotropy: BlendMode::Normal,
+        }
+    }
+}
+
+/// Per-channel opacities matching Substance 3D Painter
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ChannelOpacities {
+    pub base_color: f32,
+    pub roughness: f32,
+    pub metallic: f32,
+    pub normal: f32,
+    pub height: f32,
+    pub ao: f32,
+    pub emission: f32,
+    pub opacity: f32,
+    pub clearcoat: f32,
+    pub anisotropy: f32,
+}
+
+impl Default for ChannelOpacities {
+    fn default() -> Self {
+        Self {
+            base_color: 1.0,
+            roughness: 1.0,
+            metallic: 1.0,
+            normal: 1.0,
+            height: 1.0,
+            ao: 1.0,
+            emission: 1.0,
+            opacity: 1.0,
+            clearcoat: 1.0,
+            anisotropy: 1.0,
+        }
     }
 }
 
@@ -258,6 +324,17 @@ pub enum MaskEffectType {
         contrast: f32,
         brightness: f32,
     },
+    ColorSelection {
+        target_color: [f32; 3],
+        tolerance: f32,
+        softness: f32,
+    },
+    AnchorReference {
+        anchor_name: String,
+        source_channel: ChannelType,
+        blur: f32,
+        invert: bool,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -268,6 +345,20 @@ pub struct MaskEffect {
     pub visible: bool,
     pub opacity: f32,
     pub blend_mode: BlendMode,
+}
+
+/// Reference to an anchor point source layer for cross-layer procedural referencing
+#[derive(Clone, Copy)]
+pub struct AnchorLayerRef<'a> {
+    pub name: &'a str,
+    pub has_mask: bool,
+    pub mask_buf: &'a ScalarBuffer,
+    pub base_color_buf: &'a RgbaBuffer,
+    pub roughness_buf: &'a ScalarBuffer,
+    pub metallic_buf: &'a ScalarBuffer,
+    pub height_buf: &'a ScalarBuffer,
+    pub opacity_buf: &'a ScalarBuffer,
+    pub emissive_buf: &'a RgbaBuffer,
 }
 
 /// A multi-channel creative layer (analogous to Substance Painter Layer)
@@ -313,6 +404,8 @@ pub struct Layer {
     #[serde(skip)]
     pub fill_normal_tex: Option<RgbaBuffer>,
     #[serde(skip)]
+    pub fill_height_tex: Option<ScalarBuffer>,
+    #[serde(skip)]
     pub fill_emissive_tex: Option<RgbaBuffer>,
     #[serde(skip)]
     pub fill_opacity_tex: Option<ScalarBuffer>,
@@ -345,6 +438,16 @@ pub struct Layer {
     // Folder / Group hierarchy
     pub parent_folder_id: Option<u64>,
     pub folder_collapsed: bool,
+
+    // Per-channel blend modes and opacities (Substance 3D Painter)
+    #[serde(default)]
+    pub channel_blend_modes: ChannelBlendModes,
+    #[serde(default)]
+    pub channel_opacities: ChannelOpacities,
+
+    // Anchor point identifier for cross-layer referencing
+    #[serde(default)]
+    pub anchor_point: Option<String>,
 }
 
 fn default_base_mask_val() -> f32 {
@@ -385,6 +488,7 @@ impl Layer {
             fill_roughness_tex: None,
             fill_metallic_tex: None,
             fill_normal_tex: None,
+            fill_height_tex: None,
             fill_emissive_tex: None,
             fill_opacity_tex: None,
 
@@ -411,12 +515,28 @@ impl Layer {
 
             parent_folder_id: None,
             folder_collapsed: false,
+            channel_blend_modes: ChannelBlendModes::default(),
+            channel_opacities: ChannelOpacities::default(),
+            anchor_point: None,
         }
     }
 
     pub fn new_folder_layer(id: u64, name: String, width: u32, height: u32) -> Self {
         let mut layer = Self::new_paint_layer(id, name, width, height);
         layer.layer_type = LayerType::Folder;
+        layer.blend_mode = BlendMode::PassThrough;
+        layer.channel_blend_modes = ChannelBlendModes {
+            base_color: BlendMode::PassThrough,
+            roughness: BlendMode::PassThrough,
+            metallic: BlendMode::PassThrough,
+            normal: BlendMode::PassThrough,
+            height: BlendMode::PassThrough,
+            ao: BlendMode::PassThrough,
+            emission: BlendMode::PassThrough,
+            opacity: BlendMode::PassThrough,
+            clearcoat: BlendMode::PassThrough,
+            anisotropy: BlendMode::PassThrough,
+        };
         layer
     }
 
@@ -514,6 +634,7 @@ impl Layer {
             fill_roughness_tex: None,
             fill_metallic_tex: None,
             fill_normal_tex: None,
+            fill_height_tex: None,
             fill_emissive_tex: None,
             fill_opacity_tex: None,
 
@@ -538,6 +659,9 @@ impl Layer {
             dirty_rect: self.dirty_rect,
             parent_folder_id: self.parent_folder_id,
             folder_collapsed: self.folder_collapsed,
+            channel_blend_modes: self.channel_blend_modes,
+            channel_opacities: self.channel_opacities,
+            anchor_point: self.anchor_point.clone(),
         })
     }
 
@@ -561,6 +685,68 @@ impl Layer {
         self.active_mask_effect_id = snapshot.active_mask_effect_id;
         self.channel_flags = snapshot.channel_flags;
         self.dirty_rect = snapshot.dirty_rect;
+    }
+
+    pub fn get_channel_blend_mode(&self, ch: ChannelType) -> BlendMode {
+        match ch {
+            ChannelType::BaseColor => self.channel_blend_modes.base_color,
+            ChannelType::Roughness => self.channel_blend_modes.roughness,
+            ChannelType::Metallic => self.channel_blend_modes.metallic,
+            ChannelType::Normal => self.channel_blend_modes.normal,
+            ChannelType::Height => self.channel_blend_modes.height,
+            ChannelType::AmbientOcclusion => self.channel_blend_modes.ao,
+            ChannelType::Emission => self.channel_blend_modes.emission,
+            ChannelType::Opacity => self.channel_blend_modes.opacity,
+            ChannelType::Clearcoat => self.channel_blend_modes.clearcoat,
+            ChannelType::Anisotropy => self.channel_blend_modes.anisotropy,
+        }
+    }
+
+    pub fn set_channel_blend_mode(&mut self, ch: ChannelType, mode: BlendMode) {
+        match ch {
+            ChannelType::BaseColor => self.channel_blend_modes.base_color = mode,
+            ChannelType::Roughness => self.channel_blend_modes.roughness = mode,
+            ChannelType::Metallic => self.channel_blend_modes.metallic = mode,
+            ChannelType::Normal => self.channel_blend_modes.normal = mode,
+            ChannelType::Height => self.channel_blend_modes.height = mode,
+            ChannelType::AmbientOcclusion => self.channel_blend_modes.ao = mode,
+            ChannelType::Emission => self.channel_blend_modes.emission = mode,
+            ChannelType::Opacity => self.channel_blend_modes.opacity = mode,
+            ChannelType::Clearcoat => self.channel_blend_modes.clearcoat = mode,
+            ChannelType::Anisotropy => self.channel_blend_modes.anisotropy = mode,
+        }
+        self.blend_mode = mode;
+    }
+
+    pub fn get_channel_opacity(&self, ch: ChannelType) -> f32 {
+        match ch {
+            ChannelType::BaseColor => self.channel_opacities.base_color,
+            ChannelType::Roughness => self.channel_opacities.roughness,
+            ChannelType::Metallic => self.channel_opacities.metallic,
+            ChannelType::Normal => self.channel_opacities.normal,
+            ChannelType::Height => self.channel_opacities.height,
+            ChannelType::AmbientOcclusion => self.channel_opacities.ao,
+            ChannelType::Emission => self.channel_opacities.emission,
+            ChannelType::Opacity => self.channel_opacities.opacity,
+            ChannelType::Clearcoat => self.channel_opacities.clearcoat,
+            ChannelType::Anisotropy => self.channel_opacities.anisotropy,
+        }
+    }
+
+    pub fn set_channel_opacity(&mut self, ch: ChannelType, op: f32) {
+        let op = op.clamp(0.0, 1.0);
+        match ch {
+            ChannelType::BaseColor => self.channel_opacities.base_color = op,
+            ChannelType::Roughness => self.channel_opacities.roughness = op,
+            ChannelType::Metallic => self.channel_opacities.metallic = op,
+            ChannelType::Normal => self.channel_opacities.normal = op,
+            ChannelType::Height => self.channel_opacities.height = op,
+            ChannelType::AmbientOcclusion => self.channel_opacities.ao = op,
+            ChannelType::Emission => self.channel_opacities.emission = op,
+            ChannelType::Opacity => self.channel_opacities.opacity = op,
+            ChannelType::Clearcoat => self.channel_opacities.clearcoat = op,
+            ChannelType::Anisotropy => self.channel_opacities.anisotropy = op,
+        }
     }
 
     pub fn add_black_mask(&mut self) {
@@ -944,7 +1130,21 @@ impl Layer {
 
     /// Evaluates the non-destructive mask effect stack from bottom to top
     pub fn evaluate_mask(&mut self, curvature_map: Option<&ScalarBuffer>) {
-        self.evaluate_mask_advanced(curvature_map, None, None, None);
+        self.evaluate_mask_full(curvature_map, None, None, None, None, &[]);
+    }
+
+    pub fn as_anchor_ref(&self) -> Option<AnchorLayerRef<'_>> {
+        self.anchor_point.as_ref().map(|name| AnchorLayerRef {
+            name: name.as_str(),
+            has_mask: self.has_mask,
+            mask_buf: &self.mask_buf,
+            base_color_buf: &self.base_color_buf,
+            roughness_buf: &self.roughness_buf,
+            metallic_buf: &self.metallic_buf,
+            height_buf: &self.height_buf,
+            opacity_buf: &self.opacity_buf,
+            emissive_buf: &self.emissive_buf,
+        })
     }
 
     /// Full multi-map evaluation of the mask effect stack
@@ -954,6 +1154,19 @@ impl Layer {
         ao_map: Option<&ScalarBuffer>,
         position_map: Option<&RgbaBuffer>,
         world_normal_map: Option<&RgbaBuffer>,
+    ) {
+        self.evaluate_mask_full(curvature_map, ao_map, position_map, world_normal_map, None, &[]);
+    }
+
+    /// Full multi-map, ID map, and cross-layer anchor point evaluation of mask stack
+    pub fn evaluate_mask_full(
+        &mut self,
+        curvature_map: Option<&ScalarBuffer>,
+        ao_map: Option<&ScalarBuffer>,
+        position_map: Option<&RgbaBuffer>,
+        world_normal_map: Option<&RgbaBuffer>,
+        id_map: Option<&RgbaBuffer>,
+        anchor_refs: &[AnchorLayerRef<'_>],
     ) {
         if !self.has_mask {
             return;
@@ -1033,11 +1246,135 @@ impl Layer {
                 MaskEffectType::FilterContrast { contrast, brightness } => {
                     accum.filter_contrast_brightness(*contrast, *brightness);
                 }
+                MaskEffectType::ColorSelection { target_color, tolerance, softness } => {
+                    let mut sel_buf = ScalarBuffer::new(w, h, 0.0);
+                    if let Some(id_m) = id_map {
+                        let tol = *tolerance;
+                        let soft = (*softness).max(1e-4);
+                        let target = glam::Vec3::new(target_color[0], target_color[1], target_color[2]);
+                        for i in 0..(w * h) as usize {
+                            if i < id_m.data.len() {
+                                let col = id_m.data[i].truncate();
+                                let diff = (col - target).length();
+                                if diff <= tol {
+                                    sel_buf.data[i] = 1.0;
+                                } else if diff <= tol + soft {
+                                    sel_buf.data[i] = (1.0 - (diff - tol) / soft).clamp(0.0, 1.0);
+                                }
+                            }
+                        }
+                    }
+                    if first && effect.blend_mode == BlendMode::Normal {
+                        accum = sel_buf;
+                        first = false;
+                    } else {
+                        first = false;
+                        for i in 0..(w * h) as usize {
+                            accum.data[i] = effect.blend_mode.blend_scalar(accum.data[i], sel_buf.data[i], effect.opacity);
+                        }
+                    }
+                }
+                MaskEffectType::AnchorReference { anchor_name, source_channel, blur, invert } => {
+                    let mut ref_buf = ScalarBuffer::new(w, h, 0.0);
+                    if let Some(src) = anchor_refs.iter().find(|a| a.name == anchor_name.as_str()) {
+                        match source_channel {
+                            ChannelType::BaseColor => {
+                                for i in 0..(w * h) as usize {
+                                    if i < src.base_color_buf.data.len() {
+                                        let c = src.base_color_buf.data[i];
+                                        ref_buf.data[i] = (c.x * 0.299 + c.y * 0.587 + c.z * 0.114).clamp(0.0, 1.0);
+                                    }
+                                }
+                            }
+                            ChannelType::Roughness => {
+                                ref_buf = src.roughness_buf.clone();
+                            }
+                            ChannelType::Metallic => {
+                                ref_buf = src.metallic_buf.clone();
+                            }
+                            ChannelType::Height => {
+                                ref_buf = src.height_buf.clone();
+                            }
+                            ChannelType::Opacity => {
+                                ref_buf = src.opacity_buf.clone();
+                            }
+                            ChannelType::Emission => {
+                                for i in 0..(w * h) as usize {
+                                    if i < src.emissive_buf.data.len() {
+                                        let c = src.emissive_buf.data[i];
+                                        ref_buf.data[i] = (c.x * 0.299 + c.y * 0.587 + c.z * 0.114).clamp(0.0, 1.0);
+                                    }
+                                }
+                            }
+                            _ => {
+                                if src.has_mask {
+                                    ref_buf = src.mask_buf.clone();
+                                } else {
+                                    ref_buf = ScalarBuffer::new(w, h, 1.0);
+                                }
+                            }
+                        }
+                    }
+                    if *invert {
+                        ref_buf.filter_invert();
+                    }
+                    if *blur > 0.1 {
+                        ref_buf.filter_gaussian_blur(*blur);
+                    }
+                    if first && effect.blend_mode == BlendMode::Normal {
+                        accum = ref_buf;
+                        first = false;
+                    } else {
+                        first = false;
+                        for i in 0..(w * h) as usize {
+                            accum.data[i] = effect.blend_mode.blend_scalar(accum.data[i], ref_buf.data[i], effect.opacity);
+                        }
+                    }
+                }
             }
         }
 
         self.mask_buf = accum;
         self.mark_dirty_full();
+    }
+
+    pub fn add_mask_color_selection_effect(&mut self, target_color: [f32; 3], tolerance: f32, softness: f32) -> u64 {
+        self.preserve_base_paint_if_needed();
+        self.next_mask_effect_id += 1;
+        let id = self.next_mask_effect_id;
+        let blend_mode = if self.mask_effects.is_empty() { BlendMode::Normal } else { BlendMode::Add };
+        self.mask_effects.push(MaskEffect {
+            id,
+            name: "Color Selection".to_string(),
+            effect_type: MaskEffectType::ColorSelection { target_color, tolerance, softness },
+            visible: true,
+            opacity: 1.0,
+            blend_mode,
+        });
+        self.active_mask_effect_id = Some(id);
+        id
+    }
+
+    pub fn add_mask_anchor_effect(&mut self, anchor_name: String, source_channel: ChannelType) -> u64 {
+        self.preserve_base_paint_if_needed();
+        self.next_mask_effect_id += 1;
+        let id = self.next_mask_effect_id;
+        let blend_mode = if self.mask_effects.is_empty() { BlendMode::Normal } else { BlendMode::Add };
+        self.mask_effects.push(MaskEffect {
+            id,
+            name: format!("Anchor: {}", anchor_name),
+            effect_type: MaskEffectType::AnchorReference {
+                anchor_name,
+                source_channel,
+                blur: 0.0,
+                invert: false,
+            },
+            visible: true,
+            opacity: 1.0,
+            blend_mode,
+        });
+        self.active_mask_effect_id = Some(id);
+        id
     }
 
     #[allow(dead_code)]
@@ -1380,6 +1717,7 @@ impl Layer {
             && self.fill_color_tex.is_none()
             && self.fill_roughness_tex.is_none()
             && self.fill_metallic_tex.is_none()
+            && self.fill_height_tex.is_none()
             && self.fill_emissive_tex.is_none()
             && self.fill_opacity_tex.is_none()
             && self.fill_normal_tex.is_none()
@@ -1424,6 +1762,7 @@ impl Layer {
         let fill_color_tex = self.fill_color_tex.as_ref();
         let fill_roughness_tex = self.fill_roughness_tex.as_ref();
         let fill_metallic_tex = self.fill_metallic_tex.as_ref();
+        let fill_height_tex = self.fill_height_tex.as_ref();
         let fill_emissive_tex = self.fill_emissive_tex.as_ref();
         let fill_opacity_tex = self.fill_opacity_tex.as_ref();
 
@@ -1744,19 +2083,25 @@ impl Layer {
                     } else {
                         fill_opacity
                     };
+ 
+                    let final_height = if let Some(tex) = fill_height_tex {
+                        tex.get_pixel(tx, ty)
+                    } else {
+                        height
+                    };
 
                     let xi = x as usize;
                     base_row[xi] = final_col;
                     rough_row[xi] = final_rough;
                     metal_row[xi] = final_metal;
-                    height_row[xi] = height;
+                    height_row[xi] = final_height;
                     emissive_row[xi] = final_emissive;
                     opacity_row[xi] = final_opacity;
                 }
             });
 
         // Generate tangent normal map from height variations and imported normal texture
-        if self.fill_normal_tex.is_some() || self.fill_generator != ProceduralGenerator::None {
+        if self.fill_normal_tex.is_some() || self.fill_height_tex.is_some() || self.fill_generator != ProceduralGenerator::None {
             self.update_normal_from_height(self.fill_normal_strength);
         } else {
             self.normal_buf.data.fill(glam::Vec4::new(0.5, 0.5, 1.0, 1.0));
@@ -2015,7 +2360,35 @@ impl CompositeTextureSet {
                         }
                     }
                     
-                    let mode = layer.blend_mode;
+                    let mut ch_modes = layer.channel_blend_modes;
+                    if let Some(folder) = parent_folder {
+                        if folder.blend_mode != BlendMode::PassThrough {
+                            if folder.channel_blend_modes.base_color != BlendMode::PassThrough {
+                                ch_modes.base_color = folder.channel_blend_modes.base_color;
+                            } else {
+                                ch_modes.base_color = folder.blend_mode;
+                            }
+                            if folder.channel_blend_modes.roughness != BlendMode::PassThrough {
+                                ch_modes.roughness = folder.channel_blend_modes.roughness;
+                            }
+                            if folder.channel_blend_modes.metallic != BlendMode::PassThrough {
+                                ch_modes.metallic = folder.channel_blend_modes.metallic;
+                            }
+                            if folder.channel_blend_modes.normal != BlendMode::PassThrough {
+                                ch_modes.normal = folder.channel_blend_modes.normal;
+                            }
+                            if folder.channel_blend_modes.height != BlendMode::PassThrough {
+                                ch_modes.height = folder.channel_blend_modes.height;
+                            }
+                            if folder.channel_blend_modes.emission != BlendMode::PassThrough {
+                                ch_modes.emission = folder.channel_blend_modes.emission;
+                            }
+                            if folder.channel_blend_modes.opacity != BlendMode::PassThrough {
+                                ch_modes.opacity = folder.channel_blend_modes.opacity;
+                            }
+                        }
+                    }
+                    let ch_ops = layer.channel_opacities;
                     let flags = layer.channel_flags;
                     let mut layer_op = layer.opacity;
                     if let Some(folder) = parent_folder {
@@ -2050,50 +2423,77 @@ impl CompositeTextureSet {
                         if effective_opacity <= 1e-4 { continue; }
 
                         if flags.base_color {
-                            let src = layer.base_color_buf.data[idx2];
-                            base_row[x] = mode.blend_color(base_row[x], src, effective_opacity);
+                            let op = effective_opacity * ch_ops.base_color;
+                            if op > 1e-4 {
+                                let src = layer.base_color_buf.data[idx2];
+                                base_row[x] = ch_modes.base_color.blend_color(base_row[x], src, op);
+                            }
                         }
 
                         if flags.roughness {
-                            let src = layer.roughness_buf.data[idx2];
-                            rough_row[x] = mode.blend_scalar(rough_row[x], src, effective_opacity);
+                            let op = effective_opacity * ch_ops.roughness;
+                            if op > 1e-4 {
+                                let src = layer.roughness_buf.data[idx2];
+                                rough_row[x] = ch_modes.roughness.blend_scalar(rough_row[x], src, op);
+                            }
                         }
 
                         if flags.metallic {
-                            let src = layer.metallic_buf.data[idx2];
-                            metal_row[x] = mode.blend_scalar(metal_row[x], src, effective_opacity);
+                            let op = effective_opacity * ch_ops.metallic;
+                            if op > 1e-4 {
+                                let src = layer.metallic_buf.data[idx2];
+                                metal_row[x] = ch_modes.metallic.blend_scalar(metal_row[x], src, op);
+                            }
                         }
 
                         if flags.normal {
-                            let src = layer.normal_buf.data[idx2];
-                            norm_row[x] = mode.blend_color(norm_row[x], src, effective_opacity);
+                            let op = effective_opacity * ch_ops.normal;
+                            if op > 1e-4 {
+                                let src = layer.normal_buf.data[idx2];
+                                norm_row[x] = ch_modes.normal.blend_color(norm_row[x], src, op);
+                            }
                         }
 
                         if flags.height {
-                            let src = layer.height_buf.data[idx2];
-                            height_row[x] = mode.blend_scalar(height_row[x], src, effective_opacity);
+                            let op = effective_opacity * ch_ops.height;
+                            if op > 1e-4 {
+                                let src = layer.height_buf.data[idx2];
+                                height_row[x] = ch_modes.height.blend_scalar(height_row[x], src, op);
+                            }
                         }
 
                         if flags.emission {
-                            let src = layer.emissive_buf.data[idx2];
-                            emissive_row[x] = mode.blend_color(emissive_row[x], src, effective_opacity);
+                            let op = effective_opacity * ch_ops.emission;
+                            if op > 1e-4 {
+                                let src = layer.emissive_buf.data[idx2];
+                                emissive_row[x] = ch_modes.emission.blend_color(emissive_row[x], src, op);
+                            }
                         }
 
                         if flags.opacity {
-                            let src = layer.opacity_buf.data[idx2];
-                            opacity_row[x] = mode.blend_scalar(opacity_row[x], src, effective_opacity);
+                            let op = effective_opacity * ch_ops.opacity;
+                            if op > 1e-4 {
+                                let src = layer.opacity_buf.data[idx2];
+                                opacity_row[x] = ch_modes.opacity.blend_scalar(opacity_row[x], src, op);
+                            }
                         }
 
                         if flags.clearcoat {
-                            let src = layer.clearcoat_buf.data[idx2];
-                            clearcoat_row[x] = mode.blend_scalar(clearcoat_row[x], src, effective_opacity);
+                            let op = effective_opacity * ch_ops.clearcoat;
+                            if op > 1e-4 {
+                                let src = layer.clearcoat_buf.data[idx2];
+                                clearcoat_row[x] = ch_modes.clearcoat.blend_scalar(clearcoat_row[x], src, op);
+                            }
                         }
 
                         if flags.anisotropy {
-                            let src_a = layer.anisotropy_buf.data[idx2];
-                            aniso_row[x] = mode.blend_scalar(aniso_row[x], src_a, effective_opacity);
-                            let src_ang = layer.anisotropy_angle_buf.data[idx2];
-                            aniso_ang_row[x] = mode.blend_scalar(aniso_ang_row[x], src_ang, effective_opacity);
+                            let op = effective_opacity * ch_ops.anisotropy;
+                            if op > 1e-4 {
+                                let src_a = layer.anisotropy_buf.data[idx2];
+                                aniso_row[x] = ch_modes.anisotropy.blend_scalar(aniso_row[x], src_a, op);
+                                let src_ang = layer.anisotropy_angle_buf.data[idx2];
+                                aniso_ang_row[x] = ch_modes.anisotropy.blend_scalar(aniso_ang_row[x], src_ang, op);
+                            }
                         }
                     }
                 }
@@ -2410,6 +2810,32 @@ mod tests {
     }
 
     #[test]
+    fn test_folder_pass_through_and_blend_modes() {
+        let mut comp = CompositeTextureSet::new(16, 16);
+        let mut l_bg = Layer::new_fill_layer(1, "Background".to_string(), 16, 16, Vec4::new(0.5, 0.5, 0.5, 1.0), 0.5, 0.0);
+        l_bg.evaluate_fill(None);
+
+        let mut folder = Layer::new_folder_layer(2, "Folder".to_string(), 16, 16);
+        assert_eq!(folder.blend_mode, BlendMode::PassThrough);
+
+        let mut l_child = Layer::new_fill_layer(3, "Child".to_string(), 16, 16, Vec4::new(0.4, 0.4, 0.4, 1.0), 0.5, 0.0);
+        l_child.parent_folder_id = Some(2);
+        l_child.channel_blend_modes.base_color = BlendMode::Multiply;
+        l_child.evaluate_fill(None);
+
+        // In PassThrough mode, child's Multiply blend mode applies directly to the background
+        comp.composite_layers(&[l_bg.clone(), folder.clone(), l_child.clone()]);
+        let pixel_pt = comp.base_color.get_pixel(8, 8);
+        assert!((pixel_pt.x - 0.2).abs() < 1e-3, "Pass-through multiply: 0.5 * 0.4 = 0.2");
+
+        // When folder is switched to Add mode, folder overrides child
+        folder.blend_mode = BlendMode::Add;
+        comp.composite_layers(&[l_bg, folder, l_child]);
+        let pixel_add = comp.base_color.get_pixel(8, 8);
+        assert!((pixel_add.x - 0.9).abs() < 1e-3, "Folder Add mode: 0.5 + 0.4 = 0.9");
+    }
+
+    #[test]
     fn test_procedural_filters_invert_and_levels() {
         let mut layer = Layer::new_fill_layer(1, "Test".to_string(), 16, 16, Vec4::new(0.2, 0.4, 0.8, 1.0), 0.5, 0.0);
         layer.evaluate_fill(None);
@@ -2625,6 +3051,101 @@ mod tests {
         assert!(n0.x >= 0.0 && n0.x <= 1.0);
         assert!(n0.y >= 0.0 && n0.y <= 1.0);
         assert!(n0.z >= 0.0 && n0.z <= 1.0);
+    }
+
+    #[test]
+    fn test_per_channel_blend_modes_and_opacities() {
+        let mut layer_base = Layer::new_fill_layer(1, "Base".to_string(), 16, 16, Vec4::new(0.2, 0.2, 0.2, 1.0), 0.5, 0.0);
+        layer_base.fill_height = 0.3;
+        layer_base.set_channel_blend_mode(ChannelType::Height, BlendMode::Normal);
+        layer_base.evaluate_fill_advanced(None, None, None, None);
+
+        let mut layer_top = Layer::new_fill_layer(2, "Top".to_string(), 16, 16, Vec4::new(0.8, 0.1, 0.1, 1.0), 0.5, 0.0);
+        layer_top.fill_height = 0.4;
+        layer_top.evaluate_fill_advanced(None, None, None, None);
+
+        // Configure per-channel blend modes: BaseColor = Normal, Height = Add
+        layer_top.set_channel_blend_mode(ChannelType::BaseColor, BlendMode::Normal);
+        layer_top.set_channel_blend_mode(ChannelType::Height, BlendMode::Add);
+
+        let layers = vec![layer_base, layer_top.clone()];
+        let mut comp = CompositeTextureSet::new(16, 16);
+        comp.composite_layers(&layers);
+
+        // BaseColor should blend via Normal (taking top layer's red)
+        let col = comp.base_color.get_pixel(8, 8);
+        assert!((col.x - 0.8).abs() < 1e-3, "BaseColor should be 0.8, got {}", col.x);
+        assert!((col.y - 0.1).abs() < 1e-3, "BaseColor should be 0.1, got {}", col.y);
+
+        // Height should blend via Add (0.3 + 0.4 = 0.7)
+        let h = comp.height_map.get_pixel(8, 8);
+        assert!((h - 0.7).abs() < 1e-3, "Height should be 0.7 via Add blend mode, got {}", h);
+
+        // Test channel opacities: reduce top layer's height opacity to 0.5
+        let mut layer_top_scaled = layer_top;
+        layer_top_scaled.set_channel_opacity(ChannelType::Height, 0.5);
+        let layers_scaled = vec![layers[0].clone(), layer_top_scaled];
+        comp.composite_layers(&layers_scaled);
+
+        // Height should blend via Add with half opacity: 0.3 + 0.4 * 0.5 = 0.5
+        let h_scaled = comp.height_map.get_pixel(8, 8);
+        assert!((h_scaled - 0.5).abs() < 1e-3, "Height should be 0.5 with 0.5 channel opacity, got {}", h_scaled);
+    }
+
+    #[test]
+    fn test_anchor_points_cross_layer_referencing() {
+        let mut layer_source = Layer::new_fill_layer(1, "SourceLayer".to_string(), 16, 16, Vec4::new(0.5, 0.5, 0.5, 1.0), 0.5, 0.0);
+        layer_source.fill_height = 0.75;
+        layer_source.evaluate_fill_advanced(None, None, None, None);
+        layer_source.anchor_point = Some("HeightAnchor".to_string());
+
+        let anchor_ref = layer_source.as_anchor_ref().expect("Expected anchor ref from layer_source");
+        let anchor_refs = [anchor_ref];
+
+        let mut layer_target = Layer::new_paint_layer(2, "TargetLayer".to_string(), 16, 16);
+        layer_target.add_white_mask();
+        layer_target.add_mask_anchor_effect("HeightAnchor".to_string(), ChannelType::Height);
+
+        // Evaluate mask with anchor point reference
+        layer_target.evaluate_mask_full(None, None, None, None, None, &anchor_refs);
+
+        // Target layer's mask should now equal the source layer's height channel (0.75)
+        let mask_val = layer_target.mask_buf.get_pixel(8, 8);
+        assert!((mask_val - 0.75).abs() < 1e-3, "Mask should reference height anchor value 0.75, got {}", mask_val);
+
+        // Test inverting the anchor reference
+        if let MaskEffectType::AnchorReference { ref mut invert, .. } = layer_target.mask_effects[0].effect_type {
+            *invert = true;
+        }
+        layer_target.evaluate_mask_full(None, None, None, None, None, &anchor_refs);
+        let inverted_val = layer_target.mask_buf.get_pixel(8, 8);
+        assert!((inverted_val - 0.25).abs() < 1e-3, "Inverted mask should equal 0.25 (1.0 - 0.75), got {}", inverted_val);
+    }
+
+    #[test]
+    fn test_color_selection_mask_from_id_map() {
+        let w = 16u32;
+        let h = 16u32;
+        let mut id_map = RgbaBuffer::new(w, h, Vec4::new(0.0, 1.0, 0.0, 1.0)); // Green base
+        for y in 0..h {
+            for x in 0..(w / 2) {
+                id_map.set_pixel(x, y, Vec4::new(1.0, 0.0, 0.0, 1.0)); // Red on left half
+            }
+        }
+
+        let mut layer = Layer::new_paint_layer(1, "ColorSelectTest".to_string(), w, h);
+        layer.add_black_mask();
+        layer.add_mask_color_selection_effect([1.0, 0.0, 0.0], 0.1, 0.05);
+
+        layer.evaluate_mask_full(None, None, None, None, Some(&id_map), &[]);
+
+        // Left half (red) should match color selection mask (~1.0)
+        let left_val = layer.mask_buf.get_pixel(2, 8);
+        assert!((left_val - 1.0).abs() < 1e-3, "Red region must be masked with 1.0, got {}", left_val);
+
+        // Right half (green) should not match color selection mask (0.0)
+        let right_val = layer.mask_buf.get_pixel(12, 8);
+        assert!(right_val < 1e-3, "Green region must not match red target color, got {}", right_val);
     }
 }
 

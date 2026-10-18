@@ -378,6 +378,7 @@ impl ScalarBuffer {
     }
 
     /// Load a scalar buffer from an image file (uses luminance / grayscale)
+    #[allow(dead_code)]
     pub fn from_image_file(path: &std::path::Path) -> Result<Self, String> {
         let img = image::open(path).map_err(|e| format!("Failed to load image: {}", e))?;
         let gray = img.to_luma8();

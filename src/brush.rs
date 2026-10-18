@@ -65,6 +65,7 @@ impl AlphaType {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PolygonFillMode {
     Triangle,
+    Polygon,
     UvIsland,
     MeshElement,
 }
@@ -73,8 +74,33 @@ impl PolygonFillMode {
     pub fn name(&self) -> &'static str {
         match self {
             Self::Triangle => "Triangle",
+            Self::Polygon => "Polygon (Quad)",
             Self::UvIsland => "UV Island",
             Self::MeshElement => "Mesh Element",
+        }
+    }
+}
+
+/// Stencil / Projection painting settings matching Substance 3D Painter
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StencilSettings {
+    pub enabled: bool,
+    pub pos: Vec2,
+    pub scale: f32,
+    pub angle: f32,
+    pub opacity: f32,
+    pub mask_only: bool,
+}
+
+impl Default for StencilSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            pos: Vec2::ZERO,
+            scale: 1.0,
+            angle: 0.0,
+            opacity: 0.5,
+            mask_only: false,
         }
     }
 }
@@ -126,6 +152,21 @@ pub struct BrushSettings {
     pub symmetry_y: bool,
     pub symmetry_z: bool,
     pub symmetry_center: Vec3,
+
+    // Stencil / Projection Settings
+    pub stencil: StencilSettings,
+
+    // Smudge Settings
+    #[serde(default = "default_smudge_strength")]
+    pub smudge_strength: f32,
+
+    // Clone Stamp Settings
+    #[serde(default)]
+    pub clone_source_uv: Option<Vec2>,
+}
+
+fn default_smudge_strength() -> f32 {
+    0.5
 }
 
 impl Default for BrushSettings {
@@ -163,6 +204,9 @@ impl Default for BrushSettings {
             symmetry_y: false,
             symmetry_z: false,
             symmetry_center: Vec3::ZERO,
+            stencil: StencilSettings::default(),
+            smudge_strength: 0.5,
+            clone_source_uv: None,
         }
     }
 }
@@ -183,6 +227,19 @@ pub struct BrushEngine {
     pub cached_tip_radius: f32,
     pub cached_tip_alpha: AlphaType,
     pub cached_tip_hardness: f32,
+
+    // Stencil projection image buffer
+    pub stencil_buffer: Option<crate::channel::RgbaBuffer>,
+
+    // Smudge tool state
+    pub smudge_color: Option<Vec4>,
+    pub smudge_roughness: Option<f32>,
+    pub smudge_metallic: Option<f32>,
+    pub smudge_height: Option<f32>,
+    pub smudge_emissive: Option<Vec4>,
+
+    // Clone stamp tool state
+    pub clone_anchor_uv: Option<Vec2>,
 }
 
 impl BrushEngine {
@@ -199,6 +256,37 @@ impl BrushEngine {
             cached_tip_radius: -1.0,
             cached_tip_alpha: AlphaType::SoftRound,
             cached_tip_hardness: -1.0,
+            stencil_buffer: None,
+            smudge_color: None,
+            smudge_roughness: None,
+            smudge_metallic: None,
+            smudge_height: None,
+            smudge_emissive: None,
+            clone_anchor_uv: None,
+        }
+    }
+
+    /// Sample the stencil texture given normalized screen UV coordinates (0.0 to 1.0)
+    pub fn sample_stencil(&self, screen_uv: Vec2) -> Option<Vec4> {
+        if let Some(ref buf) = self.stencil_buffer {
+            let st = &self.settings.stencil;
+            if !st.enabled || buf.width == 0 || buf.height == 0 {
+                return None;
+            }
+            let centered = screen_uv - Vec2::splat(0.5) - st.pos;
+            let (sin_a, cos_a) = (-st.angle).sin_cos();
+            let rotated = Vec2::new(
+                centered.x * cos_a - centered.y * sin_a,
+                centered.x * sin_a + centered.y * cos_a,
+            );
+            let scaled = rotated / st.scale.max(0.01) + Vec2::splat(0.5);
+            if scaled.x >= 0.0 && scaled.x <= 1.0 && scaled.y >= 0.0 && scaled.y <= 1.0 {
+                Some(buf.sample_bilinear(scaled))
+            } else {
+                None
+            }
+        } else {
+            None
         }
     }
 
@@ -272,6 +360,12 @@ impl BrushEngine {
         self.lazy_screen_pos = None;
         self.last_hit_pos = None;
         self.last_hit_normal = None;
+        self.smudge_color = None;
+        self.smudge_roughness = None;
+        self.smudge_metallic = None;
+        self.smudge_height = None;
+        self.smudge_emissive = None;
+        self.clone_anchor_uv = None;
     }
 
     /// Paint continuous stroke from previous UV to current UV
@@ -340,7 +434,7 @@ impl BrushEngine {
     }
 
     /// Single brush stamp centered at UV coordinates
-    pub fn stamp_uv(&self, layer: &mut Layer, uv: Vec2) {
+    pub fn stamp_uv(&mut self, layer: &mut Layer, uv: Vec2) {
         let w = layer.base_color_buf.width as i32;
         let h = layer.base_color_buf.height as i32;
 
@@ -365,6 +459,8 @@ impl BrushEngine {
         let max_y = (center_y + rad).min(h - 1);
 
         let is_eraser = self.settings.mode == ToolMode::Eraser;
+        let is_smudge = self.settings.mode == ToolMode::Smudge;
+        let is_clone = self.settings.mode == ToolMode::Clone;
         let is_mask_target = self.settings.target == PaintTarget::Mask;
         
         let (paint_buf_ptr, paint_alpha_ptr) = if is_mask_target {
@@ -410,6 +506,63 @@ impl BrushEngine {
         let do_clearcoat = self.settings.channels.clearcoat;
         let do_aniso = self.settings.channels.anisotropy;
 
+        // Smudge carrier update
+        if is_smudge {
+            let cx = center_x.clamp(0, w - 1) as usize;
+            let cy = center_y.clamp(0, h - 1) as usize;
+            let center_idx = cy * (w as usize) + cx;
+            let cur_col = layer.base_color_buf.data[center_idx];
+            let cur_r = layer.roughness_buf.data[center_idx];
+            let cur_m = layer.metallic_buf.data[center_idx];
+            let cur_h = layer.height_buf.data[center_idx];
+            let cur_emis = layer.emissive_buf.data[center_idx];
+
+            let str_val = self.settings.smudge_strength.clamp(0.05, 1.0);
+            if let Some(sc) = self.smudge_color {
+                self.smudge_color = Some(sc.lerp(cur_col, str_val * 0.4));
+            } else {
+                self.smudge_color = Some(cur_col);
+            }
+            if let Some(sr) = self.smudge_roughness {
+                self.smudge_roughness = Some(sr * (1.0 - str_val * 0.4) + cur_r * (str_val * 0.4));
+            } else {
+                self.smudge_roughness = Some(cur_r);
+            }
+            if let Some(sm) = self.smudge_metallic {
+                self.smudge_metallic = Some(sm * (1.0 - str_val * 0.4) + cur_m * (str_val * 0.4));
+            } else {
+                self.smudge_metallic = Some(cur_m);
+            }
+            if let Some(sh) = self.smudge_height {
+                self.smudge_height = Some(sh * (1.0 - str_val * 0.4) + cur_h * (str_val * 0.4));
+            } else {
+                self.smudge_height = Some(cur_h);
+            }
+            if let Some(se) = self.smudge_emissive {
+                self.smudge_emissive = Some(se.lerp(cur_emis, str_val * 0.4));
+            } else {
+                self.smudge_emissive = Some(cur_emis);
+            }
+        }
+
+        // Clone Stamp anchor and offset update
+        let clone_source_center = if is_clone {
+            if let Some(src_uv) = self.settings.clone_source_uv {
+                if self.clone_anchor_uv.is_none() {
+                    self.clone_anchor_uv = Some(uv);
+                }
+                let uv_offset = uv - self.clone_anchor_uv.unwrap();
+                let sample_uv = (src_uv + uv_offset).rem_euclid(Vec2::splat(1.0));
+                let scx = (sample_uv.x * (w as f32)).round() as i32;
+                let scy = (sample_uv.y * (h as f32)).round() as i32;
+                Some((scx, scy))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         let rect_min_x = min_x as u32;
         let rect_max_x = max_x as u32;
         let rect_min_y = min_y as u32;
@@ -436,6 +589,29 @@ impl BrushEngine {
                 if weight <= 1e-4 { continue; }
 
                 let idx = buf_y_offset + (px as usize);
+
+                let (eff_base_col, eff_r, eff_m, eff_h, eff_emis) = if let Some((scx, scy)) = clone_source_center {
+                    let src_x = (scx + (px - center_x)).rem_euclid(w) as usize;
+                    let src_y = (scy + (py - center_y)).rem_euclid(h) as usize;
+                    let src_idx = src_y * (w as usize) + src_x;
+                    (
+                        layer.base_color_buf.data[src_idx],
+                        layer.roughness_buf.data[src_idx],
+                        layer.metallic_buf.data[src_idx],
+                        layer.height_buf.data[src_idx],
+                        layer.emissive_buf.data[src_idx],
+                    )
+                } else if is_smudge {
+                    (
+                        self.smudge_color.unwrap_or(base_col_target),
+                        self.smudge_roughness.unwrap_or(r_target),
+                        self.smudge_metallic.unwrap_or(m_target),
+                        self.smudge_height.unwrap_or(h_target),
+                        self.smudge_emissive.unwrap_or(emis_target),
+                    )
+                } else {
+                    (base_col_target, r_target, m_target, h_target, emis_target)
+                };
 
                 unsafe {
                     if is_mask_target {
@@ -474,7 +650,7 @@ impl BrushEngine {
                         let alpha = (cur_col.w + weight * (1.0 - cur_col.w)).clamp(0.0, 1.0);
 
                         if do_color {
-                            let blended = cur_col.truncate() * (1.0 - weight) + base_col_target.truncate() * weight;
+                            let blended = cur_col.truncate() * (1.0 - weight) + eff_base_col.truncate() * weight;
                             *layer.base_color_buf.data.get_unchecked_mut(idx) = Vec4::new(blended.x, blended.y, blended.z, alpha);
                         } else {
                             layer.base_color_buf.data.get_unchecked_mut(idx).w = alpha;
@@ -482,20 +658,20 @@ impl BrushEngine {
 
                         if do_r {
                             let cur_r = *layer.roughness_buf.data.get_unchecked(idx);
-                            *layer.roughness_buf.data.get_unchecked_mut(idx) = cur_r * (1.0 - weight) + r_target * weight;
+                            *layer.roughness_buf.data.get_unchecked_mut(idx) = cur_r * (1.0 - weight) + eff_r * weight;
                         }
                         if do_m {
                             let cur_m = *layer.metallic_buf.data.get_unchecked(idx);
-                            *layer.metallic_buf.data.get_unchecked_mut(idx) = cur_m * (1.0 - weight) + m_target * weight;
+                            *layer.metallic_buf.data.get_unchecked_mut(idx) = cur_m * (1.0 - weight) + eff_m * weight;
                         }
                         if do_h {
                             let cur_h = *layer.height_buf.data.get_unchecked(idx);
-                            *layer.height_buf.data.get_unchecked_mut(idx) = cur_h * (1.0 - weight) + h_target * weight;
+                            *layer.height_buf.data.get_unchecked_mut(idx) = cur_h * (1.0 - weight) + eff_h * weight;
                         }
                         if do_emis {
                             let cur_e = *layer.emissive_buf.data.get_unchecked(idx);
-                            let blended_e = cur_e.truncate() * (1.0 - weight) + emis_target.truncate() * weight;
-                            let blended_w = cur_e.w * (1.0 - weight) + emis_target.w * weight;
+                            let blended_e = cur_e.truncate() * (1.0 - weight) + eff_emis.truncate() * weight;
+                            let blended_w = cur_e.w * (1.0 - weight) + eff_emis.w * weight;
                             *layer.emissive_buf.data.get_unchecked_mut(idx) = Vec4::new(blended_e.x, blended_e.y, blended_e.z, blended_w);
                         }
                         if do_opac {
@@ -565,6 +741,8 @@ pub fn barycentric_3d(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> (f32, f32, f32) {
         let world_radius_sq = world_radius * world_radius;
 
         let is_eraser = self.settings.mode == ToolMode::Eraser;
+        let is_smudge = self.settings.mode == ToolMode::Smudge;
+        let is_clone = self.settings.mode == ToolMode::Clone;
         let is_mask_target = self.settings.target == PaintTarget::Mask;
 
         let (paint_buf_ptr, paint_alpha_ptr) = if is_mask_target {
@@ -589,6 +767,48 @@ pub fn barycentric_3d(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> (f32, f32, f32) {
         } else {
             (std::ptr::null_mut(), std::ptr::null_mut())
         };
+
+        // Smudge carrier update for 3D stroke
+        if is_smudge && !triangles.is_empty() {
+            let t0 = triangles[0];
+            let i0 = mesh.indices[t0 as usize * 3] as usize;
+            let uv0 = mesh.vertices[i0].uv;
+            let cx = ((uv0.x.rem_euclid(1.0) * w_f).round() as i32).clamp(0, w - 1) as usize;
+            let cy = ((uv0.y.rem_euclid(1.0) * h_f).round() as i32).clamp(0, h - 1) as usize;
+            let sample_idx = cy * (w as usize) + cx;
+            let cur_col = layer.base_color_buf.data[sample_idx];
+            let cur_r = layer.roughness_buf.data[sample_idx];
+            let cur_m = layer.metallic_buf.data[sample_idx];
+            let cur_h = layer.height_buf.data[sample_idx];
+            let cur_emis = layer.emissive_buf.data[sample_idx];
+
+            let str_val = self.settings.smudge_strength.clamp(0.05, 1.0);
+            if let Some(sc) = self.smudge_color {
+                self.smudge_color = Some(sc.lerp(cur_col, str_val * 0.4));
+            } else {
+                self.smudge_color = Some(cur_col);
+            }
+            if let Some(sr) = self.smudge_roughness {
+                self.smudge_roughness = Some(sr * (1.0 - str_val * 0.4) + cur_r * (str_val * 0.4));
+            } else {
+                self.smudge_roughness = Some(cur_r);
+            }
+            if let Some(sm) = self.smudge_metallic {
+                self.smudge_metallic = Some(sm * (1.0 - str_val * 0.4) + cur_m * (str_val * 0.4));
+            } else {
+                self.smudge_metallic = Some(cur_m);
+            }
+            if let Some(sh) = self.smudge_height {
+                self.smudge_height = Some(sh * (1.0 - str_val * 0.4) + cur_h * (str_val * 0.4));
+            } else {
+                self.smudge_height = Some(cur_h);
+            }
+            if let Some(se) = self.smudge_emissive {
+                self.smudge_emissive = Some(se.lerp(cur_emis, str_val * 0.4));
+            } else {
+                self.smudge_emissive = Some(cur_emis);
+            }
+        }
 
         let base_col_target = self.settings.paint_color;
         let r_target = self.settings.paint_roughness;
@@ -754,6 +974,33 @@ pub fn barycentric_3d(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> (f32, f32, f32) {
 
                             let idx = buf_y_offset + wrap_x;
 
+                            let (eff_base_col, eff_r, eff_m, eff_h, eff_emis) = if is_clone {
+                                if let Some(src_uv) = self.settings.clone_source_uv {
+                                    let scx = ((src_uv.x.rem_euclid(1.0) * w_f).round() as i32).clamp(0, w - 1) as usize;
+                                    let scy = ((src_uv.y.rem_euclid(1.0) * h_f).round() as i32).clamp(0, h - 1) as usize;
+                                    let src_idx = scy * (w as usize) + scx;
+                                    (
+                                        layer.base_color_buf.data[src_idx],
+                                        layer.roughness_buf.data[src_idx],
+                                        layer.metallic_buf.data[src_idx],
+                                        layer.height_buf.data[src_idx],
+                                        layer.emissive_buf.data[src_idx],
+                                    )
+                                } else {
+                                    (base_col_target, r_target, m_target, h_target, emis_target)
+                                }
+                            } else if is_smudge {
+                                (
+                                    self.smudge_color.unwrap_or(base_col_target),
+                                    self.smudge_roughness.unwrap_or(r_target),
+                                    self.smudge_metallic.unwrap_or(m_target),
+                                    self.smudge_height.unwrap_or(h_target),
+                                    self.smudge_emissive.unwrap_or(emis_target),
+                                )
+                            } else {
+                                (base_col_target, r_target, m_target, h_target, emis_target)
+                            };
+
                             unsafe {
                                 if is_mask_target {
                                     let target_val = if is_eraser { 0.0 } else { self.settings.mask_paint_value };
@@ -790,27 +1037,27 @@ pub fn barycentric_3d(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> (f32, f32, f32) {
                                     let cur_col = *layer.base_color_buf.data.get_unchecked(idx);
                                     let alpha = (cur_col.w + weight * (1.0 - cur_col.w)).clamp(0.0, 1.0);
                                     if do_color {
-                                        let blended = cur_col.truncate() * (1.0 - weight) + base_col_target.truncate() * weight;
+                                        let blended = cur_col.truncate() * (1.0 - weight) + eff_base_col.truncate() * weight;
                                         *layer.base_color_buf.data.get_unchecked_mut(idx) = Vec4::new(blended.x, blended.y, blended.z, alpha);
                                     } else {
                                         layer.base_color_buf.data.get_unchecked_mut(idx).w = alpha;
                                     }
                                     if do_r {
                                         let cur_r = *layer.roughness_buf.data.get_unchecked(idx);
-                                        *layer.roughness_buf.data.get_unchecked_mut(idx) = cur_r * (1.0 - weight) + r_target * weight;
+                                        *layer.roughness_buf.data.get_unchecked_mut(idx) = cur_r * (1.0 - weight) + eff_r * weight;
                                     }
                                     if do_m {
                                         let cur_m = *layer.metallic_buf.data.get_unchecked(idx);
-                                        *layer.metallic_buf.data.get_unchecked_mut(idx) = cur_m * (1.0 - weight) + m_target * weight;
+                                        *layer.metallic_buf.data.get_unchecked_mut(idx) = cur_m * (1.0 - weight) + eff_m * weight;
                                     }
                                     if do_h {
                                         let cur_h = *layer.height_buf.data.get_unchecked(idx);
-                                        *layer.height_buf.data.get_unchecked_mut(idx) = cur_h * (1.0 - weight) + h_target * weight;
+                                        *layer.height_buf.data.get_unchecked_mut(idx) = cur_h * (1.0 - weight) + eff_h * weight;
                                     }
                                     if do_emis {
                                         let cur_e = *layer.emissive_buf.data.get_unchecked(idx);
-                                        let blended_e = cur_e.truncate() * (1.0 - weight) + emis_target.truncate() * weight;
-                                        let blended_w = cur_e.w * (1.0 - weight) + emis_target.w * weight;
+                                        let blended_e = cur_e.truncate() * (1.0 - weight) + eff_emis.truncate() * weight;
+                                        let blended_w = cur_e.w * (1.0 - weight) + eff_emis.w * weight;
                                         *layer.emissive_buf.data.get_unchecked_mut(idx) = Vec4::new(blended_e.x, blended_e.y, blended_e.z, blended_w);
                                     }
                                     if do_opac {
@@ -1288,5 +1535,82 @@ mod tests {
         assert!(erased_cc < 0.15, "Clearcoat should be erased towards 0.0, got {}", erased_cc);
         assert!(erased_aniso.abs() < 0.15, "Anisotropy should be erased towards 0.0, got {}", erased_aniso);
         assert!(erased_ang < 0.15, "Anisotropy angle should be erased towards 0.0, got {}", erased_ang);
+    }
+
+    #[test]
+    fn test_stencil_sampling_and_transformations() {
+        let mut engine = BrushEngine::new();
+        let mut stencil_buf = crate::channel::RgbaBuffer::new(16, 16, Vec4::new(0.0, 0.0, 0.0, 1.0));
+        stencil_buf.set_pixel(8, 8, Vec4::new(1.0, 0.5, 0.25, 1.0));
+        engine.stencil_buffer = Some(stencil_buf);
+
+        // Disabled by default
+        assert!(engine.sample_stencil(Vec2::new(0.5, 0.5)).is_none());
+
+        // Enable stencil
+        engine.settings.stencil.enabled = true;
+        let sample_center = engine.sample_stencil(Vec2::new(0.5, 0.5));
+        assert!(sample_center.is_some(), "Center sample should hit stencil");
+        let val = sample_center.unwrap();
+        assert!((val.x - 1.0).abs() < 0.1, "Sample at center should be near (1.0, 0.5, 0.25), got x={}", val.x);
+
+        // Outside scaled bounds should return None
+        engine.settings.stencil.scale = 0.5;
+        let sample_edge = engine.sample_stencil(Vec2::new(0.95, 0.95));
+        assert!(sample_edge.is_none(), "Sample outside scaled stencil bounds must return None");
+    }
+
+    #[test]
+    fn test_smudge_tool_carrier_and_blending() {
+        let mut layer = Layer::new_paint_layer(1, "Paint".to_string(), 32, 32);
+        // Fill left half with red, right half with blue
+        for y in 0..32 {
+            for x in 0..16 {
+                layer.base_color_buf.set_pixel(x, y, Vec4::new(1.0, 0.0, 0.0, 1.0));
+            }
+            for x in 16..32 {
+                layer.base_color_buf.set_pixel(x, y, Vec4::new(0.0, 0.0, 1.0, 1.0));
+            }
+        }
+
+        let mut engine = BrushEngine::new();
+        engine.settings.mode = ToolMode::Smudge;
+        engine.settings.radius = 4.0;
+        engine.settings.flow = 1.0;
+        engine.settings.opacity = 1.0;
+        engine.settings.smudge_strength = 0.8;
+        engine.update_cache();
+
+        // Stroke from x=12 (red side) across to x=18 (blue side)
+        engine.paint_stroke(&mut layer, Vec2::new(12.0 / 32.0, 16.0 / 32.0));
+        engine.paint_stroke(&mut layer, Vec2::new(18.0 / 32.0, 16.0 / 32.0));
+        engine.end_stroke();
+
+        let smeared_pixel = layer.base_color_buf.get_pixel(18, 16);
+        assert!(smeared_pixel.x > 0.1, "Smudge should smear red color across boundary into blue side, got r={}", smeared_pixel.x);
+    }
+
+    #[test]
+    fn test_clone_stamp_tool_sampling_and_offset() {
+        let mut layer = Layer::new_paint_layer(1, "Paint".to_string(), 32, 32);
+        // Place distinct green spot at (8, 8)
+        layer.base_color_buf.set_pixel(8, 8, Vec4::new(0.0, 1.0, 0.0, 1.0));
+        layer.roughness_buf.set_pixel(8, 8, 0.15);
+
+        let mut engine = BrushEngine::new();
+        engine.settings.mode = ToolMode::Clone;
+        engine.settings.radius = 2.0;
+        engine.settings.flow = 1.0;
+        engine.settings.opacity = 1.0;
+        engine.settings.clone_source_uv = Some(Vec2::new(8.0 / 32.0, 8.0 / 32.0));
+        engine.update_cache();
+
+        // Stamp at target location (24, 24)
+        engine.stamp_uv(&mut layer, Vec2::new(24.0 / 32.0, 24.0 / 32.0));
+
+        let cloned_col = layer.base_color_buf.get_pixel(24, 24);
+        let cloned_r = layer.roughness_buf.get_pixel(24, 24);
+        assert!(cloned_col.y > 0.5, "Clone stamp should copy green color from source, got g={}", cloned_col.y);
+        assert!(cloned_r < 0.35, "Clone stamp should copy roughness from source, got r={}", cloned_r);
     }
 }

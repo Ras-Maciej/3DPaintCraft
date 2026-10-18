@@ -44,7 +44,88 @@ pub struct BakeResultPayload {
     pub curvature: Option<crate::channel::ScalarBuffer>,
     pub position: Option<crate::channel::RgbaBuffer>,
     pub thickness: Option<crate::channel::ScalarBuffer>,
+    pub id_map: Option<crate::channel::RgbaBuffer>,
     pub elapsed_secs: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShelfPickerTarget {
+    FillBaseColor,
+    FillRoughness,
+    FillMetallic,
+    FillNormal,
+    FillHeight,
+    FillEmissive,
+    FillOpacity,
+    Stencil,
+    BrushAlpha,
+    MeshMapTangentNormal,
+    MeshMapWorldSpaceNormal,
+    MeshMapAo,
+    MeshMapCurvature,
+    MeshMapPosition,
+    MeshMapThickness,
+    MeshMapId,
+    HdriEnvironment,
+}
+
+#[derive(Clone, Debug)]
+pub struct ShelfPickerState {
+    pub target: ShelfPickerTarget,
+    pub search_query: String,
+    pub selected_category: crate::shelf::ShelfCategory,
+}
+
+impl ShelfPickerState {
+    pub fn new(target: ShelfPickerTarget) -> Self {
+        let selected_category = match target {
+            ShelfPickerTarget::FillBaseColor
+            | ShelfPickerTarget::FillRoughness
+            | ShelfPickerTarget::FillMetallic
+            | ShelfPickerTarget::FillNormal
+            | ShelfPickerTarget::FillHeight
+            | ShelfPickerTarget::FillEmissive
+            | ShelfPickerTarget::FillOpacity => crate::shelf::ShelfCategory::Project,
+            ShelfPickerTarget::Stencil => crate::shelf::ShelfCategory::Project,
+            ShelfPickerTarget::BrushAlpha => crate::shelf::ShelfCategory::Alphas,
+            ShelfPickerTarget::MeshMapTangentNormal
+            | ShelfPickerTarget::MeshMapWorldSpaceNormal
+            | ShelfPickerTarget::MeshMapAo
+            | ShelfPickerTarget::MeshMapCurvature
+            | ShelfPickerTarget::MeshMapPosition
+            | ShelfPickerTarget::MeshMapThickness
+            | ShelfPickerTarget::MeshMapId => crate::shelf::ShelfCategory::Project,
+            ShelfPickerTarget::HdriEnvironment => crate::shelf::ShelfCategory::Environments,
+        };
+
+        Self {
+            target,
+            search_query: String::new(),
+            selected_category,
+        }
+    }
+
+    pub fn title(&self) -> &'static str {
+        match self.target {
+            ShelfPickerTarget::FillBaseColor => "Select Texture for Base Color",
+            ShelfPickerTarget::FillRoughness => "Select Texture for Roughness",
+            ShelfPickerTarget::FillMetallic => "Select Texture for Metallic",
+            ShelfPickerTarget::FillNormal => "Select Texture for Normal",
+            ShelfPickerTarget::FillHeight => "Select Texture for Height",
+            ShelfPickerTarget::FillEmissive => "Select Texture for Emissive",
+            ShelfPickerTarget::FillOpacity => "Select Texture for Opacity",
+            ShelfPickerTarget::Stencil => "Select Stencil Texture (Projection)",
+            ShelfPickerTarget::BrushAlpha => "Select Brush Alpha",
+            ShelfPickerTarget::MeshMapTangentNormal => "Select Tangent Normal Map",
+            ShelfPickerTarget::MeshMapWorldSpaceNormal => "Select World Space Normal Map",
+            ShelfPickerTarget::MeshMapAo => "Select Ambient Occlusion (AO) Map",
+            ShelfPickerTarget::MeshMapCurvature => "Select Curvature Map",
+            ShelfPickerTarget::MeshMapPosition => "Select Position Map",
+            ShelfPickerTarget::MeshMapThickness => "Select Thickness Map",
+            ShelfPickerTarget::MeshMapId => "Select ID Map",
+            ShelfPickerTarget::HdriEnvironment => "Select HDRI Environment",
+        }
+    }
 }
 
 pub struct PaintcraftApp {
@@ -135,14 +216,27 @@ pub struct PaintcraftApp {
     pub bake_opt_position: bool,
     pub bake_opt_thickness: bool,
     pub bake_opt_thickness_invert: bool,
+    pub bake_opt_id_map: bool,
     pub bake_denoise: bool,
     pub bake_denoise_iterations: usize,
+    pub bake_match_mode: crate::baker::BakeMatchMode,
+    pub bake_low_suffix: String,
+    pub bake_high_suffix: String,
     pub bg_blur: f32,
     pub bg_opacity: f32,
+    pub layer_stack_channel: crate::channel::ChannelType,
+    #[allow(dead_code)]
+    pub stencil_image_path: String,
+    #[allow(dead_code)]
+    pub stencil_overlay_texture: Option<TextureHandle>,
     pub right_panel_tab: RightPanelTab,
     pub show_shelf: bool,
     pub shelf_category: crate::shelf::ShelfCategory,
     pub shelf_search_query: String,
+    pub shelf_picker: Option<ShelfPickerState>,
+    pub shelf_thumbnails: std::collections::HashMap<String, TextureHandle>,
+    pub shelf_thumbnails_dirty: bool,
+    pub shelf_resource_popup: Option<String>,
     pub asset_manager: crate::asset_manager::AssetManager,
     pub wgpu_viewport: Option<crate::wgpu_renderer::WgpuViewport>,
     pub updater: crate::updater::UpdateNotifier,
@@ -180,6 +274,16 @@ pub struct PaintcraftApp {
     pub bake_preview_thick: Option<TextureHandle>,
     pub bake_success_message: Option<String>,
     pub icons: Option<crate::icons::AppIcons>,
+
+    // Interactive Progressive Path Tracer (Iray Mode - F10)
+    pub iray_mode: bool,
+    pub path_tracer: Option<crate::path_tracer::PathTracer>,
+    pub iray_texture: Option<TextureHandle>,
+    pub last_iray_camera_view: Option<glam::Mat4>,
+    pub last_iray_hdri_rot: f32,
+    pub iray_max_samples: u32,
+    pub iray_max_bounces: u32,
+    pub iray_samples_per_frame: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -393,14 +497,25 @@ impl PaintcraftApp {
             bake_opt_position: true,
             bake_opt_thickness: true,
             bake_opt_thickness_invert: false,
+            bake_opt_id_map: true,
             bake_denoise: false,
             bake_denoise_iterations: 1,
+            bake_match_mode: crate::baker::BakeMatchMode::Always,
+            bake_low_suffix: "_low".to_string(),
+            bake_high_suffix: "_high".to_string(),
             bg_blur: 0.0,
             bg_opacity: 1.0,
+            layer_stack_channel: crate::channel::ChannelType::BaseColor,
+            stencil_image_path: String::new(),
+            stencil_overlay_texture: None,
             right_panel_tab: RightPanelTab::Layers,
             show_shelf: true,
             shelf_category: crate::shelf::ShelfCategory::All,
             shelf_search_query: String::new(),
+            shelf_picker: None,
+            shelf_thumbnails: std::collections::HashMap::new(),
+            shelf_thumbnails_dirty: true,
+            shelf_resource_popup: None,
             asset_manager,
             wgpu_viewport,
             updater: crate::updater::UpdateNotifier::new(),
@@ -429,6 +544,14 @@ impl PaintcraftApp {
             bake_preview_thick: None,
             bake_success_message: None,
             icons: None,
+            iray_mode: false,
+            path_tracer: Some(crate::path_tracer::PathTracer::new(512, 512)),
+            iray_texture: None,
+            last_iray_camera_view: None,
+            last_iray_hdri_rot: 0.0,
+            iray_max_samples: 256,
+            iray_max_bounces: 2,
+            iray_samples_per_frame: 1,
         }
     }
 
@@ -680,6 +803,776 @@ impl PaintcraftApp {
         ctx.load_texture(id, img, TextureOptions::LINEAR)
     }
 
+    /// Refresh cached egui thumbnails for all project shelf resources
+    pub fn refresh_shelf_thumbnails(&mut self, ctx: &egui::Context) {
+        if !self.shelf_thumbnails_dirty {
+            return;
+        }
+        for res in &self.project.resources {
+            if !self.shelf_thumbnails.contains_key(&res.id) {
+                if let Some(rgba) = &res.rgba_data {
+                    let thumb = Self::create_rgba_thumbnail(ctx, &format!("thumb_{}", res.id), rgba, 64, 64);
+                    self.shelf_thumbnails.insert(res.id.clone(), thumb);
+                } else if let Some(scalar) = &res.scalar_data {
+                    let thumb = Self::create_scalar_thumbnail(ctx, &format!("thumb_{}", res.id), scalar, 64, 64);
+                    self.shelf_thumbnails.insert(res.id.clone(), thumb);
+                }
+            }
+        }
+        self.shelf_thumbnails_dirty = false;
+    }
+
+    /// Assign a project shelf resource to a target channel, tool, or environment slot
+    pub fn assign_resource_to_target(&mut self, res: &crate::project::ProjectTextureResource, target: ShelfPickerTarget) {
+        match target {
+            ShelfPickerTarget::FillBaseColor => {
+                if let Some(rgba) = res.to_rgba_buffer() {
+                    if let Some(layer) = self.project.layers.get_mut(self.project.active_layer_idx) {
+                        layer.fill_color_tex = Some(rgba);
+                        layer.evaluate_fill(self.project.curvature_map.as_ref());
+                        self.project.rebuild_composite();
+                        self.project.gpu_sync_needed = true;
+                        self.status_message = format!("Assigned '{}' to Base Color", res.name);
+                    }
+                }
+            }
+            ShelfPickerTarget::FillRoughness => {
+                if let Some(scalar) = res.to_scalar_buffer() {
+                    if let Some(layer) = self.project.layers.get_mut(self.project.active_layer_idx) {
+                        layer.fill_roughness_tex = Some(scalar);
+                        layer.evaluate_fill(self.project.curvature_map.as_ref());
+                        self.project.rebuild_composite();
+                        self.project.gpu_sync_needed = true;
+                        self.status_message = format!("Assigned '{}' to Roughness", res.name);
+                    }
+                }
+            }
+            ShelfPickerTarget::FillMetallic => {
+                if let Some(scalar) = res.to_scalar_buffer() {
+                    if let Some(layer) = self.project.layers.get_mut(self.project.active_layer_idx) {
+                        layer.fill_metallic_tex = Some(scalar);
+                        layer.evaluate_fill(self.project.curvature_map.as_ref());
+                        self.project.rebuild_composite();
+                        self.project.gpu_sync_needed = true;
+                        self.status_message = format!("Assigned '{}' to Metallic", res.name);
+                    }
+                }
+            }
+            ShelfPickerTarget::FillNormal => {
+                if let Some(rgba) = res.to_rgba_buffer() {
+                    if let Some(layer) = self.project.layers.get_mut(self.project.active_layer_idx) {
+                        layer.fill_normal_tex = Some(rgba);
+                        layer.evaluate_fill(self.project.curvature_map.as_ref());
+                        self.project.rebuild_composite();
+                        self.project.gpu_sync_needed = true;
+                        self.status_message = format!("Assigned '{}' to Normal", res.name);
+                    }
+                }
+            }
+            ShelfPickerTarget::FillHeight => {
+                if let Some(scalar) = res.to_scalar_buffer() {
+                    if let Some(layer) = self.project.layers.get_mut(self.project.active_layer_idx) {
+                        layer.fill_height_tex = Some(scalar);
+                        layer.evaluate_fill(self.project.curvature_map.as_ref());
+                        self.project.rebuild_composite();
+                        self.project.gpu_sync_needed = true;
+                        self.status_message = format!("Assigned '{}' to Height", res.name);
+                    }
+                }
+            }
+            ShelfPickerTarget::FillEmissive => {
+                if let Some(rgba) = res.to_rgba_buffer() {
+                    if let Some(layer) = self.project.layers.get_mut(self.project.active_layer_idx) {
+                        layer.fill_emissive_tex = Some(rgba);
+                        layer.evaluate_fill(self.project.curvature_map.as_ref());
+                        self.project.rebuild_composite();
+                        self.project.gpu_sync_needed = true;
+                        self.status_message = format!("Assigned '{}' to Emissive", res.name);
+                    }
+                }
+            }
+            ShelfPickerTarget::FillOpacity => {
+                if let Some(scalar) = res.to_scalar_buffer() {
+                    if let Some(layer) = self.project.layers.get_mut(self.project.active_layer_idx) {
+                        layer.fill_opacity_tex = Some(scalar);
+                        layer.evaluate_fill(self.project.curvature_map.as_ref());
+                        self.project.rebuild_composite();
+                        self.project.gpu_sync_needed = true;
+                        self.status_message = format!("Assigned '{}' to Opacity", res.name);
+                    }
+                }
+            }
+            ShelfPickerTarget::Stencil => {
+                if let Some(rgba) = res.to_rgba_buffer() {
+                    self.brush_engine.stencil_buffer = Some(rgba);
+                    self.status_message = format!("Assigned '{}' to Stencil", res.name);
+                }
+            }
+            ShelfPickerTarget::BrushAlpha => {
+                self.brush_engine.settings.alpha = AlphaType::NoiseSplatter;
+                self.status_message = format!("Set Alpha to '{}'", res.name);
+            }
+            ShelfPickerTarget::MeshMapTangentNormal => {
+                if let Some(rgba) = res.to_rgba_buffer() {
+                    self.project.world_normal_map = Some(rgba);
+                    self.project.gpu_mesh_maps_sync_needed = true;
+                    self.project.gpu_sync_needed = true;
+                    self.project.sync_baked_maps_to_resources();
+                    self.status_message = format!("Assigned '{}' as Tangent Normal Map", res.name);
+                }
+            }
+            ShelfPickerTarget::MeshMapWorldSpaceNormal => {
+                if let Some(rgba) = res.to_rgba_buffer() {
+                    self.project.world_space_normal_map = Some(rgba);
+                    self.project.gpu_mesh_maps_sync_needed = true;
+                    self.project.gpu_sync_needed = true;
+                    self.project.sync_baked_maps_to_resources();
+                    self.status_message = format!("Assigned '{}' as World Space Normal Map", res.name);
+                }
+            }
+            ShelfPickerTarget::MeshMapAo => {
+                if let Some(scalar) = res.to_scalar_buffer() {
+                    self.project.ao_map = Some(scalar);
+                    self.project.gpu_mesh_maps_sync_needed = true;
+                    self.project.gpu_sync_needed = true;
+                    self.project.sync_baked_maps_to_resources();
+                    self.status_message = format!("Assigned '{}' as Ambient Occlusion Map", res.name);
+                }
+            }
+            ShelfPickerTarget::MeshMapCurvature => {
+                if let Some(scalar) = res.to_scalar_buffer() {
+                    self.project.curvature_map = Some(scalar);
+                    self.project.gpu_mesh_maps_sync_needed = true;
+                    self.project.gpu_sync_needed = true;
+                    self.project.sync_baked_maps_to_resources();
+                    self.status_message = format!("Assigned '{}' as Curvature Map", res.name);
+                }
+            }
+            ShelfPickerTarget::MeshMapPosition => {
+                if let Some(rgba) = res.to_rgba_buffer() {
+                    self.project.position_map = Some(rgba);
+                    self.project.gpu_mesh_maps_sync_needed = true;
+                    self.project.gpu_sync_needed = true;
+                    self.project.sync_baked_maps_to_resources();
+                    self.status_message = format!("Assigned '{}' as Position Map", res.name);
+                }
+            }
+            ShelfPickerTarget::MeshMapThickness => {
+                if let Some(scalar) = res.to_scalar_buffer() {
+                    self.project.thickness_map = Some(scalar);
+                    self.project.gpu_mesh_maps_sync_needed = true;
+                    self.project.gpu_sync_needed = true;
+                    self.project.sync_baked_maps_to_resources();
+                    self.status_message = format!("Assigned '{}' as Thickness Map", res.name);
+                }
+            }
+            ShelfPickerTarget::MeshMapId => {
+                if let Some(rgba) = res.to_rgba_buffer() {
+                    self.project.id_map = Some(rgba);
+                    self.project.gpu_mesh_maps_sync_needed = true;
+                    self.project.sync_baked_maps_to_resources();
+                    self.status_message = format!("Assigned '{}' as ID Map", res.name);
+                }
+            }
+            ShelfPickerTarget::HdriEnvironment => {
+                if let Some(path_str) = &res.file_path {
+                    let p = std::path::Path::new(path_str);
+                    self.activate_hdri_file(p);
+                }
+            }
+        }
+    }
+
+    /// Assign a procedural generator from the shelf to a target slot
+    pub fn assign_noise_to_target(&mut self, gen: crate::layer::ProceduralGenerator, target: ShelfPickerTarget) {
+        match target {
+            ShelfPickerTarget::FillBaseColor
+            | ShelfPickerTarget::FillRoughness
+            | ShelfPickerTarget::FillMetallic
+            | ShelfPickerTarget::FillNormal
+            | ShelfPickerTarget::FillHeight
+            | ShelfPickerTarget::FillEmissive
+            | ShelfPickerTarget::FillOpacity => {
+                if let Some(layer) = self.project.layers.get_mut(self.project.active_layer_idx) {
+                    layer.fill_generator = gen;
+                    layer.evaluate_fill(self.project.curvature_map.as_ref());
+                    self.project.rebuild_composite();
+                    self.project.gpu_sync_needed = true;
+                    self.status_message = format!("Assigned procedural '{}' to fill layer", gen.name());
+                }
+            }
+            ShelfPickerTarget::Stencil => {
+                let w = 512;
+                let h = 512;
+                let mut buf = crate::channel::RgbaBuffer::new(w, h, Vec4::ONE);
+                for y in 0..h {
+                    for x in 0..w {
+                        let u = x as f32 / w as f32;
+                        let v = y as f32 / h as f32;
+                        let val = match gen {
+                            crate::layer::ProceduralGenerator::WorleyGrunge => {
+                                let (d1, d2) = crate::utils::NoiseGenerator::voronoi_2d(u * 8.0, v * 8.0);
+                                (d2 - d1).clamp(0.0, 1.0)
+                            }
+                            crate::layer::ProceduralGenerator::Scratches => {
+                                crate::utils::NoiseGenerator::scratches_2d(u * 6.0, v * 6.0)
+                            }
+                            crate::layer::ProceduralGenerator::GrungeMap => {
+                                crate::utils::NoiseGenerator::grunge_map_2d(u * 6.0, v * 6.0)
+                            }
+                            crate::layer::ProceduralGenerator::Checkerboard => {
+                                let cu = (u * 8.0).floor() as i32;
+                                let cv = (v * 8.0).floor() as i32;
+                                if (cu + cv) % 2 == 0 { 1.0 } else { 0.0 }
+                            }
+                            _ => crate::utils::NoiseGenerator::fbm_perlin_2d(u * 6.0, v * 6.0, 4, 2.0, 0.5),
+                        };
+                        buf.set_pixel(x, y, Vec4::new(val, val, val, 1.0));
+                    }
+                }
+                self.brush_engine.stencil_buffer = Some(buf);
+                self.status_message = format!("Generated stencil preset: '{}'", gen.name());
+            }
+            _ => {}
+        }
+    }
+
+    /// Render the Substance 3D Painter Shelf Resource Picker Modal Dialog
+    pub fn render_shelf_picker_modal(&mut self, ctx: &egui::Context) {
+        if self.shelf_picker.is_none() {
+            return;
+        }
+
+        self.refresh_shelf_thumbnails(ctx);
+
+        let (target, mut search_query, mut selected_category, title) = {
+            let p = self.shelf_picker.as_ref().unwrap();
+            (p.target, p.search_query.clone(), p.selected_category, p.title())
+        };
+
+        let mut close_picker = false;
+        let mut picked_resource = None;
+        let mut picked_noise = None;
+        let mut picked_hdri = None;
+        let mut clear_slot = false;
+        let mut trigger_import = false;
+        let mut is_open = true;
+
+        egui::Window::new(title)
+            .open(&mut is_open)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .collapsible(false)
+            .resizable(true)
+            .default_size(egui::vec2(540.0, 520.0))
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("Target:").strong().color(Color32::from_rgb(243, 94, 24)));
+                    ui.label(egui::RichText::new(title).italics());
+                });
+                ui.add_space(4.0);
+
+                // Search input & Import
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut search_query)
+                            .hint_text("Search resources...")
+                            .desired_width(ui.available_width() - 110.0),
+                    );
+                    if ui.button("+ Import...").on_hover_text("Import image file directly to Project Shelf and slot").clicked() {
+                        trigger_import = true;
+                    }
+                });
+                ui.add_space(4.0);
+
+                // Category filter tabs
+                let categories = [
+                    (crate::shelf::ShelfCategory::Project, "Project Resources"),
+                    (crate::shelf::ShelfCategory::Textures, "Textures"),
+                    (crate::shelf::ShelfCategory::Generators, "Noises"),
+                    (crate::shelf::ShelfCategory::Environments, "HDRIs"),
+                    (crate::shelf::ShelfCategory::All, "All"),
+                ];
+
+                ui.horizontal(|ui| {
+                    for (cat, label) in categories {
+                        let is_sel = selected_category == cat;
+                        if ui.selectable_label(is_sel, label).clicked() {
+                            selected_category = cat;
+                        }
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.small_button("Clear Slot").on_hover_text("Unassign texture from this slot").clicked() {
+                            clear_slot = true;
+                        }
+                    });
+                });
+
+                ui.separator();
+
+                let query = search_query.to_lowercase();
+                let cat = selected_category;
+
+                // Filter project resources
+                let project_res: Vec<_> = self.project.resources.iter().filter(|r| {
+                    if cat == crate::shelf::ShelfCategory::Generators {
+                        return false;
+                    }
+                    if cat == crate::shelf::ShelfCategory::Environments && r.resource_type != crate::project::ProjectResourceType::Hdri {
+                        return false;
+                    }
+                    if !query.is_empty() && !r.name.to_lowercase().contains(&query) && !r.id.to_lowercase().contains(&query) {
+                        return false;
+                    }
+                    true
+                }).collect();
+
+                // Filter procedural noise generators if appropriate
+                let all_shelf = crate::shelf::get_shelf_assets();
+                let shelf_assets: Vec<_> = all_shelf.iter().copied().filter(|a| {
+                    if cat == crate::shelf::ShelfCategory::Project {
+                        return false;
+                    }
+                    if cat == crate::shelf::ShelfCategory::Environments {
+                        return false;
+                    }
+                    if cat != crate::shelf::ShelfCategory::All && a.category != cat {
+                        return false;
+                    }
+                    if !query.is_empty() && !a.name.to_lowercase().contains(&query) && !a.description.to_lowercase().contains(&query) {
+                        return false;
+                    }
+                    true
+                }).collect();
+
+                // Filter HDRIs if in Environments or All
+                let hdris: Vec<_> = if cat == crate::shelf::ShelfCategory::Environments || cat == crate::shelf::ShelfCategory::All {
+                    self.asset_manager.hdris.iter().filter(|h| {
+                        if !query.is_empty() && !h.name.to_lowercase().contains(&query) && !h.file_name.to_lowercase().contains(&query) {
+                            return false;
+                        }
+                        true
+                    }).collect()
+                } else {
+                    Vec::new()
+                };
+
+                let card_w = 95.0;
+                let card_h = 105.0;
+
+                egui::ScrollArea::vertical()
+                    .id_source("shelf_picker_scroll")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        if project_res.is_empty() && shelf_assets.is_empty() && hdris.is_empty() {
+                            ui.vertical_centered(|ui| {
+                                ui.add_space(20.0);
+                                ui.label(egui::RichText::new("No resources found in current filter.").italics().color(Color32::from_rgb(150, 150, 160)));
+                                if ui.button("Import Texture File to Project...").clicked() {
+                                    trigger_import = true;
+                                }
+                            });
+                        }
+
+                        // 1. PROJECT RESOURCES (Baked Maps + Imported Textures)
+                        if !project_res.is_empty() {
+                            ui.label(egui::RichText::new("PROJECT RESOURCES").size(10.5).color(Color32::from_rgb(180, 190, 205)).strong());
+                            ui.add_space(2.0);
+
+                            for chunk in project_res.chunks(4) {
+                                ui.horizontal(|ui| {
+                                    ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+                                    for res in chunk {
+                                        let (card_rect, card_resp) = ui.allocate_exact_size(egui::vec2(card_w, card_h), egui::Sense::click());
+                                        let is_hov = card_resp.hovered();
+
+                                        let bg_col = if is_hov { Color32::from_rgb(46, 50, 58) } else { Color32::from_rgb(30, 32, 36) };
+                                        let stroke = if is_hov {
+                                            egui::Stroke::new(1.5_f32, Color32::from_rgb(243, 94, 24))
+                                        } else {
+                                            egui::Stroke::new(1.0_f32, Color32::from_rgb(50, 54, 62))
+                                        };
+                                        ui.painter().rect(card_rect, egui::Rounding::same(4.0), bg_col, stroke);
+
+                                        // Thumbnail
+                                        let thumb_rect = egui::Rect::from_min_size(
+                                            egui::pos2(card_rect.min.x + 5.0, card_rect.min.y + 5.0),
+                                            egui::vec2(card_w - 10.0, card_w - 24.0),
+                                        );
+
+                                        if let Some(tex) = self.shelf_thumbnails.get(&res.id) {
+                                            let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+                                            ui.painter().image(tex.id(), thumb_rect, uv, Color32::WHITE);
+                                        } else {
+                                            ui.painter().rect_filled(thumb_rect, 2.0, Color32::from_rgb(20, 22, 26));
+                                            ui.painter().text(thumb_rect.center(), egui::Align2::CENTER_CENTER, "MAP", egui::FontId::proportional(10.0), Color32::LIGHT_GRAY);
+                                        }
+
+                                        // Badge
+                                        let (badge_txt, badge_col) = if res.is_baked {
+                                            ("BAKED", Color32::from_rgb(255, 175, 40))
+                                        } else if res.resource_type == crate::project::ProjectResourceType::Hdri {
+                                            ("HDRI", Color32::from_rgb(180, 80, 255))
+                                        } else {
+                                            ("PROJECT", Color32::from_rgb(45, 140, 255))
+                                        };
+                                        ui.painter().text(
+                                            egui::pos2(card_rect.max.x - 3.0, card_rect.min.y + 2.0),
+                                            egui::Align2::RIGHT_TOP,
+                                            badge_txt,
+                                            egui::FontId::proportional(7.5),
+                                            badge_col,
+                                        );
+
+                                        // Resolution & Name
+                                        let dim_txt = format!("{}x{}", res.width, res.height);
+                                        ui.painter().text(
+                                            egui::pos2(card_rect.center().x, card_rect.max.y - 18.0),
+                                            egui::Align2::CENTER_CENTER,
+                                            &dim_txt,
+                                            egui::FontId::proportional(7.5),
+                                            Color32::from_rgb(130, 135, 145),
+                                        );
+                                        ui.painter().text(
+                                            egui::pos2(card_rect.center().x, card_rect.max.y - 8.0),
+                                            egui::Align2::CENTER_CENTER,
+                                            &res.name,
+                                            egui::FontId::proportional(8.5),
+                                            Color32::from_rgb(215, 220, 230),
+                                        );
+
+                                        let tooltip = format!("{}\nType: {}\nResolution: {}x{}\nClick to assign to target slot", res.name, badge_txt, res.width, res.height);
+                                        if card_resp.on_hover_text(tooltip).clicked() {
+                                            picked_resource = Some(((*res).clone(), target));
+                                        }
+                                    }
+                                });
+                            }
+                            ui.add_space(8.0);
+                        }
+
+                        // 2. PROCEDURAL NOISES & GENERATORS
+                        if !shelf_assets.is_empty() {
+                            ui.label(egui::RichText::new("PROCEDURAL GENERATORS & PATTERNS").size(10.5).color(Color32::from_rgb(180, 190, 205)).strong());
+                            ui.add_space(2.0);
+
+                            for chunk in shelf_assets.chunks(4) {
+                                ui.horizontal(|ui| {
+                                    ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+                                    for asset in chunk {
+                                        let (card_rect, card_resp) = ui.allocate_exact_size(egui::vec2(card_w, card_h), egui::Sense::click());
+                                        let is_hov = card_resp.hovered();
+
+                                        let bg_col = if is_hov { Color32::from_rgb(46, 50, 58) } else { Color32::from_rgb(30, 32, 36) };
+                                        let stroke = if is_hov {
+                                            egui::Stroke::new(1.5_f32, Color32::from_rgb(243, 94, 24))
+                                        } else {
+                                            egui::Stroke::new(1.0_f32, Color32::from_rgb(50, 54, 62))
+                                        };
+                                        ui.painter().rect(card_rect, egui::Rounding::same(4.0), bg_col, stroke);
+
+                                        let thumb_rect = egui::Rect::from_min_size(
+                                            egui::pos2(card_rect.min.x + 5.0, card_rect.min.y + 5.0),
+                                            egui::vec2(card_w - 10.0, card_w - 24.0),
+                                        );
+                                        ui.painter().rect_filled(thumb_rect, 2.0, Color32::from_rgb(24, 26, 32));
+
+                                        let center = thumb_rect.center();
+                                        ui.painter().circle_filled(center, 12.0, Color32::from_rgb(asset.preview_color[0], asset.preview_color[1], asset.preview_color[2]));
+
+                                        ui.painter().text(
+                                            egui::pos2(card_rect.max.x - 3.0, card_rect.min.y + 2.0),
+                                            egui::Align2::RIGHT_TOP,
+                                            "NOISE",
+                                            egui::FontId::proportional(7.5),
+                                            Color32::from_rgb(46, 204, 113),
+                                        );
+
+                                        ui.painter().text(
+                                            egui::pos2(card_rect.center().x, card_rect.max.y - 8.0),
+                                            egui::Align2::CENTER_CENTER,
+                                            asset.name,
+                                            egui::FontId::proportional(8.5),
+                                            Color32::from_rgb(215, 220, 230),
+                                        );
+
+                                        let tooltip = format!("{}\n{}\nClick to assign generator to slot", asset.name, asset.description);
+                                        if card_resp.on_hover_text(tooltip).clicked() {
+                                            let gen = match asset.id {
+                                                "gen_worley" => crate::layer::ProceduralGenerator::WorleyGrunge,
+                                                "gen_billow" => crate::layer::ProceduralGenerator::BillowNoise,
+                                                "gen_ridged" => crate::layer::ProceduralGenerator::RidgedMultifractal,
+                                                "gen_domain_warp" => crate::layer::ProceduralGenerator::DomainWarpGrunge,
+                                                "gen_splatter" => crate::layer::ProceduralGenerator::SplatterDirt,
+                                                "gen_wood" => crate::layer::ProceduralGenerator::WoodGrain,
+                                                "gen_fabric" => crate::layer::ProceduralGenerator::FabricWeave,
+                                                "gen_scratches" => crate::layer::ProceduralGenerator::Scratches,
+                                                "gen_curvature" => crate::layer::ProceduralGenerator::CurvatureWear,
+                                                "gen_cavity" => crate::layer::ProceduralGenerator::AmbientOcclusion,
+                                                "gen_dust" => crate::layer::ProceduralGenerator::DirectionalDust,
+                                                "gen_leaks" => crate::layer::ProceduralGenerator::DrippingLeaks,
+                                                "gen_position" => crate::layer::ProceduralGenerator::PositionGradient,
+                                                "gen_checker" => crate::layer::ProceduralGenerator::Checkerboard,
+                                                "gen_bricks" => crate::layer::ProceduralGenerator::Bricks,
+                                                "gen_perforated" => crate::layer::ProceduralGenerator::PerforatedMesh,
+                                                "gen_wire_fence" => crate::layer::ProceduralGenerator::WireFence,
+                                                "gen_torn_fabric" => crate::layer::ProceduralGenerator::TornFabricEdge,
+                                                "gen_dots" => crate::layer::ProceduralGenerator::CircularDots,
+                                                "gen_bnw_spots_1" => crate::layer::ProceduralGenerator::BnWSpots1,
+                                                "gen_bnw_spots_2" => crate::layer::ProceduralGenerator::BnWSpots2,
+                                                "gen_bnw_spots_3" => crate::layer::ProceduralGenerator::BnWSpots3,
+                                                "gen_grunge_map" => crate::layer::ProceduralGenerator::GrungeMap,
+                                                "gen_directional_noise" => crate::layer::ProceduralGenerator::DirectionalNoise,
+                                                "gen_clouds" => crate::layer::ProceduralGenerator::Clouds,
+                                                "gen_marble_veins" => crate::layer::ProceduralGenerator::MarbleVeins,
+                                                "gen_moisture" => crate::layer::ProceduralGenerator::MoistureNoise,
+                                                _ => crate::layer::ProceduralGenerator::PerlinNoise,
+                                            };
+                                            picked_noise = Some((gen, target));
+                                        }
+                                    }
+                                });
+                            }
+                            ui.add_space(8.0);
+                        }
+
+                        // 3. HDRIs (Environments)
+                        if !hdris.is_empty() {
+                            ui.label(egui::RichText::new("HDRI ENVIRONMENTS").size(10.5).color(Color32::from_rgb(180, 190, 205)).strong());
+                            ui.add_space(2.0);
+
+                            for chunk in hdris.chunks(4) {
+                                ui.horizontal(|ui| {
+                                    ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+                                    for hdri in chunk {
+                                        let (card_rect, card_resp) = ui.allocate_exact_size(egui::vec2(card_w, card_h), egui::Sense::click());
+                                        let is_hov = card_resp.hovered();
+
+                                        let bg_col = if is_hov { Color32::from_rgb(46, 50, 58) } else { Color32::from_rgb(30, 32, 36) };
+                                        let stroke = if is_hov {
+                                            egui::Stroke::new(1.5_f32, Color32::from_rgb(243, 94, 24))
+                                        } else {
+                                            egui::Stroke::new(1.0_f32, Color32::from_rgb(50, 54, 62))
+                                        };
+                                        ui.painter().rect(card_rect, egui::Rounding::same(4.0), bg_col, stroke);
+
+                                        let thumb_rect = egui::Rect::from_min_size(
+                                            egui::pos2(card_rect.min.x + 5.0, card_rect.min.y + 5.0),
+                                            egui::vec2(card_w - 10.0, card_w - 24.0),
+                                        );
+                                        draw_hdri_thumbnail(ui.painter(), thumb_rect, &hdri.id, &hdri.name);
+
+                                        ui.painter().text(
+                                            egui::pos2(card_rect.max.x - 3.0, card_rect.min.y + 2.0),
+                                            egui::Align2::RIGHT_TOP,
+                                            if hdri.is_builtin { "BUILTIN" } else { "HDRI" },
+                                            egui::FontId::proportional(7.5),
+                                            Color32::from_rgb(255, 175, 40),
+                                        );
+
+                                        ui.painter().text(
+                                            egui::pos2(card_rect.center().x, card_rect.max.y - 8.0),
+                                            egui::Align2::CENTER_CENTER,
+                                            &hdri.name,
+                                            egui::FontId::proportional(8.5),
+                                            Color32::from_rgb(215, 220, 230),
+                                        );
+
+                                        let tooltip = format!("{}\nFile: {}\nSize: {}\nClick to set active HDRI", hdri.name, hdri.file_name, hdri.size_formatted());
+                                        if card_resp.on_hover_text(tooltip).clicked() {
+                                            picked_hdri = Some(hdri.path.clone());
+                                        }
+                                    }
+                                });
+                            }
+                        }
+                    });
+            });
+
+        if let Some(p) = &mut self.shelf_picker {
+            p.search_query = search_query;
+            p.selected_category = selected_category;
+        }
+
+        if let Some(path) = picked_hdri {
+            self.activate_hdri_file(&path);
+            close_picker = true;
+        }
+
+        if !is_open {
+            close_picker = true;
+        }
+
+        if trigger_import {
+            if let Some(picker) = &self.shelf_picker {
+                let target = picker.target;
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter("Image / Texture", &["png", "jpg", "jpeg", "tga", "exr", "hdr"])
+                    .set_title("Import Texture to Project Shelf")
+                    .pick_file()
+                {
+                    if let Ok(id) = self.project.import_texture_resource(&path, crate::project::ProjectResourceType::Texture) {
+                        self.refresh_shelf_thumbnails(ctx);
+                        let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
+                        if ext == "hdr" || ext == "exr" {
+                            let _ = self.asset_manager.import_hdri_file(&path);
+                        }
+                        if let Some(res) = self.project.get_resource(&id).cloned() {
+                            self.assign_resource_to_target(&res, target);
+                            close_picker = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        if clear_slot {
+            if let Some(picker) = &self.shelf_picker {
+                match picker.target {
+                    ShelfPickerTarget::FillBaseColor => {
+                        if let Some(l) = self.project.layers.get_mut(self.project.active_layer_idx) { l.fill_color_tex = None; l.evaluate_fill(self.project.curvature_map.as_ref()); self.project.rebuild_composite(); self.project.gpu_sync_needed = true; }
+                    }
+                    ShelfPickerTarget::FillRoughness => {
+                        if let Some(l) = self.project.layers.get_mut(self.project.active_layer_idx) { l.fill_roughness_tex = None; l.evaluate_fill(self.project.curvature_map.as_ref()); self.project.rebuild_composite(); self.project.gpu_sync_needed = true; }
+                    }
+                    ShelfPickerTarget::FillMetallic => {
+                        if let Some(l) = self.project.layers.get_mut(self.project.active_layer_idx) { l.fill_metallic_tex = None; l.evaluate_fill(self.project.curvature_map.as_ref()); self.project.rebuild_composite(); self.project.gpu_sync_needed = true; }
+                    }
+                    ShelfPickerTarget::FillNormal => {
+                        if let Some(l) = self.project.layers.get_mut(self.project.active_layer_idx) { l.fill_normal_tex = None; l.evaluate_fill(self.project.curvature_map.as_ref()); self.project.rebuild_composite(); self.project.gpu_sync_needed = true; }
+                    }
+                    ShelfPickerTarget::FillHeight => {
+                        if let Some(l) = self.project.layers.get_mut(self.project.active_layer_idx) { l.fill_height_tex = None; l.evaluate_fill(self.project.curvature_map.as_ref()); self.project.rebuild_composite(); self.project.gpu_sync_needed = true; }
+                    }
+                    ShelfPickerTarget::FillEmissive => {
+                        if let Some(l) = self.project.layers.get_mut(self.project.active_layer_idx) { l.fill_emissive_tex = None; l.evaluate_fill(self.project.curvature_map.as_ref()); self.project.rebuild_composite(); self.project.gpu_sync_needed = true; }
+                    }
+                    ShelfPickerTarget::FillOpacity => {
+                        if let Some(l) = self.project.layers.get_mut(self.project.active_layer_idx) { l.fill_opacity_tex = None; l.evaluate_fill(self.project.curvature_map.as_ref()); self.project.rebuild_composite(); self.project.gpu_sync_needed = true; }
+                    }
+                    ShelfPickerTarget::Stencil => {
+                        self.brush_engine.stencil_buffer = None;
+                    }
+                    ShelfPickerTarget::MeshMapTangentNormal => { self.project.world_normal_map = None; self.project.gpu_mesh_maps_sync_needed = true; self.project.sync_baked_maps_to_resources(); }
+                    ShelfPickerTarget::MeshMapWorldSpaceNormal => { self.project.world_space_normal_map = None; self.project.gpu_mesh_maps_sync_needed = true; self.project.sync_baked_maps_to_resources(); }
+                    ShelfPickerTarget::MeshMapAo => { self.project.ao_map = None; self.project.gpu_mesh_maps_sync_needed = true; self.project.sync_baked_maps_to_resources(); }
+                    ShelfPickerTarget::MeshMapCurvature => { self.project.curvature_map = None; self.project.gpu_mesh_maps_sync_needed = true; self.project.sync_baked_maps_to_resources(); }
+                    ShelfPickerTarget::MeshMapPosition => { self.project.position_map = None; self.project.gpu_mesh_maps_sync_needed = true; self.project.sync_baked_maps_to_resources(); }
+                    ShelfPickerTarget::MeshMapThickness => { self.project.thickness_map = None; self.project.gpu_mesh_maps_sync_needed = true; self.project.sync_baked_maps_to_resources(); }
+                    ShelfPickerTarget::MeshMapId => { self.project.id_map = None; self.project.gpu_mesh_maps_sync_needed = true; self.project.sync_baked_maps_to_resources(); }
+                    _ => {}
+                }
+                close_picker = true;
+            }
+        }
+
+        if let Some((res, target)) = picked_resource {
+            self.assign_resource_to_target(&res, target);
+            close_picker = true;
+        }
+
+        if let Some((gen, target)) = picked_noise {
+            self.assign_noise_to_target(gen, target);
+            close_picker = true;
+        }
+
+        if close_picker {
+            self.shelf_picker = None;
+        }
+    }
+
+    /// Render quick popup when user clicks a project resource directly in the Left Shelf
+    pub fn render_shelf_resource_popup(&mut self, ctx: &egui::Context) {
+        let mut close_popup = false;
+        let mut assign_target = None;
+
+        if let Some(res_id) = &self.shelf_resource_popup {
+            if let Some(res) = self.project.get_resource(res_id).cloned() {
+                let mut is_open = true;
+                egui::Window::new(format!("Resource: {}", res.name))
+                    .open(&mut is_open)
+                    .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                    .collapsible(false)
+                    .resizable(false)
+                    .show(ctx, |ui| {
+                        ui.label(egui::RichText::new(format!("{} ({}x{})", res.name, res.width, res.height)).strong());
+                        ui.separator();
+                        ui.label("Assign to Active Layer channel:");
+                        ui.horizontal_wrapped(|ui| {
+                            if ui.button("Base Color").clicked() {
+                                assign_target = Some((res.clone(), ShelfPickerTarget::FillBaseColor));
+                                close_popup = true;
+                            }
+                            if ui.button("Roughness").clicked() {
+                                assign_target = Some((res.clone(), ShelfPickerTarget::FillRoughness));
+                                close_popup = true;
+                            }
+                            if ui.button("Metallic").clicked() {
+                                assign_target = Some((res.clone(), ShelfPickerTarget::FillMetallic));
+                                close_popup = true;
+                            }
+                            if ui.button("Normal").clicked() {
+                                assign_target = Some((res.clone(), ShelfPickerTarget::FillNormal));
+                                close_popup = true;
+                            }
+                            if ui.button("Height").clicked() {
+                                assign_target = Some((res.clone(), ShelfPickerTarget::FillHeight));
+                                close_popup = true;
+                            }
+                            if ui.button("Emissive").clicked() {
+                                assign_target = Some((res.clone(), ShelfPickerTarget::FillEmissive));
+                                close_popup = true;
+                            }
+                            if ui.button("Opacity").clicked() {
+                                assign_target = Some((res.clone(), ShelfPickerTarget::FillOpacity));
+                                close_popup = true;
+                            }
+                        });
+                        ui.add_space(6.0);
+                        ui.label("Tools & Environment:");
+                        ui.horizontal(|ui| {
+                            if ui.button("Set as Stencil (Projection)").clicked() {
+                                assign_target = Some((res.clone(), ShelfPickerTarget::Stencil));
+                                close_popup = true;
+                            }
+                            if res.resource_type == crate::project::ProjectResourceType::Hdri {
+                                if ui.button("Activate Viewport HDRI").clicked() {
+                                    assign_target = Some((res.clone(), ShelfPickerTarget::HdriEnvironment));
+                                    close_popup = true;
+                                }
+                            }
+                        });
+                        ui.add_space(4.0);
+                        if !res.is_baked {
+                            if ui.button(egui::RichText::new("Remove from Project Shelf").color(Color32::from_rgb(255, 100, 100))).clicked() {
+                                self.project.remove_resource(&res.id);
+                                self.shelf_thumbnails.remove(&res.id);
+                                self.shelf_thumbnails_dirty = true;
+                                self.status_message = format!("Removed '{}' from Project Shelf", res.name);
+                                close_popup = true;
+                            }
+                            ui.add_space(2.0);
+                        }
+                        if ui.small_button("Close").clicked() {
+                            close_popup = true;
+                        }
+                    });
+                if !is_open {
+                    close_popup = true;
+                }
+            } else {
+                close_popup = true;
+            }
+        }
+
+        if let Some((res, target)) = assign_target {
+            self.assign_resource_to_target(&res, target);
+        }
+
+        if close_popup {
+            self.shelf_resource_popup = None;
+        }
+    }
+
     /// Cycle through material channels (Substance standard shortcut 'C' / 'Shift+C')
     pub fn cycle_material_channel(&mut self, forward: bool) {
         let order = [
@@ -879,7 +1772,13 @@ impl eframe::App for PaintcraftApp {
                     self.bake_preview_thick = Some(Self::create_scalar_thumbnail(ctx, "prev_th", &th, 64, 64));
                     self.project.thickness_map = Some(th);
                 }
+                if let Some(id_m) = res.id_map {
+                    self.project.id_map = Some(id_m);
+                }
 
+                self.project.sync_baked_maps_to_resources();
+                self.shelf_thumbnails_dirty = true;
+                self.refresh_shelf_thumbnails(ctx);
                 self.project.gpu_mesh_maps_sync_needed = true;
                 for layer in &mut self.project.layers {
                     layer.evaluate_fill(self.project.curvature_map.as_ref());
@@ -905,6 +1804,25 @@ impl eframe::App for PaintcraftApp {
         if input.key_pressed(egui::Key::F3) {
             self.perf_metrics.show_debug_hud = !self.perf_metrics.show_debug_hud;
             self.status_message = format!("Performance Diagnostic HUD: {}", if self.perf_metrics.show_debug_hud { "ON" } else { "OFF" });
+        }
+
+        // Progressive Path Tracer Viewport (Iray Mode): F10
+        if input.key_pressed(egui::Key::F10) {
+            self.iray_mode = !self.iray_mode;
+            if self.iray_mode {
+                if let Some(pt) = &mut self.path_tracer {
+                    pt.reset();
+                }
+                self.status_message = "Iray Mode: Path Tracer Active [F10 or Esc to Exit]".to_string();
+            } else {
+                self.status_message = "Iray Mode: Exited to Real-Time Viewport".to_string();
+            }
+        }
+
+        // Escape exits Iray mode if active
+        if self.iray_mode && input.key_pressed(egui::Key::Escape) {
+            self.iray_mode = false;
+            self.status_message = "Iray Mode: Exited to Real-Time Viewport".to_string();
         }
 
         // Undo: Ctrl+Z
@@ -1135,6 +2053,10 @@ impl eframe::App for PaintcraftApp {
                         ui.close_menu();
                     }
                     ui.separator();
+                    if ui.button("Select HDRI from Shelf...").clicked() {
+                        self.shelf_picker = Some(ShelfPickerState::new(ShelfPickerTarget::HdriEnvironment));
+                        ui.close_menu();
+                    }
                     if ui.button("Import HDRI to Library...").clicked() {
                         ui.close_menu();
                         if let Some(path) = rfd::FileDialog::new()
@@ -1316,6 +2238,109 @@ impl eframe::App for PaintcraftApp {
                             if ui.selectable_label(pres_op, "Pres.Flow").on_hover_text("Pen Tablet Pressure scales brush opacity and flow").clicked() {
                                 self.brush_engine.settings.pressure_opacity = !pres_op;
                             }
+
+                            if self.brush_engine.settings.mode == ToolMode::Smudge {
+                                ui.separator();
+                                ui.label(egui::RichText::new("Smudge:").strong().color(Color32::from_rgb(243, 94, 24)));
+                                ui.add(egui::Slider::new(&mut self.brush_engine.settings.smudge_strength, 0.05..=1.0).text("Strength"));
+                            }
+
+                            if self.brush_engine.settings.mode == ToolMode::Clone {
+                                ui.separator();
+                                ui.label(egui::RichText::new("Clone Stamp:").strong().color(Color32::from_rgb(243, 94, 24)));
+                                if let Some(src) = self.brush_engine.settings.clone_source_uv {
+                                    ui.label(format!("Src: ({:.2}, {:.2})", src.x, src.y));
+                                    if ui.small_button("Clear").clicked() {
+                                        self.brush_engine.settings.clone_source_uv = None;
+                                    }
+                                } else {
+                                    ui.label(egui::RichText::new("[Hold V or Alt + Click]").small().color(Color32::from_rgb(243, 160, 40)));
+                                }
+                            }
+
+                            if self.brush_engine.settings.mode == ToolMode::Projection {
+                                ui.separator();
+                                ui.label(egui::RichText::new("Stencil:").strong().color(Color32::from_rgb(243, 94, 24)));
+                                ui.checkbox(&mut self.brush_engine.settings.stencil.enabled, "Enable");
+                                if self.brush_engine.settings.stencil.enabled {
+                                    ui.add(egui::Slider::new(&mut self.brush_engine.settings.stencil.scale, 0.1..=4.0).text("Scale"));
+                                    ui.add(egui::Slider::new(&mut self.brush_engine.settings.stencil.angle, -3.1415..=3.1415).text("Angle"));
+                                    ui.add(egui::Slider::new(&mut self.brush_engine.settings.stencil.opacity, 0.05..=1.0).text("Opacity"));
+                                    ui.checkbox(&mut self.brush_engine.settings.stencil.mask_only, "Mask Only");
+
+                                    ui.horizontal(|ui| {
+                                        if ui.button("Pick from Shelf...").on_hover_text("Pick stencil texture from Project Shelf").clicked() {
+                                            self.shelf_picker = Some(ShelfPickerState::new(ShelfPickerTarget::Stencil));
+                                        }
+                                        if ui.button("Load File...").on_hover_text("Load image file into Project Shelf and set as Stencil").clicked() {
+                                            if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "tga", "bmp", "exr", "hdr"]).pick_file() {
+                                                if let Ok(id) = self.project.import_texture_resource(&path, crate::project::ProjectResourceType::Texture) {
+                                                    if let Some(res) = self.project.get_resource(&id).cloned() {
+                                                        self.assign_resource_to_target(&res, ShelfPickerTarget::Stencil);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    });
+
+                                    egui::ComboBox::from_id_source("stencil_preset_combo")
+                                        .selected_text("Preset Stencils...")
+                                        .show_ui(ui, |ui| {
+                                            if ui.selectable_label(false, "Grunge Map").clicked() {
+                                                let mut buf = crate::channel::RgbaBuffer::new(512, 512, glam::Vec4::new(1.0, 1.0, 1.0, 1.0));
+                                                for y in 0..512 {
+                                                    for x in 0..512 {
+                                                        let u = x as f32 / 512.0;
+                                                        let v = y as f32 / 512.0;
+                                                        let val = crate::utils::NoiseGenerator::grunge_map_2d(u * 6.0, v * 6.0);
+                                                        buf.set_pixel(x, y, glam::Vec4::new(val, val, val, 1.0));
+                                                    }
+                                                }
+                                                self.brush_engine.stencil_buffer = Some(buf);
+                                                self.status_message = "Loaded Grunge Stencil preset".to_string();
+                                            }
+                                            if ui.selectable_label(false, "Scratches").clicked() {
+                                                let mut buf = crate::channel::RgbaBuffer::new(512, 512, glam::Vec4::new(1.0, 1.0, 1.0, 1.0));
+                                                for y in 0..512 {
+                                                    for x in 0..512 {
+                                                        let u = x as f32 / 512.0;
+                                                        let v = y as f32 / 512.0;
+                                                        let val = crate::utils::NoiseGenerator::directional_noise_2d(u * 8.0, v * 8.0, 0.4);
+                                                        buf.set_pixel(x, y, glam::Vec4::new(val, val, val, 1.0));
+                                                    }
+                                                }
+                                                self.brush_engine.stencil_buffer = Some(buf);
+                                                self.status_message = "Loaded Scratches Stencil preset".to_string();
+                                            }
+                                            if ui.selectable_label(false, "Spots & Splatter").clicked() {
+                                                let mut buf = crate::channel::RgbaBuffer::new(512, 512, glam::Vec4::new(1.0, 1.0, 1.0, 1.0));
+                                                for y in 0..512 {
+                                                    for x in 0..512 {
+                                                        let u = x as f32 / 512.0;
+                                                        let v = y as f32 / 512.0;
+                                                        let val = crate::utils::NoiseGenerator::bnw_spots_1_2d(u * 5.0, v * 5.0);
+                                                        buf.set_pixel(x, y, glam::Vec4::new(val, val, val, 1.0));
+                                                    }
+                                                }
+                                                self.brush_engine.stencil_buffer = Some(buf);
+                                                self.status_message = "Loaded Spots & Splatter Stencil preset".to_string();
+                                            }
+                                            if ui.selectable_label(false, "Checkerboard").clicked() {
+                                                let mut buf = crate::channel::RgbaBuffer::new(512, 512, glam::Vec4::new(1.0, 1.0, 1.0, 1.0));
+                                                for y in 0..512 {
+                                                    for x in 0..512 {
+                                                        let cx = (x / 32) % 2;
+                                                        let cy = (y / 32) % 2;
+                                                        let val = if cx ^ cy == 0 { 1.0 } else { 0.0 };
+                                                        buf.set_pixel(x, y, glam::Vec4::new(val, val, val, 1.0));
+                                                    }
+                                                }
+                                                self.brush_engine.stencil_buffer = Some(buf);
+                                                self.status_message = "Loaded Checkerboard Stencil preset".to_string();
+                                            }
+                                        });
+                                }
+                            }
                         }
                         ToolMode::FillBucket => {
                             ui.label(egui::RichText::new("Polygon Fill").strong().color(Color32::from_rgb(243, 94, 24)));
@@ -1326,6 +2351,9 @@ impl eframe::App for PaintcraftApp {
                             let poly_mode = self.brush_engine.settings.polygon_fill_mode;
                             if ui.selectable_label(poly_mode == crate::brush::PolygonFillMode::Triangle, "Triangle").on_hover_text("Fill individual triangle under cursor").clicked() {
                                 self.brush_engine.settings.polygon_fill_mode = crate::brush::PolygonFillMode::Triangle;
+                            }
+                            if ui.selectable_label(poly_mode == crate::brush::PolygonFillMode::Polygon, "Polygon (Quad)").on_hover_text("Fill quad / coplanar polygon pair").clicked() {
+                                self.brush_engine.settings.polygon_fill_mode = crate::brush::PolygonFillMode::Polygon;
                             }
                             if ui.selectable_label(poly_mode == crate::brush::PolygonFillMode::UvIsland, "UV Island").on_hover_text("Fill entire connected UV island").clicked() {
                                 self.brush_engine.settings.polygon_fill_mode = crate::brush::PolygonFillMode::UvIsland;
@@ -1387,6 +2415,43 @@ impl eframe::App for PaintcraftApp {
                     // Right: Viewport Settings, Shaders, Layout & Channel Controls
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let opt_icons = self.icons.as_ref();
+
+                        // 0. Iray Progressive Path Tracer Toggle & Quick Controls
+                        let iray_label = if self.iray_mode { "Iray ON (F10)" } else { "Iray (F10)" };
+                        if ui.selectable_label(self.iray_mode, iray_label).on_hover_text("Toggle Interactive Progressive Path Tracer Viewport (F10)").clicked() {
+                            self.iray_mode = !self.iray_mode;
+                            if self.iray_mode {
+                                if let Some(pt) = &mut self.path_tracer {
+                                    pt.reset();
+                                }
+                                self.status_message = "Iray Mode: Path Tracer Active [F10 or Esc to Exit]".to_string();
+                            } else {
+                                self.status_message = "Iray Mode: Exited to Real-Time Viewport".to_string();
+                            }
+                        }
+                        if self.iray_mode {
+                            if ui.small_button("Save PNG").on_hover_text("Save converged path-traced render to PNG file").clicked() {
+                                if let Some(path) = rfd::FileDialog::new()
+                                    .add_filter("PNG Image", &["png"])
+                                    .set_file_name("paintcraft_iray_render.png")
+                                    .save_file()
+                                {
+                                    if let Some(pt) = &self.path_tracer {
+                                        match pt.save_to_png(&path) {
+                                            Ok(()) => self.status_message = format!("Saved Iray render to {}", path.display()),
+                                            Err(err) => self.status_message = format!("Failed to save render: {}", err),
+                                        }
+                                    }
+                                }
+                            }
+                            if ui.small_button("Reset").on_hover_text("Restart Iray accumulation").clicked() {
+                                if let Some(pt) = &mut self.path_tracer {
+                                    pt.reset();
+                                }
+                            }
+                        }
+
+                        ui.separator();
 
                         // 1. Shelf Toggle Button
                         let shelf_btn_text = if self.show_shelf { "Shelf [v]" } else { "Shelf [^]" };
@@ -1782,19 +2847,46 @@ impl eframe::App for PaintcraftApp {
                         // Layers Window Header & Active Blend / Opacity Controls
                         ui.horizontal(|ui| {
                             ui.heading("Layers");
+
+                            // Substance 3D Painter Layer Stack Channel Selector
+                            ui.label("Channel:");
+                            egui::ComboBox::from_id_source("layer_stack_channel_selector")
+                                .selected_text(self.layer_stack_channel.short_name())
+                                .show_ui(ui, |ui| {
+                                    let channels = [
+                                        crate::channel::ChannelType::BaseColor,
+                                        crate::channel::ChannelType::Roughness,
+                                        crate::channel::ChannelType::Metallic,
+                                        crate::channel::ChannelType::Normal,
+                                        crate::channel::ChannelType::Height,
+                                        crate::channel::ChannelType::AmbientOcclusion,
+                                        crate::channel::ChannelType::Emission,
+                                        crate::channel::ChannelType::Opacity,
+                                        crate::channel::ChannelType::Clearcoat,
+                                        crate::channel::ChannelType::Anisotropy,
+                                    ];
+                                    for ch in channels {
+                                        ui.selectable_value(&mut self.layer_stack_channel, ch, ch.name());
+                                    }
+                                });
                         });
-    
+
                         let act_idx = self.project.active_layer_idx;
                         let mut blend_or_opacity_changed = false;
-    
-                        // Blend Mode and Opacity (Affecting the active selected layer)
+
+                        // Blend Mode and Opacity (Affecting the active selected layer's active channel)
                         if let Some(act_layer) = self.project.layers.get_mut(act_idx) {
+                            let cur_ch = self.layer_stack_channel;
+                            let mut cur_mode = act_layer.get_channel_blend_mode(cur_ch);
+                            let mut cur_ch_op = act_layer.get_channel_opacity(cur_ch);
+
                             ui.horizontal(|ui| {
                                 ui.label("Blend:");
-                                egui::ComboBox::from_id_source("active_layer_blend_mode")
-                                    .selected_text(act_layer.blend_mode.name())
+                                egui::ComboBox::from_id_source("active_layer_channel_blend_mode")
+                                    .selected_text(cur_mode.name())
                                     .show_ui(ui, |ui| {
                                         let modes = [
+                                            BlendMode::PassThrough,
                                             BlendMode::Normal,
                                             BlendMode::Multiply,
                                             BlendMode::Screen,
@@ -1803,16 +2895,24 @@ impl eframe::App for PaintcraftApp {
                                             BlendMode::Subtract,
                                             BlendMode::Darken,
                                             BlendMode::Lighten,
+                                            BlendMode::Replace,
                                         ];
                                         for m in modes {
-                                            if ui.selectable_value(&mut act_layer.blend_mode, m, m.name()).clicked() {
+                                            if ui.selectable_value(&mut cur_mode, m, m.name()).clicked() {
+                                                act_layer.set_channel_blend_mode(cur_ch, m);
                                                 blend_or_opacity_changed = true;
                                             }
                                         }
                                     });
-    
-                                ui.label("Opacity:");
-                                if ui.add(egui::Slider::new(&mut act_layer.opacity, 0.0..=1.0)).changed() {
+
+                                ui.label("Opac:");
+                                if ui.add_sized([55.0, 18.0], egui::Slider::new(&mut cur_ch_op, 0.0..=1.0)).changed() {
+                                    act_layer.set_channel_opacity(cur_ch, cur_ch_op);
+                                    blend_or_opacity_changed = true;
+                                }
+
+                                ui.label("Layer:");
+                                if ui.add_sized([45.0, 18.0], egui::Slider::new(&mut act_layer.opacity, 0.0..=1.0)).on_hover_text("Master layer opacity").changed() {
                                     blend_or_opacity_changed = true;
                                 }
                             });
@@ -2349,27 +3449,50 @@ impl eframe::App for PaintcraftApp {
                     if has_layer {
                         let mut prop_changed = false;
                         let mut mask_changed = false;
+                        let mut open_shelf_picker = None;
+                        let mut import_to_shelf_and_assign = None;
                         ui.heading(&prop_title);
                         ui.add_space(2.0);
 
                         egui::ScrollArea::vertical()
                             .id_source("properties_panel_scroll")
                             .show(ui, |ui| {
-                                let (curv_ref, ao_ref, pos_ref, wn_ref, layer) = {
-                                    let proj = &mut self.project;
-                                    (
-                                        proj.curvature_map.as_ref(),
-                                        proj.ao_map.as_ref(),
-                                        proj.position_map.as_ref(),
-                                        proj.world_space_normal_map.as_ref(),
-                                        &mut proj.layers[act_idx],
-                                    )
-                                };
+                                let (lower_layers, higher_layers) = self.project.layers.split_at_mut(act_idx);
+                                let available_anchors: Vec<String> = lower_layers
+                                    .iter()
+                                    .filter_map(|l| l.anchor_point.clone())
+                                    .collect();
+                                let anchor_refs: Vec<crate::layer::AnchorLayerRef<'_>> = lower_layers
+                                    .iter()
+                                    .filter_map(|l| l.as_anchor_ref())
+                                    .collect();
+                                let layer = &mut higher_layers[0];
+                                let curv_ref = self.project.curvature_map.as_ref();
+                                let ao_ref = self.project.ao_map.as_ref();
+                                let pos_ref = self.project.position_map.as_ref();
+                                let wn_ref = self.project.world_space_normal_map.as_ref();
+                                let id_ref = self.project.id_map.as_ref();
 
                                 ui.horizontal(|ui| {
                                     ui.label("Name:");
                                     if ui.text_edit_singleline(&mut layer.name).changed() {
                                         prop_changed = true;
+                                    }
+                                    ui.add_space(8.0);
+                                    let mut is_anchor = layer.anchor_point.is_some();
+                                    if ui.checkbox(&mut is_anchor, "Anchor Point").on_hover_text("Expose layer channels as an Anchor Point for procedural mask referencing in layers above").changed() {
+                                        if is_anchor {
+                                            layer.anchor_point = Some(layer.name.clone());
+                                        } else {
+                                            layer.anchor_point = None;
+                                        }
+                                        prop_changed = true;
+                                    }
+                                    if let Some(ref mut name) = layer.anchor_point {
+                                        ui.label("Tag:");
+                                        if ui.text_edit_singleline(name).changed() {
+                                            prop_changed = true;
+                                        }
                                     }
                                 });
                                 ui.add_space(4.0);
@@ -2388,6 +3511,15 @@ impl eframe::App for PaintcraftApp {
                                             }
                                             if ui.button("+ Add Paint").on_hover_text("Add paint modifier to mask").clicked() {
                                                 layer.add_mask_paint_effect(curv_ref);
+                                                prop_changed = true;
+                                            }
+                                            if ui.button("+ Color Select").on_hover_text("Isolate submesh or UV island using baked ID Map").clicked() {
+                                                layer.add_mask_color_selection_effect([1.0, 0.0, 0.0], 0.1, 0.05);
+                                                prop_changed = true;
+                                            }
+                                            if ui.button("+ Anchor").on_hover_text("Reference channel from layer below").clicked() {
+                                                let def_name = available_anchors.first().cloned().unwrap_or_else(|| "Anchor".to_string());
+                                                layer.add_mask_anchor_effect(def_name, crate::channel::ChannelType::BaseColor);
                                                 prop_changed = true;
                                             }
                                             if ui.button("+ Add Blur").on_hover_text("Add gaussian blur filter to mask").clicked() {
@@ -2641,18 +3773,91 @@ impl eframe::App for PaintcraftApp {
                                                             }
                                                         });
                                                     }
+                                                    crate::layer::MaskEffectType::ColorSelection { ref mut target_color, ref mut tolerance, ref mut softness } => {
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("ID Color:");
+                                                            let mut col_arr = *target_color;
+                                                            if ui.color_edit_button_rgb(&mut col_arr).changed() {
+                                                                *target_color = col_arr;
+                                                                prop_changed = true;
+                                                            }
+                                                            ui.label(format!("RGB: {:.2}, {:.2}, {:.2}", target_color[0], target_color[1], target_color[2]));
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Tolerance:");
+                                                            if ui.add(egui::Slider::new(tolerance, 0.0..=1.0)).changed() {
+                                                                prop_changed = true;
+                                                            }
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Softness:");
+                                                            if ui.add(egui::Slider::new(softness, 0.0..=0.5)).changed() {
+                                                                prop_changed = true;
+                                                            }
+                                                        });
+                                                        ui.label(egui::RichText::new("Isolates submeshes or UV islands via baked ID Map.").small().color(Color32::from_rgb(160, 165, 175)));
+                                                    }
+                                                    crate::layer::MaskEffectType::AnchorReference { ref mut anchor_name, ref mut source_channel, ref mut blur, ref mut invert } => {
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Anchor Layer:");
+                                                            egui::ComboBox::from_id_source(format!("anchor_name_sel_{}", eff_id))
+                                                                .selected_text(if anchor_name.is_empty() { "Select Anchor..." } else { anchor_name.as_str() })
+                                                                .show_ui(ui, |ui| {
+                                                                    if available_anchors.is_empty() {
+                                                                        ui.label(egui::RichText::new("(No anchor points exposed below)").italics().small());
+                                                                    } else {
+                                                                        for anc in &available_anchors {
+                                                                            if ui.selectable_label(anchor_name == anc, anc).clicked() {
+                                                                                *anchor_name = anc.clone();
+                                                                                prop_changed = true;
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                });
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Source Channel:");
+                                                            egui::ComboBox::from_id_source(format!("anchor_ch_sel_{}", eff_id))
+                                                                .selected_text(source_channel.name())
+                                                                .show_ui(ui, |ui| {
+                                                                    let channels = [
+                                                                        crate::channel::ChannelType::BaseColor,
+                                                                        crate::channel::ChannelType::Roughness,
+                                                                        crate::channel::ChannelType::Metallic,
+                                                                        crate::channel::ChannelType::Height,
+                                                                        crate::channel::ChannelType::Emission,
+                                                                        crate::channel::ChannelType::Opacity,
+                                                                    ];
+                                                                    for ch in channels {
+                                                                        if ui.selectable_label(*source_channel == ch, ch.name()).clicked() {
+                                                                            *source_channel = ch;
+                                                                            prop_changed = true;
+                                                                        }
+                                                                    }
+                                                                });
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Blur:");
+                                                            if ui.add(egui::Slider::new(blur, 0.0..=20.0)).changed() {
+                                                                prop_changed = true;
+                                                            }
+                                                        });
+                                                        if ui.checkbox(invert, "Invert Anchor").changed() {
+                                                            prop_changed = true;
+                                                        }
+                                                    }
                                                 }
                                             });
                                         }
 
                                         if let Some(id) = remove_eff_id {
                                             layer.remove_mask_effect(id, curv_ref);
-                                            layer.evaluate_mask_advanced(curv_ref, ao_ref, pos_ref, wn_ref);
+                                            layer.evaluate_mask_full(curv_ref, ao_ref, pos_ref, wn_ref, id_ref, &anchor_refs);
                                             prop_changed = true;
                                         }
                                         if let Some((id, up)) = reorder_eff {
                                             layer.reorder_mask_effect(id, up, curv_ref);
-                                            layer.evaluate_mask_advanced(curv_ref, ao_ref, pos_ref, wn_ref);
+                                            layer.evaluate_mask_full(curv_ref, ao_ref, pos_ref, wn_ref, id_ref, &anchor_refs);
                                             prop_changed = true;
                                         }
                                     }
@@ -2769,15 +3974,23 @@ impl eframe::App for PaintcraftApp {
                                             });
                                             ui.horizontal(|ui| {
                                                 if layer.fill_color_tex.is_some() {
-                                                    ui.label("Texture loaded");
+                                                    ui.colored_label(Color32::from_rgb(80, 220, 120), "Texture Active");
+                                                    if ui.button("Shelf...").on_hover_text("Select or replace texture from Shelf").clicked() {
+                                                        open_shelf_picker = Some(ShelfPickerTarget::FillBaseColor);
+                                                    }
+                                                    if ui.button("Import...").on_hover_text("Import texture into Project Shelf and assign").clicked() {
+                                                        if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "tga", "bmp", "exr", "hdr"]).pick_file() {
+                                                            import_to_shelf_and_assign = Some((path, ShelfPickerTarget::FillBaseColor));
+                                                        }
+                                                    }
                                                     if ui.button("Remove").clicked() { layer.fill_color_tex = None; prop_changed = true; }
                                                 } else {
-                                                    if ui.button("Load Texture...").clicked() {
-                                                        if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "tga"]).pick_file() {
-                                                            if let Ok(tex) = crate::channel::RgbaBuffer::from_image_file(&path) {
-                                                                layer.fill_color_tex = Some(tex);
-                                                                prop_changed = true;
-                                                            }
+                                                    if ui.button("Pick from Shelf...").on_hover_text("Pick texture or baked map from Project Shelf").clicked() {
+                                                        open_shelf_picker = Some(ShelfPickerTarget::FillBaseColor);
+                                                    }
+                                                    if ui.button("Import...").on_hover_text("Import texture file into Project Shelf and assign").clicked() {
+                                                        if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "tga", "bmp", "exr", "hdr"]).pick_file() {
+                                                            import_to_shelf_and_assign = Some((path, ShelfPickerTarget::FillBaseColor));
                                                         }
                                                     }
                                                 }
@@ -2798,15 +4011,23 @@ impl eframe::App for PaintcraftApp {
                                             });
                                             ui.horizontal(|ui| {
                                                 if layer.fill_metallic_tex.is_some() {
-                                                    ui.label("Texture loaded");
+                                                    ui.colored_label(Color32::from_rgb(80, 220, 120), "Metallic Map Active");
+                                                    if ui.button("Shelf...").on_hover_text("Select or replace metallic map from Shelf").clicked() {
+                                                        open_shelf_picker = Some(ShelfPickerTarget::FillMetallic);
+                                                    }
+                                                    if ui.button("Import...").on_hover_text("Import metallic texture into Project Shelf and assign").clicked() {
+                                                        if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "tga", "bmp", "exr", "hdr"]).pick_file() {
+                                                            import_to_shelf_and_assign = Some((path, ShelfPickerTarget::FillMetallic));
+                                                        }
+                                                    }
                                                     if ui.button("Remove").clicked() { layer.fill_metallic_tex = None; prop_changed = true; }
                                                 } else {
-                                                    if ui.button("Load Texture...").clicked() {
-                                                        if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "tga"]).pick_file() {
-                                                            if let Ok(tex) = crate::channel::ScalarBuffer::from_image_file(&path) {
-                                                                layer.fill_metallic_tex = Some(tex);
-                                                                prop_changed = true;
-                                                            }
+                                                    if ui.button("Pick from Shelf...").on_hover_text("Pick metallic map or texture from Project Shelf").clicked() {
+                                                        open_shelf_picker = Some(ShelfPickerTarget::FillMetallic);
+                                                    }
+                                                    if ui.button("Import...").on_hover_text("Import metallic texture into Project Shelf and assign").clicked() {
+                                                        if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "tga", "bmp", "exr", "hdr"]).pick_file() {
+                                                            import_to_shelf_and_assign = Some((path, ShelfPickerTarget::FillMetallic));
                                                         }
                                                     }
                                                 }
@@ -2827,15 +4048,23 @@ impl eframe::App for PaintcraftApp {
                                             });
                                             ui.horizontal(|ui| {
                                                 if layer.fill_roughness_tex.is_some() {
-                                                    ui.label("Texture loaded");
+                                                    ui.colored_label(Color32::from_rgb(80, 220, 120), "Roughness Map Active");
+                                                    if ui.button("Shelf...").on_hover_text("Select or replace roughness map from Shelf").clicked() {
+                                                        open_shelf_picker = Some(ShelfPickerTarget::FillRoughness);
+                                                    }
+                                                    if ui.button("Import...").on_hover_text("Import roughness texture into Project Shelf and assign").clicked() {
+                                                        if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "tga", "bmp", "exr", "hdr"]).pick_file() {
+                                                            import_to_shelf_and_assign = Some((path, ShelfPickerTarget::FillRoughness));
+                                                        }
+                                                    }
                                                     if ui.button("Remove").clicked() { layer.fill_roughness_tex = None; prop_changed = true; }
                                                 } else {
-                                                    if ui.button("Load Texture...").clicked() {
-                                                        if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "tga"]).pick_file() {
-                                                            if let Ok(tex) = crate::channel::ScalarBuffer::from_image_file(&path) {
-                                                                layer.fill_roughness_tex = Some(tex);
-                                                                prop_changed = true;
-                                                            }
+                                                    if ui.button("Pick from Shelf...").on_hover_text("Pick roughness map or texture from Project Shelf").clicked() {
+                                                        open_shelf_picker = Some(ShelfPickerTarget::FillRoughness);
+                                                    }
+                                                    if ui.button("Import...").on_hover_text("Import roughness texture into Project Shelf and assign").clicked() {
+                                                        if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "tga", "bmp", "exr", "hdr"]).pick_file() {
+                                                            import_to_shelf_and_assign = Some((path, ShelfPickerTarget::FillRoughness));
                                                         }
                                                     }
                                                 }
@@ -2851,15 +4080,23 @@ impl eframe::App for PaintcraftApp {
                                             });
                                             ui.horizontal(|ui| {
                                                 if layer.fill_normal_tex.is_some() {
-                                                    ui.label("Texture loaded");
+                                                    ui.colored_label(Color32::from_rgb(80, 220, 120), "Normal Map Active");
+                                                    if ui.button("Shelf...").on_hover_text("Select or replace normal map from Shelf").clicked() {
+                                                        open_shelf_picker = Some(ShelfPickerTarget::FillNormal);
+                                                    }
+                                                    if ui.button("Import...").on_hover_text("Import normal map into Project Shelf and assign").clicked() {
+                                                        if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "tga", "bmp", "exr", "hdr"]).pick_file() {
+                                                            import_to_shelf_and_assign = Some((path, ShelfPickerTarget::FillNormal));
+                                                        }
+                                                    }
                                                     if ui.button("Remove").clicked() { layer.fill_normal_tex = None; prop_changed = true; }
                                                 } else {
-                                                    if ui.button("Load Texture...").clicked() {
-                                                        if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "tga"]).pick_file() {
-                                                            if let Ok(tex) = crate::channel::RgbaBuffer::from_image_file(&path) {
-                                                                layer.fill_normal_tex = Some(tex);
-                                                                prop_changed = true;
-                                                            }
+                                                    if ui.button("Pick from Shelf...").on_hover_text("Pick normal map from Project Shelf").clicked() {
+                                                        open_shelf_picker = Some(ShelfPickerTarget::FillNormal);
+                                                    }
+                                                    if ui.button("Import...").on_hover_text("Import normal map into Project Shelf and assign").clicked() {
+                                                        if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "tga", "bmp", "exr", "hdr"]).pick_file() {
+                                                            import_to_shelf_and_assign = Some((path, ShelfPickerTarget::FillNormal));
                                                         }
                                                     }
                                                 }
@@ -2871,6 +4108,29 @@ impl eframe::App for PaintcraftApp {
                                                 ui.label("Height / Bump:");
                                                 if ui.add(egui::Slider::new(&mut layer.fill_height, 0.0..=1.0)).changed() {
                                                     prop_changed = true;
+                                                }
+                                            });
+                                            ui.horizontal(|ui| {
+                                                if layer.fill_height_tex.is_some() {
+                                                    ui.colored_label(Color32::from_rgb(80, 220, 120), "Height Map Active");
+                                                    if ui.button("Shelf...").on_hover_text("Select or replace height map from Shelf").clicked() {
+                                                        open_shelf_picker = Some(ShelfPickerTarget::FillHeight);
+                                                    }
+                                                    if ui.button("Import...").on_hover_text("Import height texture into Project Shelf and assign").clicked() {
+                                                        if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "tga", "bmp", "exr", "hdr"]).pick_file() {
+                                                            import_to_shelf_and_assign = Some((path, ShelfPickerTarget::FillHeight));
+                                                        }
+                                                    }
+                                                    if ui.button("Remove").clicked() { layer.fill_height_tex = None; prop_changed = true; }
+                                                } else {
+                                                    if ui.button("Pick from Shelf...").on_hover_text("Pick height texture or baked map from Project Shelf").clicked() {
+                                                        open_shelf_picker = Some(ShelfPickerTarget::FillHeight);
+                                                    }
+                                                    if ui.button("Import...").on_hover_text("Import height texture into Project Shelf and assign").clicked() {
+                                                        if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "tga", "bmp", "exr", "hdr"]).pick_file() {
+                                                            import_to_shelf_and_assign = Some((path, ShelfPickerTarget::FillHeight));
+                                                        }
+                                                    }
                                                 }
                                             });
                                         }
@@ -2893,6 +4153,29 @@ impl eframe::App for PaintcraftApp {
                                                     prop_changed = true;
                                                 }
                                             });
+                                            ui.horizontal(|ui| {
+                                                if layer.fill_emissive_tex.is_some() {
+                                                    ui.colored_label(Color32::from_rgb(80, 220, 120), "Emissive Map Active");
+                                                    if ui.button("Shelf...").on_hover_text("Select or replace emissive texture from Shelf").clicked() {
+                                                        open_shelf_picker = Some(ShelfPickerTarget::FillEmissive);
+                                                    }
+                                                    if ui.button("Import...").on_hover_text("Import emissive texture into Project Shelf and assign").clicked() {
+                                                        if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "tga", "bmp", "exr", "hdr"]).pick_file() {
+                                                            import_to_shelf_and_assign = Some((path, ShelfPickerTarget::FillEmissive));
+                                                        }
+                                                    }
+                                                    if ui.button("Remove").clicked() { layer.fill_emissive_tex = None; prop_changed = true; }
+                                                } else {
+                                                    if ui.button("Pick from Shelf...").on_hover_text("Pick emissive texture from Project Shelf").clicked() {
+                                                        open_shelf_picker = Some(ShelfPickerTarget::FillEmissive);
+                                                    }
+                                                    if ui.button("Import...").on_hover_text("Import emissive texture into Project Shelf and assign").clicked() {
+                                                        if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "tga", "bmp", "exr", "hdr"]).pick_file() {
+                                                            import_to_shelf_and_assign = Some((path, ShelfPickerTarget::FillEmissive));
+                                                        }
+                                                    }
+                                                }
+                                            });
                                         }
 
                                         if layer.channel_flags.opacity {
@@ -2912,6 +4195,29 @@ impl eframe::App for PaintcraftApp {
                                                 if ui.small_button("Solid (100%)").clicked() {
                                                     layer.fill_opacity = 1.0;
                                                     prop_changed = true;
+                                                }
+                                            });
+                                            ui.horizontal(|ui| {
+                                                if layer.fill_opacity_tex.is_some() {
+                                                    ui.colored_label(Color32::from_rgb(80, 220, 120), "Opacity Map Active");
+                                                    if ui.button("Shelf...").on_hover_text("Select or replace opacity map from Shelf").clicked() {
+                                                        open_shelf_picker = Some(ShelfPickerTarget::FillOpacity);
+                                                    }
+                                                    if ui.button("Import...").on_hover_text("Import opacity map into Project Shelf and assign").clicked() {
+                                                        if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "tga", "bmp", "exr", "hdr"]).pick_file() {
+                                                            import_to_shelf_and_assign = Some((path, ShelfPickerTarget::FillOpacity));
+                                                        }
+                                                    }
+                                                    if ui.button("Remove").clicked() { layer.fill_opacity_tex = None; prop_changed = true; }
+                                                } else {
+                                                    if ui.button("Pick from Shelf...").on_hover_text("Pick opacity map from Project Shelf").clicked() {
+                                                        open_shelf_picker = Some(ShelfPickerTarget::FillOpacity);
+                                                    }
+                                                    if ui.button("Import...").on_hover_text("Import opacity map into Project Shelf and assign").clicked() {
+                                                        if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "tga", "bmp", "exr", "hdr"]).pick_file() {
+                                                            import_to_shelf_and_assign = Some((path, ShelfPickerTarget::FillOpacity));
+                                                        }
+                                                    }
                                                 }
                                             });
                                         }
@@ -3057,6 +4363,9 @@ impl eframe::App for PaintcraftApp {
                                                         ui.selectable_value(&mut self.brush_engine.settings.alpha, a, a.name());
                                                     }
                                                 });
+                                            if ui.small_button("Shelf...").on_hover_text("Choose Alpha from the Shelf").clicked() {
+                                                self.shelf_picker = Some(ShelfPickerState::new(ShelfPickerTarget::BrushAlpha));
+                                            }
                                         });
     
                                         ui.collapsing("Jitter Dynamics", |ui| {
@@ -3172,15 +4481,33 @@ impl eframe::App for PaintcraftApp {
                             let pos = proj.position_map.as_ref();
                             let wn = proj.world_space_normal_map.as_ref();
                             let ao = proj.ao_map.as_ref();
-                            let layer = &mut proj.layers[act_idx];
+                            let id_ref = proj.id_map.as_ref();
+                            let (lower, higher) = proj.layers.split_at_mut(act_idx);
+                            let anchor_refs: Vec<crate::layer::AnchorLayerRef<'_>> = lower
+                                .iter()
+                                .filter_map(|l| l.as_anchor_ref())
+                                .collect();
+                            let layer = &mut higher[0];
                             if prop_changed && layer.layer_type == LayerType::Fill {
                                 layer.evaluate_fill_advanced(curv, pos, wn, ao);
                             }
                             if mask_changed && layer.has_mask {
-                                layer.evaluate_mask_advanced(curv, ao, pos, wn);
+                                layer.evaluate_mask_full(curv, ao, pos, wn, id_ref, &anchor_refs);
                             }
                             self.project.rebuild_composite();
                             self.project.gpu_sync_needed = true;
+                        }
+
+                        if let Some(target) = open_shelf_picker {
+                            self.shelf_picker = Some(ShelfPickerState::new(target));
+                        }
+                        if let Some((path, target)) = import_to_shelf_and_assign {
+                            if let Ok(id) = self.project.import_texture_resource(&path, crate::project::ProjectResourceType::Texture) {
+                                if let Some(res) = self.project.get_resource(&id).cloned() {
+                                    self.assign_resource_to_target(&res, target);
+                                    self.refresh_shelf_thumbnails(ui.ctx());
+                                }
+                            }
                         }
                     }
                     }
@@ -3247,19 +4574,24 @@ impl eframe::App for PaintcraftApp {
                                         }
                                     });
                                     ui.horizontal(|ui| {
-                                        if ui.button("Import File...").clicked() {
-                                            if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "tga"]).pick_file() {
-                                                if let Ok(tex) = crate::channel::RgbaBuffer::from_image_file(&path) {
-                                                    self.project.world_normal_map = Some(tex);
-                                                    self.project.gpu_sync_needed = true;
-                                                    self.status_message = format!("Loaded Normal map: {:?}", path.file_name().unwrap_or_default());
+                                        if ui.button("Shelf...").on_hover_text("Select Normal map from Project Shelf").clicked() {
+                                            self.shelf_picker = Some(ShelfPickerState::new(ShelfPickerTarget::MeshMapTangentNormal));
+                                        }
+                                        if ui.button("Import File...").on_hover_text("Import normal map file into Project Shelf and assign").clicked() {
+                                            if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "tga", "exr", "hdr"]).pick_file() {
+                                                if let Ok(id) = self.project.import_texture_resource(&path, crate::project::ProjectResourceType::Texture) {
+                                                    if let Some(res) = self.project.get_resource(&id).cloned() {
+                                                        self.assign_resource_to_target(&res, ShelfPickerTarget::MeshMapTangentNormal);
+                                                    }
                                                 }
                                             }
                                         }
                                         if self.project.world_normal_map.is_some() {
                                             if ui.button("Remove").clicked() {
                                                 self.project.world_normal_map = None;
+                                                self.project.gpu_mesh_maps_sync_needed = true;
                                                 self.project.gpu_sync_needed = true;
+                                                self.project.sync_baked_maps_to_resources();
                                             }
                                             if ui.button("View").clicked() {
                                                 self.view_mode = ViewportChannelMode::Normal;
@@ -3279,19 +4611,24 @@ impl eframe::App for PaintcraftApp {
                                         }
                                     });
                                     ui.horizontal(|ui| {
-                                        if ui.button("Import File...").clicked() {
-                                            if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "tga"]).pick_file() {
-                                                if let Ok(tex) = crate::channel::ScalarBuffer::from_image_file(&path) {
-                                                    self.project.ao_map = Some(tex);
-                                                    self.project.gpu_sync_needed = true;
-                                                    self.status_message = format!("Loaded AO map: {:?}", path.file_name().unwrap_or_default());
+                                        if ui.button("Shelf...").on_hover_text("Select AO map from Project Shelf").clicked() {
+                                            self.shelf_picker = Some(ShelfPickerState::new(ShelfPickerTarget::MeshMapAo));
+                                        }
+                                        if ui.button("Import File...").on_hover_text("Import AO map file into Project Shelf and assign").clicked() {
+                                            if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "tga", "exr", "hdr"]).pick_file() {
+                                                if let Ok(id) = self.project.import_texture_resource(&path, crate::project::ProjectResourceType::Texture) {
+                                                    if let Some(res) = self.project.get_resource(&id).cloned() {
+                                                        self.assign_resource_to_target(&res, ShelfPickerTarget::MeshMapAo);
+                                                    }
                                                 }
                                             }
                                         }
                                         if self.project.ao_map.is_some() {
                                             if ui.button("Remove").clicked() {
                                                 self.project.ao_map = None;
+                                                self.project.gpu_mesh_maps_sync_needed = true;
                                                 self.project.gpu_sync_needed = true;
+                                                self.project.sync_baked_maps_to_resources();
                                             }
                                             if ui.button("View").clicked() {
                                                 self.view_mode = ViewportChannelMode::AmbientOcclusion;
@@ -3311,19 +4648,24 @@ impl eframe::App for PaintcraftApp {
                                         }
                                     });
                                     ui.horizontal(|ui| {
-                                        if ui.button("Import File...").clicked() {
-                                            if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "tga"]).pick_file() {
-                                                if let Ok(tex) = crate::channel::ScalarBuffer::from_image_file(&path) {
-                                                    self.project.curvature_map = Some(tex);
-                                                    self.project.gpu_sync_needed = true;
-                                                    self.status_message = format!("Loaded Curvature map: {:?}", path.file_name().unwrap_or_default());
+                                        if ui.button("Shelf...").on_hover_text("Select Curvature map from Project Shelf").clicked() {
+                                            self.shelf_picker = Some(ShelfPickerState::new(ShelfPickerTarget::MeshMapCurvature));
+                                        }
+                                        if ui.button("Import File...").on_hover_text("Import Curvature map file into Project Shelf and assign").clicked() {
+                                            if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "tga", "exr", "hdr"]).pick_file() {
+                                                if let Ok(id) = self.project.import_texture_resource(&path, crate::project::ProjectResourceType::Texture) {
+                                                    if let Some(res) = self.project.get_resource(&id).cloned() {
+                                                        self.assign_resource_to_target(&res, ShelfPickerTarget::MeshMapCurvature);
+                                                    }
                                                 }
                                             }
                                         }
                                         if self.project.curvature_map.is_some() {
                                             if ui.button("Remove").clicked() {
                                                 self.project.curvature_map = None;
+                                                self.project.gpu_mesh_maps_sync_needed = true;
                                                 self.project.gpu_sync_needed = true;
+                                                self.project.sync_baked_maps_to_resources();
                                             }
                                             if ui.button("View").clicked() {
                                                 self.view_mode = ViewportChannelMode::Curvature;
@@ -3343,19 +4685,24 @@ impl eframe::App for PaintcraftApp {
                                         }
                                     });
                                     ui.horizontal(|ui| {
-                                        if ui.button("Import File...").clicked() {
-                                            if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "tga"]).pick_file() {
-                                                if let Ok(tex) = crate::channel::RgbaBuffer::from_image_file(&path) {
-                                                    self.project.world_space_normal_map = Some(tex);
-                                                    self.project.gpu_sync_needed = true;
-                                                    self.status_message = format!("Loaded World Space Normal: {:?}", path.file_name().unwrap_or_default());
+                                        if ui.button("Shelf...").on_hover_text("Select World Space Normal map from Project Shelf").clicked() {
+                                            self.shelf_picker = Some(ShelfPickerState::new(ShelfPickerTarget::MeshMapWorldSpaceNormal));
+                                        }
+                                        if ui.button("Import File...").on_hover_text("Import World Space Normal map file into Project Shelf and assign").clicked() {
+                                            if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "tga", "exr", "hdr"]).pick_file() {
+                                                if let Ok(id) = self.project.import_texture_resource(&path, crate::project::ProjectResourceType::Texture) {
+                                                    if let Some(res) = self.project.get_resource(&id).cloned() {
+                                                        self.assign_resource_to_target(&res, ShelfPickerTarget::MeshMapWorldSpaceNormal);
+                                                    }
                                                 }
                                             }
                                         }
                                         if self.project.world_space_normal_map.is_some() {
                                             if ui.button("Remove").clicked() {
                                                 self.project.world_space_normal_map = None;
+                                                self.project.gpu_mesh_maps_sync_needed = true;
                                                 self.project.gpu_sync_needed = true;
+                                                self.project.sync_baked_maps_to_resources();
                                             }
                                             if ui.button("View").clicked() {
                                                 self.view_mode = ViewportChannelMode::WorldNormal;
@@ -3375,19 +4722,24 @@ impl eframe::App for PaintcraftApp {
                                         }
                                     });
                                     ui.horizontal(|ui| {
-                                        if ui.button("Import File...").clicked() {
-                                            if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "tga"]).pick_file() {
-                                                if let Ok(tex) = crate::channel::RgbaBuffer::from_image_file(&path) {
-                                                    self.project.position_map = Some(tex);
-                                                    self.project.gpu_sync_needed = true;
-                                                    self.status_message = format!("Loaded Position map: {:?}", path.file_name().unwrap_or_default());
+                                        if ui.button("Shelf...").on_hover_text("Select Position map from Project Shelf").clicked() {
+                                            self.shelf_picker = Some(ShelfPickerState::new(ShelfPickerTarget::MeshMapPosition));
+                                        }
+                                        if ui.button("Import File...").on_hover_text("Import Position map file into Project Shelf and assign").clicked() {
+                                            if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "tga", "exr", "hdr"]).pick_file() {
+                                                if let Ok(id) = self.project.import_texture_resource(&path, crate::project::ProjectResourceType::Texture) {
+                                                    if let Some(res) = self.project.get_resource(&id).cloned() {
+                                                        self.assign_resource_to_target(&res, ShelfPickerTarget::MeshMapPosition);
+                                                    }
                                                 }
                                             }
                                         }
                                         if self.project.position_map.is_some() {
                                             if ui.button("Remove").clicked() {
                                                 self.project.position_map = None;
+                                                self.project.gpu_mesh_maps_sync_needed = true;
                                                 self.project.gpu_sync_needed = true;
+                                                self.project.sync_baked_maps_to_resources();
                                             }
                                             if ui.button("View").clicked() {
                                                 self.view_mode = ViewportChannelMode::Position;
@@ -3407,12 +4759,15 @@ impl eframe::App for PaintcraftApp {
                                         }
                                     });
                                     ui.horizontal(|ui| {
-                                        if ui.button("Import File...").clicked() {
-                                            if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "tga"]).pick_file() {
-                                                if let Ok(tex) = crate::channel::ScalarBuffer::from_image_file(&path) {
-                                                    self.project.thickness_map = Some(tex);
-                                                    self.project.gpu_sync_needed = true;
-                                                    self.status_message = format!("Loaded Thickness map: {:?}", path.file_name().unwrap_or_default());
+                                        if ui.button("Shelf...").on_hover_text("Select Thickness map from Project Shelf").clicked() {
+                                            self.shelf_picker = Some(ShelfPickerState::new(ShelfPickerTarget::MeshMapThickness));
+                                        }
+                                        if ui.button("Import File...").on_hover_text("Import Thickness map file into Project Shelf and assign").clicked() {
+                                            if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "tga", "exr", "hdr"]).pick_file() {
+                                                if let Ok(id) = self.project.import_texture_resource(&path, crate::project::ProjectResourceType::Texture) {
+                                                    if let Some(res) = self.project.get_resource(&id).cloned() {
+                                                        self.assign_resource_to_target(&res, ShelfPickerTarget::MeshMapThickness);
+                                                    }
                                                 }
                                             }
                                         }
@@ -3422,6 +4777,7 @@ impl eframe::App for PaintcraftApp {
                                                     th.invert();
                                                     self.project.gpu_mesh_maps_sync_needed = true;
                                                     self.project.gpu_sync_needed = true;
+                                                    self.project.sync_baked_maps_to_resources();
                                                     self.status_message = "Inverted thickness map".to_string();
                                                 }
                                             }
@@ -3429,6 +4785,7 @@ impl eframe::App for PaintcraftApp {
                                                 self.project.thickness_map = None;
                                                 self.project.gpu_mesh_maps_sync_needed = true;
                                                 self.project.gpu_sync_needed = true;
+                                                self.project.sync_baked_maps_to_resources();
                                             }
                                             if ui.button("View").clicked() {
                                                 self.view_mode = ViewportChannelMode::Thickness;
@@ -3437,16 +4794,35 @@ impl eframe::App for PaintcraftApp {
                                     });
                                 });
 
-                                // 6. ID Map
+                                // 7. ID Map
                                 ui.group(|ui| {
                                     ui.horizontal(|ui| {
                                         ui.strong("ID (Color Mask):");
-                                        ui.colored_label(egui::Color32::from_rgb(160, 160, 160), "Optional");
+                                        if self.project.id_map.is_some() {
+                                            ui.colored_label(egui::Color32::from_rgb(80, 220, 120), "Active");
+                                        } else {
+                                            ui.colored_label(egui::Color32::from_rgb(160, 160, 160), "Not Baked");
+                                        }
                                     });
                                     ui.horizontal(|ui| {
-                                        if ui.button("Import File...").clicked() {
-                                            if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "tga"]).pick_file() {
-                                                self.status_message = format!("Imported ID map: {:?}", path.file_name().unwrap_or_default());
+                                        if ui.button("Shelf...").on_hover_text("Select ID map from Project Shelf").clicked() {
+                                            self.shelf_picker = Some(ShelfPickerState::new(ShelfPickerTarget::MeshMapId));
+                                        }
+                                        if ui.button("Import File...").on_hover_text("Import ID map file into Project Shelf and assign").clicked() {
+                                            if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "tga", "exr", "hdr"]).pick_file() {
+                                                if let Ok(id) = self.project.import_texture_resource(&path, crate::project::ProjectResourceType::Texture) {
+                                                    if let Some(res) = self.project.get_resource(&id).cloned() {
+                                                        self.assign_resource_to_target(&res, ShelfPickerTarget::MeshMapId);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        if self.project.id_map.is_some() {
+                                            if ui.button("Remove").clicked() {
+                                                self.project.id_map = None;
+                                                self.project.gpu_mesh_maps_sync_needed = true;
+                                                self.project.sync_baked_maps_to_resources();
+                                                self.status_message = "Removed ID map".to_string();
                                             }
                                         }
                                     });
@@ -3505,6 +4881,10 @@ impl eframe::App for PaintcraftApp {
             }
         }
 
+        // --- SUBSTANCE 3D PAINTER SHELF MODALS ---
+        self.render_shelf_picker_modal(ctx);
+        self.render_shelf_resource_popup(ctx);
+
         // --- EXPORT MODAL DIALOG ---
         if self.show_export_modal {
             egui::Window::new("Export Textures (Production Presets)")
@@ -3519,6 +4899,7 @@ impl eframe::App for PaintcraftApp {
                             ui.selectable_value(&mut self.export_preset, ExportPreset::UnrealEngine, "Unreal Engine (ORM Packed)");
                             ui.selectable_value(&mut self.export_preset, ExportPreset::Unity, "Unity URP / Standard");
                             ui.selectable_value(&mut self.export_preset, ExportPreset::BlenderGltf, "Blender / glTF Standard");
+                            ui.selectable_value(&mut self.export_preset, ExportPreset::GlbBinary, "glTF 2.0 Binary (.glb) with PBR Textures");
                             ui.selectable_value(&mut self.export_preset, ExportPreset::IndividualMaps, "Individual Channel Maps");
                         });
 
@@ -3530,8 +4911,8 @@ impl eframe::App for PaintcraftApp {
                     ui.label("Export Configuration:");
                     ui.checkbox(&mut self.export_flip_v, "Flip Y / V-Axis (Recommended for Blender, Maya, Godot, OBJ)")
                         .on_hover_text("Aligns texture coordinates with bottom-left UV origin convention used by Wavefront OBJ, Blender, and Godot.");
-                    ui.checkbox(&mut self.export_mesh, "Export 3D Model (.obj + .mtl) alongside textures")
-                        .on_hover_text("Exports the active model with matching UV coordinates and Wavefront material definition ready for 1-click DCC import.");
+                    ui.checkbox(&mut self.export_mesh, "Export 3D Model (.obj + .mtl, and .glb) alongside textures")
+                        .on_hover_text("Exports the active model in standard Wavefront OBJ and binary glTF 2.0 (.glb) format with matching UV coordinates ready for 1-click DCC import.");
 
                     ui.add_space(10.0);
                     ui.horizontal(|ui| {
@@ -3789,6 +5170,9 @@ impl eframe::App for PaintcraftApp {
                                     ui.close_menu();
                                 }
                             });
+                        if ui.button("Shelf...").on_hover_text("Select HDRI environment from Shelf").clicked() {
+                            self.shelf_picker = Some(ShelfPickerState::new(ShelfPickerTarget::HdriEnvironment));
+                        }
                     });
 
                     if let Some(path) = hdri_to_load {
@@ -3824,6 +5208,42 @@ impl eframe::App for PaintcraftApp {
                     ui.heading("Mesh Overlays");
                     if ui.checkbox(&mut self.renderer.show_wireframe, "Wireframe Overlay").changed() {
                         self.show_uv_wireframe = self.renderer.show_wireframe;
+                    }
+
+                    ui.separator();
+                    ui.heading("Iray Monte Carlo Path Tracer (F10)");
+                    if ui.checkbox(&mut self.iray_mode, "Enable Iray Path Tracer Viewport (F10)").changed() {
+                        if self.iray_mode {
+                            if let Some(pt) = &mut self.path_tracer {
+                                pt.reset();
+                            }
+                        }
+                    }
+                    if self.iray_mode {
+                        ui.add(egui::Slider::new(&mut self.iray_max_samples, 16..=1024).text("Max Samples"));
+                        ui.add(egui::Slider::new(&mut self.iray_max_bounces, 1..=6).text("Max Bounces"));
+                        ui.add(egui::Slider::new(&mut self.iray_samples_per_frame, 1..=8).text("Samples / Frame"));
+                        ui.horizontal(|ui| {
+                            if ui.button("Restart Render").clicked() {
+                                if let Some(pt) = &mut self.path_tracer {
+                                    pt.reset();
+                                }
+                            }
+                            if ui.button("Save Image to PNG...").clicked() {
+                                if let Some(path) = rfd::FileDialog::new()
+                                    .add_filter("PNG Image", &["png"])
+                                    .set_file_name("paintcraft_iray_render.png")
+                                    .save_file()
+                                {
+                                    if let Some(pt) = &self.path_tracer {
+                                        match pt.save_to_png(&path) {
+                                            Ok(()) => self.status_message = format!("Saved Iray render to {}", path.display()),
+                                            Err(err) => self.status_message = format!("Failed to save render: {}", err),
+                                        }
+                                    }
+                                }
+                            }
+                        });
                     }
 
                     ui.separator();
@@ -4375,7 +5795,59 @@ impl PaintcraftApp {
             frame_settings.ssao_enabled = false;
         }
 
-        let texture_id = if let Some(wgpu) = &mut self.wgpu_viewport {
+        let texture_id = if self.iray_mode {
+            let t_rnd = std::time::Instant::now();
+            let scale = if is_interacting && self.shader_settings.adaptive_resolution { 0.5 } else { 1.0 };
+            let pt_w = ((vp_w * scale) as u32).max(64).min(1920);
+            let pt_h = ((vp_h * scale) as u32).max(64).min(1080);
+
+            let current_view = self.camera.view_matrix();
+            let current_rot = self.renderer.hdri.rotation;
+            let camera_changed = self.last_iray_camera_view.map(|v| v != current_view).unwrap_or(true);
+            let hdri_changed = (self.last_iray_hdri_rot - current_rot).abs() > 0.01;
+
+            if let Some(pt) = &mut self.path_tracer {
+                pt.resize(pt_w, pt_h);
+                pt.max_samples = self.iray_max_samples;
+                pt.max_bounces = self.iray_max_bounces;
+
+                if camera_changed || hdri_changed || self.project.gpu_sync_needed {
+                    pt.reset();
+                    self.last_iray_camera_view = Some(current_view);
+                    self.last_iray_hdri_rot = current_rot;
+                }
+
+                let samples = if is_interacting { 1 } else { self.iray_samples_per_frame };
+                pt.render_samples(
+                    &self.camera,
+                    &self.project.mesh,
+                    &self.project.composite_textures,
+                    &self.renderer.hdri,
+                    samples,
+                );
+
+                if !pt.is_converged() || is_interacting {
+                    ctx.request_repaint();
+                }
+
+                let color_image = egui::ColorImage::from_rgba_unmultiplied(
+                    [pt.width as usize, pt.height as usize],
+                    &pt.color_buffer,
+                );
+                if let Some(tex) = &mut self.iray_texture {
+                    tex.set(color_image, egui::TextureOptions::LINEAR);
+                } else {
+                    self.iray_texture = Some(ctx.load_texture("iray_viewport", color_image, egui::TextureOptions::LINEAR));
+                }
+            }
+
+            self.perf_metrics.gpu_render_ms = t_rnd.elapsed().as_secs_f32() * 1000.0;
+            if let Some(tex) = &self.iray_texture {
+                tex.id()
+            } else {
+                eframe::egui::TextureId::default()
+            }
+        } else if let Some(wgpu) = &mut self.wgpu_viewport {
             wgpu.resize(render_w, render_h);
             
             let view = self.camera.view_matrix();
@@ -4427,36 +5899,61 @@ impl PaintcraftApp {
         );
 
         let hud_top_left = rect.min + eframe::egui::Vec2::new(12.0, 12.0);
-        let gpu_mode_text = if self.wgpu_viewport.is_some() { "[Vulkan/WGPU Substance PBR]" } else { "[Software CPU]" };
-        let mut pp_badges = Vec::new();
-        match self.shader_settings.aa_mode {
-            crate::nvidia_dlaa::AntiAliasingMode::NvidiaDlaa => { pp_badges.push("NVIDIA DLAA"); }
-            crate::nvidia_dlaa::AntiAliasingMode::Fxaa => { pp_badges.push("FXAA"); }
-            crate::nvidia_dlaa::AntiAliasingMode::Off => {
-                if self.shader_settings.fxaa_enabled { pp_badges.push("FXAA"); }
+        if self.iray_mode {
+            let (sample_cur, sample_max, pct) = if let Some(pt) = &self.path_tracer {
+                (pt.sample_count, pt.max_samples, pt.progress_pct())
+            } else {
+                (0, 256, 0.0)
+            };
+            let status = if pct >= 100.0 { "Converged" } else { "Sampling..." };
+            let iray_hud_text = format!(
+                "[IRAY MONTE CARLO PATH TRACER] | Sample: {} / {} ({:.1}%) - {} | HDRI: {} ({:.0}°) | [F10 or Esc to Exit]",
+                sample_cur,
+                sample_max,
+                pct,
+                status,
+                self.renderer.hdri.preset.name(),
+                self.renderer.hdri.rotation,
+            );
+            ui.painter().text(
+                hud_top_left,
+                eframe::egui::Align2::LEFT_TOP,
+                iray_hud_text,
+                eframe::egui::FontId::proportional(12.0),
+                eframe::egui::Color32::from_rgb(255, 180, 50),
+            );
+        } else {
+            let gpu_mode_text = if self.wgpu_viewport.is_some() { "[Vulkan/WGPU Substance PBR]" } else { "[Software CPU]" };
+            let mut pp_badges = Vec::new();
+            match self.shader_settings.aa_mode {
+                crate::nvidia_dlaa::AntiAliasingMode::NvidiaDlaa => { pp_badges.push("NVIDIA DLAA"); }
+                crate::nvidia_dlaa::AntiAliasingMode::Fxaa => { pp_badges.push("FXAA"); }
+                crate::nvidia_dlaa::AntiAliasingMode::Off => {
+                    if self.shader_settings.fxaa_enabled { pp_badges.push("FXAA"); }
+                }
             }
-        }
-        if self.shader_settings.denoiser_enabled { pp_badges.push("Denoiser"); }
-        if self.shader_settings.ssao_enabled { pp_badges.push("SSAO"); }
-        if self.shader_settings.bloom_enabled { pp_badges.push("Bloom"); }
-        if self.shader_settings.dof_enabled { pp_badges.push("DoF"); }
-        let pp_str = if pp_badges.is_empty() { String::new() } else { format!(" | PP: [{}]", pp_badges.join(", ")) };
+            if self.shader_settings.denoiser_enabled { pp_badges.push("Denoiser"); }
+            if self.shader_settings.ssao_enabled { pp_badges.push("SSAO"); }
+            if self.shader_settings.bloom_enabled { pp_badges.push("Bloom"); }
+            if self.shader_settings.dof_enabled { pp_badges.push("DoF"); }
+            let pp_str = if pp_badges.is_empty() { String::new() } else { format!(" | PP: [{}]", pp_badges.join(", ")) };
 
-        let hud_text = format!(
-            "{} {} | HDRI: {} ({:.0}°){}",
-            gpu_mode_text,
-            self.view_mode.name(),
-            self.renderer.hdri.preset.name(),
-            self.renderer.hdri.rotation,
-            pp_str,
-        );
-        ui.painter().text(
-            hud_top_left,
-            eframe::egui::Align2::LEFT_TOP,
-            hud_text,
-            eframe::egui::FontId::proportional(12.0),
-            eframe::egui::Color32::from_rgba_unmultiplied(220, 220, 220, 180),
-        );
+            let hud_text = format!(
+                "{} {} | HDRI: {} ({:.0}°){}",
+                gpu_mode_text,
+                self.view_mode.name(),
+                self.renderer.hdri.preset.name(),
+                self.renderer.hdri.rotation,
+                pp_str,
+            );
+            ui.painter().text(
+                hud_top_left,
+                eframe::egui::Align2::LEFT_TOP,
+                hud_text,
+                eframe::egui::FontId::proportional(12.0),
+                eframe::egui::Color32::from_rgba_unmultiplied(220, 220, 220, 180),
+            );
+        }
 
 
 
@@ -4732,7 +6229,10 @@ impl PaintcraftApp {
                                     }
                                 }
                             }
-                            if self.brush_engine.settings.mode == ToolMode::Eyedropper {
+                            if self.brush_engine.settings.mode == ToolMode::Clone && (input.modifiers.alt || input.key_down(egui::Key::V)) {
+                                self.brush_engine.settings.clone_source_uv = Some(hit.uv);
+                                self.status_message = format!("Clone Source Set: UV ({:.3}, {:.3})", hit.uv.x, hit.uv.y);
+                            } else if self.brush_engine.settings.mode == ToolMode::Eyedropper {
                             let sampled = self.project.composite_textures.base_color.sample_bilinear(hit.uv);
                             self.brush_engine.settings.paint_color = sampled;
                             self.brush_engine.settings.paint_roughness = self.project.composite_textures.roughness.sample_bilinear(hit.uv);
@@ -4745,6 +6245,7 @@ impl PaintcraftApp {
                             let mode = self.brush_engine.settings.polygon_fill_mode;
                             let tris = match mode {
                                 crate::brush::PolygonFillMode::Triangle => vec![hit.triangle_idx],
+                                crate::brush::PolygonFillMode::Polygon => self.project.mesh.get_polygon_quad(hit.triangle_idx),
                                 crate::brush::PolygonFillMode::UvIsland => self.project.mesh.get_connected_uv_island(hit.triangle_idx),
                                 crate::brush::PolygonFillMode::MeshElement => self.project.mesh.get_connected_mesh_element(hit.triangle_idx),
                             };
@@ -4864,12 +6365,31 @@ impl PaintcraftApp {
 
                                     let sym_pts = self.brush_engine.get_symmetry_points(hit.point, hit.normal);
 
+                                    let orig_color = self.brush_engine.settings.paint_color;
+                                    let mut skip_stroke = false;
+
+                                    if self.brush_engine.settings.mode == ToolMode::Projection || self.brush_engine.settings.stencil.enabled {
+                                        let screen_uv = glam::Vec2::new(local_x / vp_w.max(1.0), local_y / vp_h.max(1.0));
+                                        if let Some(sample) = self.brush_engine.sample_stencil(screen_uv) {
+                                            if self.brush_engine.settings.stencil.mask_only {
+                                                let lum = (sample.x * 0.299 + sample.y * 0.587 + sample.z * 0.114) * sample.w;
+                                                self.brush_engine.settings.flow *= lum * self.brush_engine.settings.stencil.opacity;
+                                            } else {
+                                                self.brush_engine.settings.paint_color = glam::Vec4::new(sample.x, sample.y, sample.z, sample.w * self.brush_engine.settings.stencil.opacity);
+                                            }
+                                        } else if self.brush_engine.settings.stencil.enabled {
+                                            skip_stroke = true;
+                                        }
+                                    }
+
                                     // Keep CPU layer buffer updated for history/undo/save integrity
-                                    {
+                                    if !skip_stroke {
                                         let layer = &mut self.project.layers[act_idx];
                                         let mesh = &self.project.mesh;
                                         self.brush_engine.paint_stroke_3d(layer, mesh, hit.point, hit.normal, world_radius);
                                     }
+
+                                    self.brush_engine.settings.paint_color = orig_color;
 
                                     // Option 1 & 3: Hardware GPU Compute Shader 3D Projection Stamping across all symmetry points
                                     let mut gpu_stamped = false;
@@ -5003,6 +6523,42 @@ impl PaintcraftApp {
                     egui::Color32::from_rgba_unmultiplied(52, 152, 219, 180),
                 );
             }
+        }
+
+        // --- STENCIL PROJECTION OVERLAY ---
+        if self.brush_engine.settings.stencil.enabled {
+            let st = &self.brush_engine.settings.stencil;
+            let center = rect.center() + egui::vec2(st.pos.x * rect.width(), st.pos.y * rect.height());
+            let half_w = (rect.width() * 0.4 * st.scale) * 0.5;
+            let half_h = (rect.height() * 0.4 * st.scale) * 0.5;
+            let corners = [
+                egui::pos2(-half_w, -half_h),
+                egui::pos2(half_w, -half_h),
+                egui::pos2(half_w, half_h),
+                egui::pos2(-half_w, half_h),
+            ];
+            let (sin_a, cos_a) = st.angle.sin_cos();
+            let rotated_corners: Vec<egui::Pos2> = corners
+                .iter()
+                .map(|p| {
+                    let rx = p.x * cos_a - p.y * sin_a;
+                    let ry = p.x * sin_a + p.y * cos_a;
+                    center + egui::vec2(rx, ry)
+                })
+                .collect();
+            let stencil_alpha = (st.opacity * 220.0) as u8;
+            ui.painter().add(egui::Shape::convex_polygon(
+                rotated_corners.clone(),
+                egui::Color32::from_rgba_unmultiplied(243, 94, 24, (stencil_alpha / 6).max(12)),
+                egui::Stroke::new(1.8_f32, egui::Color32::from_rgba_unmultiplied(243, 94, 24, stencil_alpha.max(70))),
+            ));
+            ui.painter().text(
+                rotated_corners[0] + egui::vec2(6.0, 6.0),
+                egui::Align2::LEFT_TOP,
+                format!("Stencil ({:.0}% opac)", st.opacity * 100.0),
+                egui::FontId::proportional(11.0),
+                egui::Color32::from_rgba_unmultiplied(243, 94, 24, stencil_alpha.max(120)),
+            );
         }
 
         // --- INTERACTIVE BRUSH CURSOR, LAZY LEASH & 3D SYMMETRY GHOST CURSORS ---
@@ -5288,7 +6844,10 @@ impl PaintcraftApp {
                         let u = ((mouse_pos.x - canvas_rect.min.x) / canvas_rect.width()).clamp(0.0, 1.0);
                         let v = ((mouse_pos.y - canvas_rect.min.y) / canvas_rect.height()).clamp(0.0, 1.0);
 
-                        if self.brush_engine.settings.mode == ToolMode::Eyedropper {
+                        if self.brush_engine.settings.mode == ToolMode::Clone && ui.input(|i| i.modifiers.alt || i.key_down(egui::Key::V)) {
+                            self.brush_engine.settings.clone_source_uv = Some(glam::Vec2::new(u, v));
+                            self.status_message = format!("Clone Source Set: UV ({:.3}, {:.3})", u, v);
+                        } else if self.brush_engine.settings.mode == ToolMode::Eyedropper {
                             let sampled = self.project.composite_textures.base_color.sample_bilinear(glam::Vec2::new(u, v));
                             self.brush_engine.settings.paint_color = sampled;
                             self.brush_engine.settings.paint_roughness = self.project.composite_textures.roughness.sample_bilinear(glam::Vec2::new(u, v));
@@ -5304,6 +6863,7 @@ impl PaintcraftApp {
                                 let mode = self.brush_engine.settings.polygon_fill_mode;
                                 let tris = match mode {
                                     crate::brush::PolygonFillMode::Triangle => vec![tri_idx],
+                                    crate::brush::PolygonFillMode::Polygon => self.project.mesh.get_polygon_quad(tri_idx),
                                     crate::brush::PolygonFillMode::UvIsland => self.project.mesh.get_connected_uv_island(tri_idx),
                                     crate::brush::PolygonFillMode::MeshElement => self.project.mesh.get_connected_mesh_element(tri_idx),
                                 };
@@ -5571,9 +7131,14 @@ impl PaintcraftApp {
         );
         ui.add_space(3.0);
 
+        // Ensure thumbnails are cached
+        self.refresh_shelf_thumbnails(ui.ctx());
+
         // Category Filter Pills
         let categories = [
             (crate::shelf::ShelfCategory::All, "All"),
+            (crate::shelf::ShelfCategory::Project, "Project"),
+            (crate::shelf::ShelfCategory::Textures, "Tex"),
             (crate::shelf::ShelfCategory::Materials, "Mat"),
             (crate::shelf::ShelfCategory::SmartMaterials, "Smart"),
             (crate::shelf::ShelfCategory::SmartMasks, "Mask"),
@@ -5594,7 +7159,35 @@ impl PaintcraftApp {
         ui.add_space(2.0);
         ui.separator();
 
-        if self.shelf_category == crate::shelf::ShelfCategory::Environments {
+        if self.shelf_category == crate::shelf::ShelfCategory::Project || self.shelf_category == crate::shelf::ShelfCategory::Textures {
+            // Project Shelf Actions
+            ui.horizontal(|ui| {
+                if ui.small_button("+ Import...").on_hover_text("Import texture or image file into project shelf").clicked() {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("Images & Textures", &["png", "jpg", "jpeg", "tga", "bmp", "hdr", "exr"])
+                        .set_title("Import Texture into Project Shelf")
+                        .pick_file() 
+                    {
+                        match self.project.import_texture_resource(&path, crate::project::ProjectResourceType::Texture) {
+                            Ok(_id) => {
+                                self.status_message = format!("Imported '{}' into project shelf", path.file_name().unwrap_or_default().to_string_lossy());
+                                self.shelf_thumbnails_dirty = true;
+                                self.refresh_shelf_thumbnails(ui.ctx());
+                            }
+                            Err(e) => {
+                                self.status_message = format!("Failed to import texture: {}", e);
+                            }
+                        }
+                    }
+                }
+                if ui.small_button("↻ Sync Maps").on_hover_text("Synchronize baked mesh maps to shelf").clicked() {
+                    self.project.sync_baked_maps_to_resources();
+                    self.shelf_thumbnails_dirty = true;
+                    self.refresh_shelf_thumbnails(ui.ctx());
+                    self.status_message = "Synchronized baked maps to shelf".to_string();
+                }
+            });
+        } else if self.shelf_category == crate::shelf::ShelfCategory::Environments {
             // HDRI library actions
             ui.horizontal(|ui| {
                 if ui.small_button("+ Import").on_hover_text("Import HDRI image (.hdr / .png / .exr) into library").clicked() {
@@ -5657,7 +7250,8 @@ impl PaintcraftApp {
         let cat = self.shelf_category;
 
         let filtered_assets: Vec<_> = all_assets
-            .into_iter()
+            .iter()
+            .copied()
             .filter(|a| {
                 if cat != crate::shelf::ShelfCategory::All && a.category != cat {
                     return false;
@@ -5681,7 +7275,7 @@ impl PaintcraftApp {
                     return false;
                 }
                 true
-            }).cloned().collect();
+            }).collect();
 
             let mut selected_hdri_path = None;
 
@@ -5779,10 +7373,222 @@ impl PaintcraftApp {
             return;
         }
 
+        if self.shelf_category == crate::shelf::ShelfCategory::Project || self.shelf_category == crate::shelf::ShelfCategory::Textures {
+            let filtered_resources: Vec<_> = self.project.resources.iter().filter(|r| {
+                if self.shelf_category == crate::shelf::ShelfCategory::Textures && r.resource_type != crate::project::ProjectResourceType::Texture && r.resource_type != crate::project::ProjectResourceType::BakedMap {
+                    return false;
+                }
+                if !query.is_empty() && !r.name.to_lowercase().contains(&query) && !r.id.to_lowercase().contains(&query) {
+                    return false;
+                }
+                true
+            }).collect();
+
+            let mut clicked_res_id = None;
+
+            egui::ScrollArea::vertical()
+                .id_source("assets_panel_project_scroll")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    if filtered_resources.is_empty() {
+                        if self.shelf_category == crate::shelf::ShelfCategory::Textures {
+                            ui.label(egui::RichText::new("No textures found.\nClick '+ Import...' above to import textures or bake mesh maps.").italics().color(Color32::from_rgb(140, 145, 155)));
+                        } else {
+                            ui.label(egui::RichText::new("No project resources found.\nBake mesh maps or click '+ Import...' to add textures to project shelf.").italics().color(Color32::from_rgb(140, 145, 155)));
+                        }
+                    } else {
+                        let chunks: Vec<_> = filtered_resources.chunks(2).collect();
+                        for row in chunks {
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
+                                for res in row {
+                                    let card_size = egui::vec2(card_w, card_h);
+                                    let (rect, response) = ui.allocate_exact_size(card_size, egui::Sense::click());
+
+                                    let is_hovered = response.hovered();
+                                    let bg_color = if is_hovered {
+                                        egui::Color32::from_rgb(46, 50, 58)
+                                    } else {
+                                        egui::Color32::from_rgb(30, 32, 36)
+                                    };
+
+                                    let border_stroke = if is_hovered {
+                                        egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(243, 94, 24))
+                                    } else {
+                                        egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(44, 47, 54))
+                                    };
+
+                                    ui.painter().rect(rect, egui::Rounding::same(4.0), bg_color, border_stroke);
+
+                                    // Preview thumbnail
+                                    let preview_rect = egui::Rect::from_min_size(
+                                        egui::pos2(rect.min.x + 5.0, rect.min.y + 5.0),
+                                        egui::vec2(card_w - 10.0, card_w - 18.0),
+                                    );
+                                    if let Some(thumb) = self.shelf_thumbnails.get(&res.id) {
+                                        ui.painter().image(
+                                            thumb.id(),
+                                            preview_rect,
+                                            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                                            Color32::WHITE,
+                                        );
+                                    } else {
+                                        ui.painter().rect_filled(preview_rect, 2.0, egui::Color32::from_rgb(38, 41, 48));
+                                    }
+
+                                    // Badge in top right corner
+                                    let (badge_text, badge_color) = match res.resource_type {
+                                        crate::project::ProjectResourceType::BakedMap => ("BAKED", egui::Color32::from_rgb(243, 94, 24)),
+                                        crate::project::ProjectResourceType::Texture => ("TEX", egui::Color32::from_rgb(45, 140, 255)),
+                                        crate::project::ProjectResourceType::Alpha => ("ALPHA", egui::Color32::from_rgb(80, 210, 100)),
+                                        crate::project::ProjectResourceType::Hdri => ("HDRI", egui::Color32::from_rgb(60, 180, 255)),
+                                    };
+                                    ui.painter().text(
+                                        egui::pos2(rect.max.x - 3.0, rect.min.y + 2.0),
+                                        egui::Align2::RIGHT_TOP,
+                                        badge_text,
+                                        egui::FontId::proportional(7.5),
+                                        badge_color,
+                                    );
+
+                                    // Name label
+                                    let name_rect = egui::Rect::from_min_max(
+                                        egui::pos2(rect.min.x + 2.0, rect.max.y - 18.0),
+                                        egui::pos2(rect.max.x - 2.0, rect.max.y - 2.0),
+                                    );
+                                    ui.painter().text(
+                                        name_rect.center(),
+                                        egui::Align2::CENTER_CENTER,
+                                        &res.name,
+                                        egui::FontId::proportional(9.0),
+                                        egui::Color32::from_rgb(215, 220, 230),
+                                    );
+
+                                    let tooltip = format!(
+                                        "{}\nType: {}\nSize: {}x{}\nClick to assign to layer channel or slot",
+                                        res.name,
+                                        res.badge_label(),
+                                        res.width,
+                                        res.height
+                                    );
+                                    let response = response.on_hover_text(tooltip);
+
+                                    if response.clicked() || response.secondary_clicked() {
+                                        clicked_res_id = Some(res.id.clone());
+                                    }
+                                }
+                            });
+                        }
+                    }
+                });
+
+            if let Some(id) = clicked_res_id {
+                self.shelf_resource_popup = Some(id);
+            }
+            return;
+        }
+
+        let mut clicked_res_id = None;
+
         egui::ScrollArea::vertical()
             .id_source("assets_panel_scroll")
             .auto_shrink([false, false])
             .show(ui, |ui| {
+                if self.shelf_category == crate::shelf::ShelfCategory::All && !self.project.resources.is_empty() {
+                    let project_matches: Vec<_> = self.project.resources.iter().filter(|r| {
+                        if !query.is_empty() && !r.name.to_lowercase().contains(&query) && !r.id.to_lowercase().contains(&query) {
+                            return false;
+                        }
+                        true
+                    }).collect();
+
+                    if !project_matches.is_empty() {
+                        ui.label(egui::RichText::new("PROJECT RESOURCES").small().strong().color(Color32::from_rgb(243, 94, 24)));
+                        let pchunks: Vec<_> = project_matches.chunks(2).collect();
+                        for row in pchunks {
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
+                                for res in row {
+                                    let card_size = egui::vec2(card_w, card_h);
+                                    let (rect, response) = ui.allocate_exact_size(card_size, egui::Sense::click());
+
+                                    let is_hovered = response.hovered();
+                                    let bg_color = if is_hovered {
+                                        egui::Color32::from_rgb(46, 50, 58)
+                                    } else {
+                                        egui::Color32::from_rgb(30, 32, 36)
+                                    };
+
+                                    let border_stroke = if is_hovered {
+                                        egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(243, 94, 24))
+                                    } else {
+                                        egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(44, 47, 54))
+                                    };
+
+                                    ui.painter().rect(rect, egui::Rounding::same(4.0), bg_color, border_stroke);
+
+                                    let preview_rect = egui::Rect::from_min_size(
+                                        egui::pos2(rect.min.x + 5.0, rect.min.y + 5.0),
+                                        egui::vec2(card_w - 10.0, card_w - 18.0),
+                                    );
+                                    if let Some(thumb) = self.shelf_thumbnails.get(&res.id) {
+                                        ui.painter().image(
+                                            thumb.id(),
+                                            preview_rect,
+                                            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                                            Color32::WHITE,
+                                        );
+                                    } else {
+                                        ui.painter().rect_filled(preview_rect, 2.0, egui::Color32::from_rgb(38, 41, 48));
+                                    }
+
+                                    let (badge_text, badge_color) = match res.resource_type {
+                                        crate::project::ProjectResourceType::BakedMap => ("BAKED", egui::Color32::from_rgb(243, 94, 24)),
+                                        crate::project::ProjectResourceType::Texture => ("TEX", egui::Color32::from_rgb(45, 140, 255)),
+                                        crate::project::ProjectResourceType::Alpha => ("ALPHA", egui::Color32::from_rgb(80, 210, 100)),
+                                        crate::project::ProjectResourceType::Hdri => ("HDRI", egui::Color32::from_rgb(60, 180, 255)),
+                                    };
+                                    ui.painter().text(
+                                        egui::pos2(rect.max.x - 3.0, rect.min.y + 2.0),
+                                        egui::Align2::RIGHT_TOP,
+                                        badge_text,
+                                        egui::FontId::proportional(7.5),
+                                        badge_color,
+                                    );
+
+                                    let name_rect = egui::Rect::from_min_max(
+                                        egui::pos2(rect.min.x + 2.0, rect.max.y - 18.0),
+                                        egui::pos2(rect.max.x - 2.0, rect.max.y - 2.0),
+                                    );
+                                    ui.painter().text(
+                                        name_rect.center(),
+                                        egui::Align2::CENTER_CENTER,
+                                        &res.name,
+                                        egui::FontId::proportional(9.0),
+                                        egui::Color32::from_rgb(215, 220, 230),
+                                    );
+
+                                    let tooltip = format!(
+                                        "{}\nType: {}\nSize: {}x{}\nClick to assign to layer channel or slot",
+                                        res.name,
+                                        res.badge_label(),
+                                        res.width,
+                                        res.height
+                                    );
+                                    let response = response.on_hover_text(tooltip);
+
+                                    if response.clicked() || response.secondary_clicked() {
+                                        clicked_res_id = Some(res.id.clone());
+                                    }
+                                }
+                            });
+                        }
+                        ui.add_space(4.0);
+                        ui.separator();
+                        ui.add_space(2.0);
+                        ui.label(egui::RichText::new("LIBRARY PRESETS").small().strong().color(Color32::from_rgb(140, 145, 155)));
+                    }
+                }
                 let chunks: Vec<_> = filtered_assets.chunks(2).collect();
                 for row in chunks {
                     ui.horizontal(|ui| {
@@ -6078,6 +7884,10 @@ impl PaintcraftApp {
                     });
                 }
             });
+
+        if let Some(id) = clicked_res_id {
+            self.shelf_resource_popup = Some(id);
+        }
     }
 
     /// Apply an asset from the shelf to the project
@@ -6348,7 +8158,13 @@ impl PaintcraftApp {
         let bake_position = self.bake_opt_position;
         let bake_thickness = self.bake_opt_thickness;
         let bake_thickness_invert = self.bake_opt_thickness_invert;
+        let bake_id_map = self.bake_opt_id_map;
         let denoise = self.bake_denoise;
+        let match_config = crate::baker::BakeMatchConfig {
+            mode: self.bake_match_mode,
+            low_suffix: self.bake_low_suffix.clone(),
+            high_suffix: self.bake_high_suffix.clone(),
+        };
 
         let mesh = self.project.mesh.clone();
         let high_poly = self.project.high_poly_mesh.clone();
@@ -6377,6 +8193,7 @@ impl PaintcraftApp {
                 curvature: None,
                 position: None,
                 thickness: None,
+                id_map: None,
                 elapsed_secs: 0.0,
             };
 
@@ -6385,7 +8202,8 @@ impl PaintcraftApp {
                 + (bake_ao as usize)
                 + (bake_curvature as usize)
                 + (bake_position as usize)
-                + (bake_thickness as usize);
+                + (bake_thickness as usize)
+                + (bake_id_map as usize);
             let mut completed_tasks = 0;
 
             if bake_tangent_normal {
@@ -6395,7 +8213,7 @@ impl PaintcraftApp {
                     st.step_name = format!("[{}/{}] Baking Tangent Space Normal Map...", completed_tasks + 1, total_tasks);
                     st.progress = (completed_tasks as f32) / (total_tasks as f32).max(1.0);
                 }
-                result.tangent_normal = Some(crate::baker::Baker::bake_tangent_normals(&mesh, high_poly.as_ref(), frontal, rear, res, res));
+                result.tangent_normal = Some(crate::baker::Baker::bake_tangent_normals_with_match(&mesh, high_poly.as_ref(), frontal, rear, res, res, &match_config));
                 completed_tasks += 1;
             }
 
@@ -6474,6 +8292,17 @@ impl PaintcraftApp {
                     th.invert();
                 }
                 result.thickness = Some(th);
+                completed_tasks += 1;
+            }
+
+            if bake_id_map {
+                if state_clone.lock().unwrap().cancelled { return; }
+                {
+                    let mut st = state_clone.lock().unwrap();
+                    st.step_name = format!("[{}/{}] Baking ID Map (Submesh / Material IDs)...", completed_tasks + 1, total_tasks);
+                    st.progress = (completed_tasks as f32) / (total_tasks as f32).max(1.0);
+                }
+                result.id_map = Some(crate::baker::Baker::bake_id_map(&mesh, res, res));
             }
 
             result.elapsed_secs = start.elapsed().as_secs_f32();
@@ -6591,6 +8420,8 @@ impl PaintcraftApp {
                                         .on_hover_text("Invert values so thin areas are white (high transmission) and thick areas are black");
                                 });
                             }
+                            ui.checkbox(&mut self.bake_opt_id_map, "ID Map (Submesh / Material IDs)")
+                                .on_hover_text("Bakes high-contrast unique colors per submesh or UV island for color selection masks");
 
                             ui.add_space(8.0);
                             ui.separator();
@@ -6665,6 +8496,27 @@ impl PaintcraftApp {
                                 ui.label("Max Rear Distance:");
                                 ui.add(egui::Slider::new(&mut self.bake_rear, 0.001..=0.5).logarithmic(true));
                             });
+
+                            ui.add_space(6.0);
+                            ui.separator();
+                            ui.strong("Mesh Matching:");
+                            ui.horizontal(|ui| {
+                                ui.label("Match:");
+                                egui::ComboBox::from_id_source("bake_match_mode_combo")
+                                    .selected_text(self.bake_match_mode.name())
+                                    .show_ui(ui, |ui| {
+                                        ui.selectable_value(&mut self.bake_match_mode, crate::baker::BakeMatchMode::Always, "Always");
+                                        ui.selectable_value(&mut self.bake_match_mode, crate::baker::BakeMatchMode::ByMeshName, "By Mesh Name");
+                                    });
+                            });
+                            if self.bake_match_mode == crate::baker::BakeMatchMode::ByMeshName {
+                                ui.horizontal(|ui| {
+                                    ui.label("Low Suffix:");
+                                    ui.add(egui::TextEdit::singleline(&mut self.bake_low_suffix).desired_width(70.0));
+                                    ui.label("High Suffix:");
+                                    ui.add(egui::TextEdit::singleline(&mut self.bake_high_suffix).desired_width(70.0));
+                                });
+                            }
                         },
                     );
                 });
@@ -6822,6 +8674,42 @@ mod tests {
         assert!((parsed[0] - 0.2).abs() < 0.01);
         assert!((parsed[1] - 0.4).abs() < 0.01);
         assert!((parsed[2] - 0.8).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_iray_path_tracer_integration() {
+        let mut pt = crate::path_tracer::PathTracer::new(32, 32);
+        pt.max_samples = 4;
+        pt.max_bounces = 1;
+
+        let camera = crate::renderer::Camera::default();
+        let mesh = crate::mesh::Mesh::create_cube_mesh("TestCube", 1.0);
+        let textures = crate::layer::CompositeTextureSet::new(64, 64);
+        let hdri = crate::hdri::HdriEnvironment::new(crate::hdri::HdriPreset::StudioNeutral);
+
+        assert_eq!(pt.sample_count, 0);
+        assert!(!pt.is_converged());
+
+        pt.render_samples(&camera, &mesh, &textures, &hdri, 2);
+        assert_eq!(pt.sample_count, 2);
+        assert!(!pt.is_converged());
+        assert_eq!(pt.progress_pct(), 50.0);
+
+        pt.render_samples(&camera, &mesh, &textures, &hdri, 2);
+        assert_eq!(pt.sample_count, 4);
+        assert!(pt.is_converged());
+        assert_eq!(pt.progress_pct(), 100.0);
+
+        // Verify color buffer is filled with non-zero alpha
+        assert_eq!(pt.color_buffer.len(), 32 * 32 * 4);
+        for chunk in pt.color_buffer.chunks_exact(4) {
+            assert_eq!(chunk[3], 255);
+        }
+
+        // Test reset
+        pt.reset();
+        assert_eq!(pt.sample_count, 0);
+        assert!(!pt.is_converged());
     }
 }
 

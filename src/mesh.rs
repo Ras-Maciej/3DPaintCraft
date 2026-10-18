@@ -691,6 +691,62 @@ impl Mesh {
         result
     }
 
+    /// Returns the quad (both triangles) if `start_tri` is part of a coplanar quad
+    pub fn get_polygon_quad(&self, start_tri: usize) -> Vec<usize> {
+        let tri_count = self.indices.len() / 3;
+        if start_tri >= tri_count {
+            return Vec::new();
+        }
+
+        let i0 = self.indices[start_tri * 3] as usize;
+        let i1 = self.indices[start_tri * 3 + 1] as usize;
+        let i2 = self.indices[start_tri * 3 + 2] as usize;
+
+        let v0 = &self.vertices[i0];
+        let v1 = &self.vertices[i1];
+        let v2 = &self.vertices[i2];
+        let fnorm0 = (v1.position - v0.position).cross(v2.position - v0.position).normalize_or_zero();
+
+        type PosKey = ([i32; 3], [i32; 3]);
+        let quant_p = |v: &Vertex| -> [i32; 3] {
+            [(v.position.x * 1000.0).round() as i32, (v.position.y * 1000.0).round() as i32, (v.position.z * 1000.0).round() as i32]
+        };
+        let make_pos_edge = |p0: [i32; 3], p1: [i32; 3]| -> PosKey {
+            if p0 < p1 { (p0, p1) } else { (p1, p0) }
+        };
+
+        let p0 = quant_p(v0);
+        let p1 = quant_p(v1);
+        let p2 = quant_p(v2);
+        let my_edges = [make_pos_edge(p0, p1), make_pos_edge(p1, p2), make_pos_edge(p2, p0)];
+
+        for t in 0..tri_count {
+            if t == start_tri {
+                continue;
+            }
+            let ti0 = self.indices[t * 3] as usize;
+            let ti1 = self.indices[t * 3 + 1] as usize;
+            let ti2 = self.indices[t * 3 + 2] as usize;
+            let tv0 = &self.vertices[ti0];
+            let tv1 = &self.vertices[ti1];
+            let tv2 = &self.vertices[ti2];
+            let tp0 = quant_p(tv0);
+            let tp1 = quant_p(tv1);
+            let tp2 = quant_p(tv2);
+
+            let other_edges = [make_pos_edge(tp0, tp1), make_pos_edge(tp1, tp2), make_pos_edge(tp2, tp0)];
+            let shares_edge = my_edges.iter().any(|me| other_edges.contains(me));
+            if shares_edge {
+                let fnorm1 = (tv1.position - tv0.position).cross(tv2.position - tv0.position).normalize_or_zero();
+                if fnorm0.dot(fnorm1) > 0.95 {
+                    return vec![start_tri, t];
+                }
+            }
+        }
+
+        vec![start_tri]
+    }
+
     /// Half-space rasterizer for filling a triangle in 2D UV space into a buffer
     pub fn rasterize_triangle_uv<F: FnMut(u32, u32)>(
         w: u32,
@@ -756,6 +812,19 @@ impl Mesh {
                         current_submesh_start = indices.len();
                     }
                     current_mat = new_mat;
+                }
+                "o" | "g" => {
+                    let new_name = parts.get(1).unwrap_or(&"Object").to_string();
+                    if indices.len() > current_submesh_start {
+                        submeshes.push(SubMeshRange {
+                            material_name: current_mat.clone(),
+                            start_index: current_submesh_start,
+                            index_count: indices.len() - current_submesh_start,
+                            visible: true,
+                        });
+                        current_submesh_start = indices.len();
+                    }
+                    current_mat = new_name;
                 }
                 "v" => {
                     positions.push(Vec3::new(
@@ -1920,6 +1989,204 @@ impl Mesh {
         writer.flush().map_err(|e| e.to_string())?;
         Ok(())
     }
+
+    /// Save 3D model to standard binary glTF 2.0 (.glb) format
+    pub fn save_to_glb_file(&self, path: &std::path::Path) -> Result<(), String> {
+        let v_count = self.vertices.len();
+        let idx_count = self.indices.len();
+        if v_count == 0 || idx_count == 0 {
+            return Err("Cannot export empty mesh to GLB".to_string());
+        }
+
+        let inv_scale = if self.original_scale.abs() > 1e-6 { 1.0 / self.original_scale } else { 1.0 };
+
+        // 1. Pack binary buffer
+        let mut bin = Vec::new();
+
+        // 0: POSITION (Vec3 f32)
+        let pos_offset = bin.len();
+        let mut min_pos = Vec3::splat(f32::MAX);
+        let mut max_pos = Vec3::splat(f32::MIN);
+        for v in &self.vertices {
+            let p = v.position * inv_scale + self.original_center;
+            min_pos = min_pos.min(p);
+            max_pos = max_pos.max(p);
+            bin.extend_from_slice(&p.x.to_le_bytes());
+            bin.extend_from_slice(&p.y.to_le_bytes());
+            bin.extend_from_slice(&p.z.to_le_bytes());
+        }
+        let pos_len = bin.len() - pos_offset;
+
+        // 1: NORMAL (Vec3 f32)
+        let norm_offset = bin.len();
+        for v in &self.vertices {
+            bin.extend_from_slice(&v.normal.x.to_le_bytes());
+            bin.extend_from_slice(&v.normal.y.to_le_bytes());
+            bin.extend_from_slice(&v.normal.z.to_le_bytes());
+        }
+        let norm_len = bin.len() - norm_offset;
+
+        // 2: TANGENT (Vec4 f32)
+        let tan_offset = bin.len();
+        for v in &self.vertices {
+            bin.extend_from_slice(&v.tangent.x.to_le_bytes());
+            bin.extend_from_slice(&v.tangent.y.to_le_bytes());
+            bin.extend_from_slice(&v.tangent.z.to_le_bytes());
+            bin.extend_from_slice(&v.tangent.w.to_le_bytes());
+        }
+        let tan_len = bin.len() - tan_offset;
+
+        // 3: TEXCOORD_0 (Vec2 f32)
+        let uv_offset = bin.len();
+        for v in &self.vertices {
+            bin.extend_from_slice(&v.uv.x.to_le_bytes());
+            bin.extend_from_slice(&v.uv.y.to_le_bytes());
+        }
+        let uv_len = bin.len() - uv_offset;
+
+        // 4: INDICES (u32)
+        let idx_offset = bin.len();
+        for &idx in &self.indices {
+            bin.extend_from_slice(&idx.to_le_bytes());
+        }
+        let idx_len = bin.len() - idx_offset;
+
+        // Align BIN chunk to 4-byte boundary
+        while bin.len() % 4 != 0 {
+            bin.push(0);
+        }
+
+        // 2. Build glTF 2.0 JSON
+        let submeshes_to_export = if self.submeshes.is_empty() {
+            vec![SubMeshRange {
+                material_name: "DefaultMaterial".to_string(),
+                start_index: 0,
+                index_count: idx_count,
+                visible: true,
+            }]
+        } else {
+            self.submeshes.clone()
+        };
+
+        let mut primitives = Vec::new();
+        let mut materials = Vec::new();
+        let mut accessors = vec![
+            serde_json::json!({
+                "bufferView": 0,
+                "byteOffset": 0,
+                "componentType": 5126,
+                "count": v_count,
+                "type": "VEC3",
+                "min": [min_pos.x, min_pos.y, min_pos.z],
+                "max": [max_pos.x, max_pos.y, max_pos.z]
+            }),
+            serde_json::json!({
+                "bufferView": 1,
+                "byteOffset": 0,
+                "componentType": 5126,
+                "count": v_count,
+                "type": "VEC3"
+            }),
+            serde_json::json!({
+                "bufferView": 2,
+                "byteOffset": 0,
+                "componentType": 5126,
+                "count": v_count,
+                "type": "VEC4"
+            }),
+            serde_json::json!({
+                "bufferView": 3,
+                "byteOffset": 0,
+                "componentType": 5126,
+                "count": v_count,
+                "type": "VEC2"
+            }),
+        ];
+
+        for (sm_idx, sm) in submeshes_to_export.iter().enumerate() {
+            let acc_idx = accessors.len();
+            accessors.push(serde_json::json!({
+                "bufferView": 4,
+                "byteOffset": sm.start_index * 4,
+                "componentType": 5125,
+                "count": sm.index_count,
+                "type": "SCALAR"
+            }));
+
+            materials.push(serde_json::json!({
+                "name": sm.material_name,
+                "pbrMetallicRoughness": {
+                    "baseColorFactor": [1.0, 1.0, 1.0, 1.0],
+                    "metallicFactor": 1.0,
+                    "roughnessFactor": 1.0
+                }
+            }));
+
+            primitives.push(serde_json::json!({
+                "attributes": {
+                    "POSITION": 0,
+                    "NORMAL": 1,
+                    "TANGENT": 2,
+                    "TEXCOORD_0": 3
+                },
+                "indices": acc_idx,
+                "material": sm_idx,
+                "mode": 4
+            }));
+        }
+
+        let buffer_views = vec![
+            serde_json::json!({ "buffer": 0, "byteOffset": pos_offset, "byteLength": pos_len, "target": 34962 }),
+            serde_json::json!({ "buffer": 0, "byteOffset": norm_offset, "byteLength": norm_len, "target": 34962 }),
+            serde_json::json!({ "buffer": 0, "byteOffset": tan_offset, "byteLength": tan_len, "target": 34962 }),
+            serde_json::json!({ "buffer": 0, "byteOffset": uv_offset, "byteLength": uv_len, "target": 34962 }),
+            serde_json::json!({ "buffer": 0, "byteOffset": idx_offset, "byteLength": idx_len, "target": 34963 }),
+        ];
+
+        let gltf_json = serde_json::json!({
+            "asset": {
+                "version": "2.0",
+                "generator": "3D Paintcraft glTF 2.0 Exporter"
+            },
+            "scene": 0,
+            "scenes": [{ "nodes": [0] }],
+            "nodes": [{ "mesh": 0, "name": self.name }],
+            "meshes": [{
+                "name": self.name,
+                "primitives": primitives
+            }],
+            "materials": materials,
+            "accessors": accessors,
+            "bufferViews": buffer_views,
+            "buffers": [{ "byteLength": bin.len() }]
+        });
+
+        let mut json_bytes = serde_json::to_vec(&gltf_json).map_err(|e| e.to_string())?;
+        while json_bytes.len() % 4 != 0 {
+            json_bytes.push(0x20);
+        }
+
+        let total_length = 12 + 8 + json_bytes.len() + 8 + bin.len();
+        let mut glb_data = Vec::with_capacity(total_length);
+
+        // Header (12 bytes)
+        glb_data.extend_from_slice(b"glTF");
+        glb_data.extend_from_slice(&2u32.to_le_bytes());
+        glb_data.extend_from_slice(&(total_length as u32).to_le_bytes());
+
+        // Chunk 0: JSON
+        glb_data.extend_from_slice(&(json_bytes.len() as u32).to_le_bytes());
+        glb_data.extend_from_slice(&0x4E4F534Au32.to_le_bytes());
+        glb_data.extend_from_slice(&json_bytes);
+
+        // Chunk 1: BIN
+        glb_data.extend_from_slice(&(bin.len() as u32).to_le_bytes());
+        glb_data.extend_from_slice(&0x004E4942u32.to_le_bytes());
+        glb_data.extend_from_slice(&bin);
+
+        std::fs::write(path, glb_data).map_err(|e| format!("Failed to write GLB file: {}", e))?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -2041,6 +2308,40 @@ f 1/1/1 3/3/1 4/4/1
         assert!(pos.x.abs() < 0.1, "Expected center x ~ 0.0, got {}", pos.x);
         assert!(pos.y.abs() < 0.1, "Expected center y ~ 0.0, got {}", pos.y);
         assert!((norm.z - 1.0).abs() < 1e-3, "Expected normal pointing +Z, got {}", norm.z);
+    }
+
+    #[test]
+    fn test_glb_export_and_import_roundtrip() {
+        let original_mesh = Mesh::create_cube_mesh("GlbTestCube", 2.0);
+        let temp_dir = std::env::temp_dir();
+        let glb_path = temp_dir.join("paintcraft_test_cube_roundtrip.glb");
+
+        // Save to binary glTF 2.0 (.glb)
+        original_mesh.save_to_glb_file(&glb_path).expect("Failed to export GLB mesh");
+
+        // Verify file exists and has standard GLB header
+        let bytes = std::fs::read(&glb_path).expect("Failed to read back GLB file");
+        assert!(bytes.len() >= 20, "GLB file must have at least 20 bytes");
+        assert_eq!(&bytes[0..4], b"glTF", "GLB magic must be 'glTF'");
+        let version = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+        assert_eq!(version, 2, "GLB version must be 2");
+
+        // Load back with Mesh importer
+        let imported_mesh = Mesh::from_gltf_or_glb_file(&glb_path).expect("Failed to import saved GLB mesh");
+        assert_eq!(imported_mesh.vertices.len(), original_mesh.vertices.len(), "Vertex counts must match");
+        assert_eq!(imported_mesh.indices.len(), original_mesh.indices.len(), "Index counts must match");
+
+        // Clean up
+        let _ = std::fs::remove_file(glb_path);
+    }
+
+    #[test]
+    fn test_polygon_quad_detection() {
+        let cube = Mesh::create_cube_mesh("Cube", 1.0);
+        // Triangle 0 is part of face quad consisting of triangles 0 and 1
+        let quad_tris = cube.get_polygon_quad(0);
+        assert_eq!(quad_tris.len(), 2, "Quad face should return 2 coplanar triangles");
+        assert!(quad_tris.contains(&0) && quad_tris.contains(&1), "Quad face should contain triangles 0 and 1");
     }
 }
 
