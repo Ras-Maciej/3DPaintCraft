@@ -37,6 +37,41 @@ impl Default for BakeMatchConfig {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BakeCageMode {
+    None,
+    ParametricInflation,
+    ExternalCage,
+}
+
+impl BakeCageMode {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::None => "None (Ray Distances)",
+            Self::ParametricInflation => "Parametric Cage (Inflation)",
+            Self::ExternalCage => "External Cage Mesh",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BakeCageConfig {
+    pub mode: BakeCageMode,
+    pub inflation_offset: f32,
+    pub external_cage_path: Option<std::path::PathBuf>,
+}
+
+impl Default for BakeCageConfig {
+    fn default() -> Self {
+        Self {
+            mode: BakeCageMode::None,
+            inflation_offset: 0.02,
+            external_cage_path: None,
+        }
+    }
+}
+
+
 pub fn strip_mesh_suffix(name: &str, suffix: &str) -> String {
     let lower_name = name.to_lowercase();
     let lower_suffix = suffix.to_lowercase();
@@ -195,6 +230,84 @@ impl SpatialHash {
 pub struct Baker;
 
 impl Baker {
+    /// Compute cage vertices according to BakeCageConfig:
+    /// - None: returns Ok(None)
+    /// - ParametricInflation: welds split-normal seam vertices and inflates along continuous smoothed normals
+    /// - ExternalCage: loads external OBJ file from external_cage_path and verifies identical topology
+    pub fn compute_cage_vertices(mesh: &Mesh, cage_config: &BakeCageConfig) -> Result<Option<Vec<Vec3>>, String> {
+        match cage_config.mode {
+            BakeCageMode::None => Ok(None),
+            BakeCageMode::ParametricInflation => {
+                let offset = cage_config.inflation_offset;
+                if offset.abs() < 1e-7 {
+                    return Ok(None);
+                }
+
+                // 1. Group vertices by spatial position to compute continuous smoothed outward normals
+                let mut pos_normal_map: HashMap<[i64; 3], Vec3> = HashMap::new();
+                let quant_scale = 10_000.0f32;
+
+                for v in &mesh.vertices {
+                    let k = [
+                        (v.position.x * quant_scale).round() as i64,
+                        (v.position.y * quant_scale).round() as i64,
+                        (v.position.z * quant_scale).round() as i64,
+                    ];
+                    let n = if v.normal.length_squared() > 1e-4 {
+                        v.normal.normalize()
+                    } else {
+                        Vec3::Y
+                    };
+                    let entry = pos_normal_map.entry(k).or_insert(Vec3::ZERO);
+                    *entry += n;
+                }
+
+                // 2. Displace each vertex along the averaged smooth normal
+                let cage_positions = mesh.vertices.iter().map(|v| {
+                    let k = [
+                        (v.position.x * quant_scale).round() as i64,
+                        (v.position.y * quant_scale).round() as i64,
+                        (v.position.z * quant_scale).round() as i64,
+                    ];
+                    let smooth_n = pos_normal_map.get(&k)
+                        .copied()
+                        .unwrap_or(v.normal)
+                        .normalize_or_zero();
+                    let final_n = if smooth_n.length_squared() > 1e-4 {
+                        smooth_n
+                    } else if v.normal.length_squared() > 1e-4 {
+                        v.normal.normalize()
+                    } else {
+                        Vec3::Y
+                    };
+                    v.position + final_n * offset
+                }).collect();
+
+                Ok(Some(cage_positions))
+            }
+            BakeCageMode::ExternalCage => {
+                let path = cage_config.external_cage_path.as_ref().ok_or_else(|| {
+                    "External cage mode selected but no cage file path was specified.".to_string()
+                })?;
+
+                let cage_mesh = Mesh::from_obj_file(path).map_err(|e| {
+                    format!("Failed to load external cage OBJ '{:?}': {}", path, e)
+                })?;
+
+                if cage_mesh.vertices.len() != mesh.vertices.len() {
+                    return Err(format!(
+                        "External cage vertex count ({}) does not match low-poly mesh vertex count ({}). External cage OBJ must share identical topology.",
+                        cage_mesh.vertices.len(),
+                        mesh.vertices.len()
+                    ));
+                }
+
+                let cage_positions = cage_mesh.vertices.into_iter().map(|v| v.position).collect();
+                Ok(Some(cage_positions))
+            }
+        }
+    }
+
     /// Bake Curvature map (Convex edges = white, Crevices = black, Flat = 0.5 gray)
     pub fn bake_curvature(mesh: &Mesh, width: u32, height: u32) -> ScalarBuffer {
         let mut buffer = ScalarBuffer::new(width, height, 0.5);
@@ -422,8 +535,24 @@ impl Baker {
 
     /// Bake Ambient Occlusion map via Monte Carlo Hemisphere Occlusion with smoothed normal consideration
     pub fn bake_ao(mesh: &Mesh, width: u32, height: u32) -> ScalarBuffer {
+        Self::bake_ao_with_cage(mesh, width, height, &BakeCageConfig::default())
+            .unwrap_or_else(|_| ScalarBuffer::new(width, height, 1.0))
+    }
+
+    /// Bake Ambient Occlusion map with optional cage envelope support
+    pub fn bake_ao_with_cage(
+        mesh: &Mesh,
+        width: u32,
+        height: u32,
+        cage_config: &BakeCageConfig,
+    ) -> Result<ScalarBuffer, String> {
         let mut buffer = ScalarBuffer::new(width, height, 1.0);
         let tri_count = mesh.indices.len() / 3;
+        if tri_count == 0 || mesh.vertices.is_empty() {
+            return Ok(buffer);
+        }
+
+        let cage_verts = Self::compute_cage_vertices(mesh, cage_config)?;
 
         // 32 sample hemisphere directions via Fibonacci spiral
         let sample_count = 32usize;
@@ -444,8 +573,8 @@ impl Baker {
         let min_self_dist = (diag * 0.03).max(0.008);
         let ray_offset = (diag * 0.008).max(0.003);
 
-        // Rayon parallel computation of vertex AO with smoothed normals
-        let vert_ao: Vec<f32> = mesh.vertices.par_iter().map(|v| {
+        // Rayon parallel computation of vertex AO with smoothed normals and cage envelope
+        let vert_ao: Vec<f32> = mesh.vertices.par_iter().enumerate().map(|(vi, v)| {
             let normal = if v.normal.length_squared() > 1e-4 {
                 v.normal.normalize()
             } else {
@@ -457,7 +586,11 @@ impl Baker {
             let tangent = normal.cross(up).normalize();
             let bitangent = normal.cross(tangent);
 
-            let origin = v.position + normal * ray_offset;
+            let origin = if let Some(ref cv) = cage_verts {
+                cv.get(vi).copied().unwrap_or(v.position + normal * ray_offset)
+            } else {
+                v.position + normal * ray_offset
+            };
             let mut unoccluded = 0.0f32;
 
             for sample in &hemisphere_samples {
@@ -508,12 +641,13 @@ impl Baker {
         }
 
         Self::dilate_scalar(&mut buffer, &mut written_mask, 16);
-        buffer
+        Ok(buffer)
     }
 
     /// Bake Tangent Space Normal map
     pub fn bake_tangent_normals(mesh: &Mesh, high_poly: Option<&Mesh>, frontal_dist: f32, rear_dist: f32, width: u32, height: u32) -> RgbaBuffer {
-        Self::bake_tangent_normals_with_match(mesh, high_poly, frontal_dist, rear_dist, width, height, &BakeMatchConfig::default())
+        Self::bake_tangent_normals_with_cage(mesh, high_poly, frontal_dist, rear_dist, width, height, &BakeMatchConfig::default(), &BakeCageConfig::default())
+            .unwrap_or_else(|_| RgbaBuffer::new(width, height, Vec4::new(0.5, 0.5, 1.0, 1.0)))
     }
 
     /// Bake Tangent Space Normal map with customizable matching mode (_low / _high)
@@ -526,17 +660,40 @@ impl Baker {
         height: u32,
         match_config: &BakeMatchConfig,
     ) -> RgbaBuffer {
+        Self::bake_tangent_normals_with_cage(mesh, high_poly, frontal_dist, rear_dist, width, height, match_config, &BakeCageConfig::default())
+            .unwrap_or_else(|_| RgbaBuffer::new(width, height, Vec4::new(0.5, 0.5, 1.0, 1.0)))
+    }
+
+    /// Bake Tangent Space Normal map with cage envelope projection and customizable matching mode
+    pub fn bake_tangent_normals_with_cage(
+        mesh: &Mesh,
+        high_poly: Option<&Mesh>,
+        frontal_dist: f32,
+        rear_dist: f32,
+        width: u32,
+        height: u32,
+        match_config: &BakeMatchConfig,
+        cage_config: &BakeCageConfig,
+    ) -> Result<RgbaBuffer, String> {
         let mut buffer = RgbaBuffer::new(width, height, Vec4::new(0.5, 0.5, 1.0, 1.0));
         let tri_count = mesh.indices.len() / 3;
-        
+
+        let cage_vertices = Self::compute_cage_vertices(mesh, cage_config)?;
+        let has_cage = cage_vertices.is_some();
+
         let spatial_hash = high_poly.map(|hp| SpatialHash::new(hp));
 
-        // Generate position, normal, tangent and triangle index raster buffers for Low Poly
+        // Generate position, normal, tangent, cage and triangle index raster buffers for Low Poly
         let mut pos_buf = vec![None; (width * height) as usize];
         let mut norm_buf = vec![None; (width * height) as usize];
         let mut tan_buf = vec![None; (width * height) as usize];
         let mut tri_buf = vec![None; (width * height) as usize];
-        
+        let mut cage_buf = if has_cage {
+            Some(vec![None; (width * height) as usize])
+        } else {
+            None
+        };
+
         for t in 0..tri_count {
             let i0 = mesh.indices[t * 3] as usize;
             let i1 = mesh.indices[t * 3 + 1] as usize;
@@ -546,11 +703,14 @@ impl Baker {
             let v1 = &mesh.vertices[i1];
             let v2 = &mesh.vertices[i2];
 
+            let cage_pts = cage_vertices.as_ref().map(|cv| (cv[i0], cv[i1], cv[i2]));
+
             Self::rasterize_pos_norm_tan_triangle(
                 &mut pos_buf,
                 &mut norm_buf,
                 &mut tan_buf,
                 Some(&mut tri_buf),
+                cage_buf.as_deref_mut(),
                 t,
                 width,
                 height,
@@ -558,6 +718,7 @@ impl Baker {
                 v0.position, v1.position, v2.position,
                 v0.normal, v1.normal, v2.normal,
                 v0.tangent, v1.tangent, v2.tangent,
+                cage_pts,
             );
         }
 
@@ -597,10 +758,20 @@ impl Baker {
                 if let (Some(pos), Some(norm)) = (pos_buf[idx], norm_buf[idx]) {
                     if let Some(hp) = high_poly {
                         if let Some(hash) = &spatial_hash {
-                            // Cast ray outward by frontal_dist then back towards mesh up to frontal + rear
-                            let ray_orig = pos + norm * frontal_dist;
-                            let ray_dir = -norm;
-                            
+                            // When cage buffer is present, ray originates from cage envelope down to low-poly
+                            let (ray_orig, ray_dir, max_ray_dist) = if let Some(cage_pos) = cage_buf.as_ref().and_then(|cb| cb[idx]) {
+                                let to_mesh = pos - cage_pos;
+                                let dist_to_surface = to_mesh.length();
+                                if dist_to_surface > 1e-6 {
+                                    let dir = to_mesh / dist_to_surface;
+                                    (cage_pos, dir, dist_to_surface + rear_dist)
+                                } else {
+                                    (pos + norm * frontal_dist, -norm, frontal_dist + rear_dist)
+                                }
+                            } else {
+                                (pos + norm * frontal_dist, -norm, frontal_dist + rear_dist)
+                            };
+
                             let allowed = if match_config.mode == BakeMatchMode::ByMeshName {
                                 tri_buf[idx].and_then(|t| mesh.submesh_index_for_triangle(t))
                                     .and_then(|sm_idx| submesh_allowed_hp_tris.get(sm_idx))
@@ -609,7 +780,7 @@ impl Baker {
                                 None
                             };
 
-                            if let Some((_, hp_norm)) = hash.query_ray_closest_filtered(ray_orig, ray_dir, frontal_dist + rear_dist, hp, allowed) {
+                            if let Some((_, hp_norm)) = hash.query_ray_closest_filtered(ray_orig, ray_dir, max_ray_dist, hp, allowed) {
                                 if let Some(tan) = tan_buf[idx] {
                                     let n = norm.normalize_or_zero();
                                     let t = (tan.truncate() - n * n.dot(tan.truncate())).normalize_or_zero();
@@ -627,11 +798,12 @@ impl Baker {
                 }
             }
         }
-        
+
         // Edge dilation
         Self::dilate_rgba(&mut buffer, &pos_buf);
-        buffer
+        Ok(buffer)
     }
+
 
     /// Bake World Position Object (WPO) / Position map normalized to [0, 1] bounding box
     pub fn bake_position(mesh: &Mesh, width: u32, height: u32) -> RgbaBuffer {
@@ -664,6 +836,7 @@ impl Baker {
                 &mut norm_buf,
                 &mut tan_buf,
                 None,
+                None,
                 t,
                 width,
                 height,
@@ -671,6 +844,7 @@ impl Baker {
                 v0.position, v1.position, v2.position,
                 v0.normal, v1.normal, v2.normal,
                 v0.tangent, v1.tangent, v2.tangent,
+                None,
             );
         }
 
@@ -711,6 +885,7 @@ impl Baker {
                 &mut norm_buf,
                 &mut tan_buf,
                 None,
+                None,
                 t,
                 width,
                 height,
@@ -718,6 +893,7 @@ impl Baker {
                 v0.position, v1.position, v2.position,
                 v0.normal, v1.normal, v2.normal,
                 v0.tangent, v1.tangent, v2.tangent,
+                None,
             );
         }
 
@@ -850,11 +1026,24 @@ impl Baker {
 
     /// Bake Surface Thickness map for subsurface scattering and light transmission
     pub fn bake_thickness(mesh: &Mesh, width: u32, height: u32) -> ScalarBuffer {
+        Self::bake_thickness_with_cage(mesh, width, height, &BakeCageConfig::default())
+            .unwrap_or_else(|_| ScalarBuffer::new(width, height, 1.0))
+    }
+
+    /// Bake Surface Thickness map with optional cage envelope support
+    pub fn bake_thickness_with_cage(
+        mesh: &Mesh,
+        width: u32,
+        height: u32,
+        cage_config: &BakeCageConfig,
+    ) -> Result<ScalarBuffer, String> {
         let mut buffer = ScalarBuffer::new(width, height, 1.0);
         let tri_count = mesh.indices.len() / 3;
         if tri_count == 0 || mesh.vertices.is_empty() {
-            return buffer;
+            return Ok(buffer);
         }
+
+        let cage_verts = Self::compute_cage_vertices(mesh, cage_config)?;
 
         // 16 sample directions via Fibonacci spiral in inward hemisphere
         let sample_count = 16usize;
@@ -877,7 +1066,7 @@ impl Baker {
         let ray_offset = (diag * 0.005).max(0.002);
 
         // Rayon parallel computation of vertex thickness
-        let vert_thickness: Vec<f32> = mesh.vertices.par_iter().map(|v| {
+        let vert_thickness: Vec<f32> = mesh.vertices.par_iter().enumerate().map(|(vi, v)| {
             let normal = if v.normal.length_squared() > 1e-4 {
                 v.normal.normalize()
             } else {
@@ -889,8 +1078,15 @@ impl Baker {
             let tangent = normal.cross(up).normalize();
             let bitangent = normal.cross(tangent);
 
+            let offset_dist = if let Some(ref cv) = cage_verts {
+                let c_pos = cv.get(vi).copied().unwrap_or(v.position);
+                (c_pos - v.position).length().max(ray_offset)
+            } else {
+                ray_offset
+            };
+
             // Start slightly inside the surface along -normal
-            let origin = v.position - normal * ray_offset;
+            let origin = v.position - normal * offset_dist.min(ray_offset * 2.0);
             let mut accum_dist = 0.0f32;
 
             for sample in &hemisphere_samples {
@@ -938,14 +1134,16 @@ impl Baker {
         }
 
         Self::dilate_scalar(&mut buffer, &mut written_mask, 16);
-        buffer
+        Ok(buffer)
     }
+
     
     fn rasterize_pos_norm_tan_triangle(
         pos_buf: &mut [Option<Vec3>],
         norm_buf: &mut [Option<Vec3>],
         tan_buf: &mut [Option<Vec4>],
         mut tri_buf: Option<&mut [Option<usize>]>,
+        mut cage_buf: Option<&mut [Option<Vec3>]>,
         t_idx: usize,
         width: u32,
         height: u32,
@@ -961,6 +1159,7 @@ impl Baker {
         t0: Vec4,
         t1: Vec4,
         t2: Vec4,
+        cage_pts: Option<(Vec3, Vec3, Vec3)>,
     ) {
         let w = width as f32;
         let h = height as f32;
@@ -993,6 +1192,9 @@ impl Baker {
                     tan_buf[idx] = Some(t0 * w0 + t1 * w1 + t2 * w2);
                     if let Some(ref mut tb) = tri_buf {
                         tb[idx] = Some(t_idx);
+                    }
+                    if let (Some(ref mut cb), Some((c0, c1, c2))) = (&mut cage_buf, cage_pts) {
+                        cb[idx] = Some(c0 * w0 + c1 * w1 + c2 * w2);
                     }
                 }
             }
@@ -1442,4 +1644,137 @@ mod tests {
             assert!(!px.x.is_nan() && !px.y.is_nan() && !px.z.is_nan());
         }
     }
+
+    #[test]
+    fn test_baker_parametric_cage_inflation() {
+        let cube = Mesh::create_cube_mesh("Cube", 1.0);
+        let orig_vert_count = cube.vertices.len();
+
+        // 1. None mode
+        let none_config = BakeCageConfig {
+            mode: BakeCageMode::None,
+            inflation_offset: 0.05,
+            external_cage_path: None,
+        };
+        let none_res = Baker::compute_cage_vertices(&cube, &none_config).unwrap();
+        assert!(none_res.is_none(), "None mode must return None");
+
+        // 2. Parametric inflation mode
+        let inflation_offset = 0.05;
+        let cage_config = BakeCageConfig {
+            mode: BakeCageMode::ParametricInflation,
+            inflation_offset,
+            external_cage_path: None,
+        };
+        let cage_verts = Baker::compute_cage_vertices(&cube, &cage_config).unwrap().expect("Parametric mode must produce cage vertices");
+        assert_eq!(cage_verts.len(), orig_vert_count);
+
+        // Verify that vertices have been pushed outward
+        for (i, &cv) in cage_verts.iter().enumerate() {
+            let orig_pos = cube.vertices[i].position;
+            assert!(cv.length() > orig_pos.length(), "Inflated vertex must be further from center than original");
+        }
+
+        // Verify that co-located corner vertices weld to the exact same continuous cage coordinate
+        for i in 0..orig_vert_count {
+            for j in (i + 1)..orig_vert_count {
+                if (cube.vertices[i].position - cube.vertices[j].position).length() < 1e-4 {
+                    let diff = (cage_verts[i] - cage_verts[j]).length();
+                    assert!(diff < 1e-4, "Seam corner vertices must weld smoothly without gaps or cracks in the cage envelope");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_baker_external_cage_loading_and_validation() {
+        let cube_raw = Mesh::create_cube_mesh("Cube", 1.0);
+
+        // Create temporary directory for OBJ files
+        let tmp_dir = std::env::temp_dir();
+        let valid_cage_path = tmp_dir.join("test_valid_cage.obj");
+        let invalid_cage_path = tmp_dir.join("test_invalid_cage.obj");
+
+        // Save a valid cage with matching topology and load low-poly mesh from OBJ
+        cube_raw.save_to_obj_file(&valid_cage_path).expect("Failed to save test cage OBJ");
+        let cube = Mesh::from_obj_file(&valid_cage_path).expect("Failed to load cube OBJ");
+
+        // Save a mismatching sphere OBJ
+        let sphere = Mesh::create_sphere(1.0, 8, 8);
+        sphere.save_to_obj_file(&invalid_cage_path).expect("Failed to save mismatch test cage OBJ");
+
+        // Test valid cage
+        let valid_config = BakeCageConfig {
+            mode: BakeCageMode::ExternalCage,
+            inflation_offset: 0.0,
+            external_cage_path: Some(valid_cage_path.clone()),
+        };
+        let valid_res = Baker::compute_cage_vertices(&cube, &valid_config);
+        assert!(valid_res.is_ok(), "Valid matching cage OBJ must succeed");
+        let valid_verts = valid_res.unwrap().unwrap();
+        assert_eq!(valid_verts.len(), cube.vertices.len());
+
+        // Test invalid mismatching cage topology
+        let invalid_config = BakeCageConfig {
+            mode: BakeCageMode::ExternalCage,
+            inflation_offset: 0.0,
+            external_cage_path: Some(invalid_cage_path.clone()),
+        };
+        let invalid_res = Baker::compute_cage_vertices(&cube, &invalid_config);
+        assert!(invalid_res.is_err(), "Mismatching cage topology must return an error");
+        let err_msg = invalid_res.unwrap_err();
+        assert!(err_msg.contains("does not match low-poly mesh vertex count"), "Error message must report topology mismatch: {}", err_msg);
+
+        // Test missing file path
+        let missing_path_config = BakeCageConfig {
+            mode: BakeCageMode::ExternalCage,
+            inflation_offset: 0.0,
+            external_cage_path: None,
+        };
+        let missing_res = Baker::compute_cage_vertices(&cube, &missing_path_config);
+        assert!(missing_res.is_err(), "Missing file path must error");
+
+        // Cleanup
+        let _ = std::fs::remove_file(valid_cage_path);
+        let _ = std::fs::remove_file(invalid_cage_path);
+    }
+
+    #[test]
+    fn test_baker_tangent_normals_and_maps_with_cage() {
+        let cube_low = Mesh::create_cube_mesh("Cube_low", 1.0);
+        let cube_high = Mesh::create_cube_mesh("Cube_high", 1.0);
+
+        let cage_config = BakeCageConfig {
+            mode: BakeCageMode::ParametricInflation,
+            inflation_offset: 0.03,
+            external_cage_path: None,
+        };
+
+        let normal_map = Baker::bake_tangent_normals_with_cage(
+            &cube_low,
+            Some(&cube_high),
+            0.1,
+            0.1,
+            16,
+            16,
+            &BakeMatchConfig::default(),
+            &cage_config,
+        ).expect("Tangent normal bake with cage must succeed");
+
+        assert_eq!(normal_map.width, 16);
+        assert_eq!(normal_map.height, 16);
+        for &px in &normal_map.data {
+            assert!(!px.x.is_nan() && !px.y.is_nan() && !px.z.is_nan());
+            assert_eq!(px.w, 1.0);
+        }
+
+        let ao_map = Baker::bake_ao_with_cage(&cube_low, 16, 16, &cage_config).expect("AO bake with cage must succeed");
+        assert_eq!(ao_map.width, 16);
+        assert_eq!(ao_map.height, 16);
+
+        let thick_map = Baker::bake_thickness_with_cage(&cube_low, 16, 16, &cage_config).expect("Thickness bake with cage must succeed");
+        assert_eq!(thick_map.width, 16);
+        assert_eq!(thick_map.height, 16);
+    }
 }
+

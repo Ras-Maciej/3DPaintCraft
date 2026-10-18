@@ -222,6 +222,9 @@ pub struct PaintcraftApp {
     pub bake_match_mode: crate::baker::BakeMatchMode,
     pub bake_low_suffix: String,
     pub bake_high_suffix: String,
+    pub bake_cage_mode: crate::baker::BakeCageMode,
+    pub bake_cage_inflation: f32,
+    pub bake_cage_path: String,
     pub bg_blur: f32,
     pub bg_opacity: f32,
     pub layer_stack_channel: crate::channel::ChannelType,
@@ -517,6 +520,9 @@ impl PaintcraftApp {
             bake_match_mode: crate::baker::BakeMatchMode::Always,
             bake_low_suffix: "_low".to_string(),
             bake_high_suffix: "_high".to_string(),
+            bake_cage_mode: crate::baker::BakeCageMode::None,
+            bake_cage_inflation: 0.02,
+            bake_cage_path: String::new(),
             bg_blur: 0.0,
             bg_opacity: 1.0,
             layer_stack_channel: crate::channel::ChannelType::BaseColor,
@@ -8649,6 +8655,15 @@ impl PaintcraftApp {
             low_suffix: self.bake_low_suffix.clone(),
             high_suffix: self.bake_high_suffix.clone(),
         };
+        let cage_config = crate::baker::BakeCageConfig {
+            mode: self.bake_cage_mode,
+            inflation_offset: self.bake_cage_inflation,
+            external_cage_path: if self.bake_cage_mode == crate::baker::BakeCageMode::ExternalCage && !self.bake_cage_path.trim().is_empty() {
+                Some(std::path::PathBuf::from(&self.bake_cage_path))
+            } else {
+                None
+            },
+        };
 
         let mesh = self.project.mesh.clone();
         let high_poly = self.project.high_poly_mesh.clone();
@@ -8697,7 +8712,30 @@ impl PaintcraftApp {
                     st.step_name = format!("[{}/{}] Baking Tangent Space Normal Map...", completed_tasks + 1, total_tasks);
                     st.progress = (completed_tasks as f32) / (total_tasks as f32).max(1.0);
                 }
-                result.tangent_normal = Some(crate::baker::Baker::bake_tangent_normals_with_match(&mesh, high_poly.as_ref(), frontal, rear, res, res, &match_config));
+                result.tangent_normal = match crate::baker::Baker::bake_tangent_normals_with_cage(
+                    &mesh,
+                    high_poly.as_ref(),
+                    frontal,
+                    rear,
+                    res,
+                    res,
+                    &match_config,
+                    &cage_config,
+                ) {
+                    Ok(buf) => Some(buf),
+                    Err(e) => {
+                        eprintln!("Cage bake warning: {}", e);
+                        Some(crate::baker::Baker::bake_tangent_normals_with_match(
+                            &mesh,
+                            high_poly.as_ref(),
+                            frontal,
+                            rear,
+                            res,
+                            res,
+                            &match_config,
+                        ))
+                    }
+                };
                 completed_tasks += 1;
             }
 
@@ -8719,7 +8757,8 @@ impl PaintcraftApp {
                     st.step_name = format!("[{}/{}] Baking Ambient Occlusion (Raycasting)...", completed_tasks + 1, total_tasks);
                     st.progress = (completed_tasks as f32) / (total_tasks as f32).max(1.0);
                 }
-                let mut ao = crate::baker::Baker::bake_ao(&mesh, res, res);
+                let mut ao = crate::baker::Baker::bake_ao_with_cage(&mesh, res, res, &cage_config)
+                    .unwrap_or_else(|_| crate::baker::Baker::bake_ao(&mesh, res, res));
                 if denoise {
                     {
                         let mut st = state_clone.lock().unwrap();
@@ -8768,7 +8807,8 @@ impl PaintcraftApp {
                     st.step_name = format!("[{}/{}] Baking Thickness Map...", completed_tasks + 1, total_tasks);
                     st.progress = (completed_tasks as f32) / (total_tasks as f32).max(1.0);
                 }
-                let mut th = crate::baker::Baker::bake_thickness(&mesh, res, res);
+                let mut th = crate::baker::Baker::bake_thickness_with_cage(&mesh, res, res, &cage_config)
+                    .unwrap_or_else(|_| crate::baker::Baker::bake_thickness(&mesh, res, res));
                 if denoise {
                     crate::baker::Baker::denoise_scalar_buffer(&mut th, result.world_space_normal.as_ref(), 1, 2, 1.2, 24.0);
                 }
@@ -8778,6 +8818,7 @@ impl PaintcraftApp {
                 result.thickness = Some(th);
                 completed_tasks += 1;
             }
+
 
             if bake_id_map {
                 if state_clone.lock().unwrap().cancelled { return; }
@@ -8980,6 +9021,47 @@ impl PaintcraftApp {
                                 ui.label("Max Rear Distance:");
                                 ui.add(egui::Slider::new(&mut self.bake_rear, 0.001..=0.5).logarithmic(true));
                             });
+
+                            ui.add_space(6.0);
+                            ui.separator();
+                            ui.strong("Cage Envelope & Ray Origin:");
+                            ui.horizontal(|ui| {
+                                ui.label("Mode:");
+                                egui::ComboBox::from_id_source("bake_cage_mode_combo")
+                                    .selected_text(self.bake_cage_mode.name())
+                                    .show_ui(ui, |ui| {
+                                        ui.selectable_value(&mut self.bake_cage_mode, crate::baker::BakeCageMode::None, "None (Ray Distances)");
+                                        ui.selectable_value(&mut self.bake_cage_mode, crate::baker::BakeCageMode::ParametricInflation, "Parametric Cage (Inflation)");
+                                        ui.selectable_value(&mut self.bake_cage_mode, crate::baker::BakeCageMode::ExternalCage, "External Cage Mesh (.obj)");
+                                    });
+                            });
+
+                            match self.bake_cage_mode {
+                                crate::baker::BakeCageMode::None => {
+                                    ui.label(egui::RichText::new("Casting rays along vertex normals using frontal and rear distances.").small().color(Color32::from_rgb(150, 155, 165)));
+                                }
+                                crate::baker::BakeCageMode::ParametricInflation => {
+                                    ui.horizontal(|ui| {
+                                        ui.label("Cage Inflation Offset:");
+                                        ui.add(egui::Slider::new(&mut self.bake_cage_inflation, 0.001..=0.5).logarithmic(true));
+                                    });
+                                    ui.label(egui::RichText::new("Generates a seamless averaged normal envelope to eliminate ray-crossing on bevels and corners.").small().color(Color32::from_rgb(150, 155, 165)));
+                                }
+                                crate::baker::BakeCageMode::ExternalCage => {
+                                    ui.horizontal(|ui| {
+                                        ui.text_edit_singleline(&mut self.bake_cage_path);
+                                        if ui.button("Browse...").clicked() {
+                                            if let Some(path) = rfd::FileDialog::new().add_filter("OBJ Mesh (*.obj)", &["obj"]).pick_file() {
+                                                self.bake_cage_path = path.to_string_lossy().to_string();
+                                            }
+                                        }
+                                        if !self.bake_cage_path.is_empty() && ui.button("Clear").clicked() {
+                                            self.bake_cage_path.clear();
+                                        }
+                                    });
+                                    ui.label(egui::RichText::new("Cage OBJ must have matching topology (identical vertex count and faces) as the low-poly mesh.").small().color(Color32::from_rgb(150, 155, 165)));
+                                }
+                            }
 
                             ui.add_space(6.0);
                             ui.separator();
@@ -9231,6 +9313,23 @@ mod tests {
 
         // Clean up
         let _ = asset_mgr.delete_material("my_custom_obsidian");
+    }
+
+    #[test]
+    fn test_app_baker_cage_settings_and_config() {
+        let cfg = crate::baker::BakeCageConfig::default();
+        assert_eq!(cfg.mode, crate::baker::BakeCageMode::None);
+        assert!((cfg.inflation_offset - 0.02).abs() < 1e-5);
+        assert!(cfg.external_cage_path.is_none());
+
+        let parametric_cfg = crate::baker::BakeCageConfig {
+            mode: crate::baker::BakeCageMode::ParametricInflation,
+            inflation_offset: 0.04,
+            external_cage_path: None,
+        };
+        assert_eq!(parametric_cfg.mode.name(), "Parametric Cage (Inflation)");
+        assert_eq!(crate::baker::BakeCageMode::ExternalCage.name(), "External Cage Mesh");
+        assert_eq!(crate::baker::BakeCageMode::None.name(), "None (Ray Distances)");
     }
 }
 
