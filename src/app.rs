@@ -968,6 +968,12 @@ impl eframe::App for PaintcraftApp {
         if input.modifiers.command && input.key_pressed(egui::Key::D) {
             let act_idx = self.project.active_layer_idx;
             if let Some(new_idx) = self.project.duplicate_layer(act_idx) {
+                let layer_clone = Box::new(self.project.layers[new_idx].clone());
+                self.history.push("Duplicate Layer", HistoryAction::AddLayer {
+                    layer_idx: new_idx,
+                    layer: layer_clone,
+                    prev_active: act_idx,
+                });
                 self.status_message = format!("Duplicated layer #{} [Ctrl+D]", new_idx);
             }
         }
@@ -1825,16 +1831,14 @@ impl eframe::App for PaintcraftApp {
                                 egui::Button::new("+ Paint")
                             };
                             if ui.add(btn_paint).on_hover_text("Add Paint Layer").clicked() {
-                                let prev_layers = self.project.layers.clone();
                                 let prev_active = self.project.active_layer_idx;
                                 let new_idx = self.project.add_paint_layer(None);
                                 self.brush_engine.settings.target = PaintTarget::Material;
-                                self.history.push("Add Paint Layer", HistoryAction::LayerStackChange {
-                                    prev_layers,
-                                    next_layers: self.project.layers.clone(),
+                                let layer_clone = Box::new(self.project.layers[new_idx].clone());
+                                self.history.push("Add Paint Layer", HistoryAction::AddLayer {
+                                    layer_idx: new_idx,
+                                    layer: layer_clone,
                                     prev_active,
-                                    next_active: new_idx,
-                                    description: "Add Paint Layer".to_string(),
                                 });
                                 self.status_message = "Added Paint Layer.".to_string();
                             }
@@ -1845,7 +1849,6 @@ impl eframe::App for PaintcraftApp {
                                 egui::Button::new("+ Fill")
                             };
                             if ui.add(btn_fill).on_hover_text("Add Fill Layer").clicked() {
-                                let prev_layers = self.project.layers.clone();
                                 let prev_active = self.project.active_layer_idx;
                                 let new_idx = self.project.add_fill_layer(
                                     None,
@@ -1854,12 +1857,11 @@ impl eframe::App for PaintcraftApp {
                                     self.brush_engine.settings.paint_metallic,
                                 );
                                 self.brush_engine.settings.target = PaintTarget::Material;
-                                self.history.push("Add Fill Layer", HistoryAction::LayerStackChange {
-                                    prev_layers,
-                                    next_layers: self.project.layers.clone(),
+                                let layer_clone = Box::new(self.project.layers[new_idx].clone());
+                                self.history.push("Add Fill Layer", HistoryAction::AddLayer {
+                                    layer_idx: new_idx,
+                                    layer: layer_clone,
                                     prev_active,
-                                    next_active: new_idx,
-                                    description: "Add Fill Layer".to_string(),
                                 });
                                 self.status_message = "Added Fill Layer.".to_string();
                             }
@@ -1870,15 +1872,13 @@ impl eframe::App for PaintcraftApp {
                                 egui::Button::new("+ Folder")
                             };
                             if ui.add(btn_folder).on_hover_text("Add Layer Folder / Group").clicked() {
-                                let prev_layers = self.project.layers.clone();
                                 let prev_active = self.project.active_layer_idx;
                                 let new_idx = self.project.add_folder_layer(None);
-                                self.history.push("Add Folder", HistoryAction::LayerStackChange {
-                                    prev_layers,
-                                    next_layers: self.project.layers.clone(),
+                                let layer_clone = Box::new(self.project.layers[new_idx].clone());
+                                self.history.push("Add Folder", HistoryAction::AddLayer {
+                                    layer_idx: new_idx,
+                                    layer: layer_clone,
                                     prev_active,
-                                    next_active: new_idx,
-                                    description: "Add Folder".to_string(),
                                 });
                                 self.status_message = "Added Layer Folder.".to_string();
                             }
@@ -1889,6 +1889,12 @@ impl eframe::App for PaintcraftApp {
 
                             if ui.button("Duplicate").on_hover_text("Duplicate selected layer").clicked() {
                                 if let Some(new_idx) = self.project.duplicate_layer(act_idx) {
+                                    let layer_clone = Box::new(self.project.layers[new_idx].clone());
+                                    self.history.push("Duplicate Layer", HistoryAction::AddLayer {
+                                        layer_idx: new_idx,
+                                        layer: layer_clone,
+                                        prev_active: act_idx,
+                                    });
                                     self.status_message = format!("Duplicated layer #{}", new_idx);
                                 }
                             }
@@ -1957,16 +1963,15 @@ impl eframe::App for PaintcraftApp {
                                 self.project.rebuild_composite();
                             }
                             if ui.button("Del").on_hover_text("Delete selected layer").clicked() {
-                                let prev_layers = self.project.layers.clone();
                                 let prev_active = self.project.active_layer_idx;
-                                self.project.delete_layer(act_idx);
-                                self.history.push("Delete Layer", HistoryAction::LayerStackChange {
-                                    prev_layers,
-                                    next_layers: self.project.layers.clone(),
-                                    prev_active,
-                                    next_active: self.project.active_layer_idx,
-                                    description: "Delete Layer".to_string(),
-                                });
+                                if let Some(removed_layer) = self.project.delete_layer(act_idx) {
+                                    self.history.push("Delete Layer", HistoryAction::DeleteLayer {
+                                        layer_idx: act_idx,
+                                        layer: Box::new(removed_layer),
+                                        prev_active,
+                                    });
+                                    self.status_message = format!("Deleted layer #{}", act_idx + 1);
+                                }
                             }
                         });
     
@@ -2343,6 +2348,7 @@ impl eframe::App for PaintcraftApp {
 
                     if has_layer {
                         let mut prop_changed = false;
+                        let mut mask_changed = false;
                         ui.heading(&prop_title);
                         ui.add_space(2.0);
 
@@ -2371,6 +2377,7 @@ impl eframe::App for PaintcraftApp {
                                 ui.add_space(4.0);
 
                                 if is_mask_editing {
+                                    let mut prop_changed = false;
                                     // --- PROPERTIES: MASK (Substance 3D Painter Non-Destructive Effect Stack) ---
                                     ui.group(|ui| {
                                         ui.strong("Mask Effect Stack (Non-Destructive):");
@@ -2671,6 +2678,9 @@ impl eframe::App for PaintcraftApp {
                                         ui.add(egui::Slider::new(&mut self.brush_engine.settings.opacity, 0.0..=1.0).text("Opacity"));
                                         ui.add(egui::Slider::new(&mut self.brush_engine.settings.flow, 0.0..=1.0).text("Flow"));
                                     });
+                                    if prop_changed {
+                                        mask_changed = true;
+                                    }
                                 } else if layer.layer_type == LayerType::Fill {
                                     // --- PROPERTIES: FILL (PBR Material Maps Manipulation 1:1) ---
     
@@ -3156,17 +3166,17 @@ impl eframe::App for PaintcraftApp {
                                 }
                             });
     
-                        if prop_changed {
+                        if prop_changed || mask_changed {
                             let proj = &mut self.project;
                             let curv = proj.curvature_map.as_ref();
                             let pos = proj.position_map.as_ref();
                             let wn = proj.world_space_normal_map.as_ref();
                             let ao = proj.ao_map.as_ref();
                             let layer = &mut proj.layers[act_idx];
-                            if layer.layer_type == LayerType::Fill {
+                            if prop_changed && layer.layer_type == LayerType::Fill {
                                 layer.evaluate_fill_advanced(curv, pos, wn, ao);
                             }
-                            if layer.has_mask {
+                            if mask_changed && layer.has_mask {
                                 layer.evaluate_mask_advanced(curv, ao, pos, wn);
                             }
                             self.project.rebuild_composite();

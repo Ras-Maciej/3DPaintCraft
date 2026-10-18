@@ -291,7 +291,7 @@ impl Project {
         let id = self.next_layer_id;
         self.next_layer_id += 1;
         let layer_name = name.unwrap_or_else(|| format!("Fill Layer {}", id));
-        let mut layer = Layer::new_fill_layer(
+        let layer = Layer::new_fill_layer(
             id,
             layer_name,
             self.texture_width,
@@ -300,7 +300,6 @@ impl Project {
             roughness,
             metallic,
         );
-        layer.evaluate_fill(self.curvature_map.as_ref());
         self.layers.push(layer);
         self.active_layer_idx = self.layers.len() - 1;
         self.rebuild_composite();
@@ -335,13 +334,16 @@ impl Project {
         self.rebuild_composite();
     }
 
-    pub fn delete_layer(&mut self, idx: usize) {
+    pub fn delete_layer(&mut self, idx: usize) -> Option<Layer> {
         if idx < self.layers.len() && self.layers.len() > 1 {
-            self.layers.remove(idx);
+            let removed = self.layers.remove(idx);
             if self.active_layer_idx >= self.layers.len() {
                 self.active_layer_idx = self.layers.len().saturating_sub(1);
             }
             self.rebuild_composite();
+            Some(removed)
+        } else {
+            None
         }
     }
 

@@ -26,6 +26,16 @@ pub enum HistoryAction {
         next_layer: Box<Layer>,
         description: String,
     },
+    AddLayer {
+        layer_idx: usize,
+        layer: Box<Layer>,
+        prev_active: usize,
+    },
+    DeleteLayer {
+        layer_idx: usize,
+        layer: Box<Layer>,
+        prev_active: usize,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -122,6 +132,24 @@ impl HistoryManager {
                     project.rebuild_composite();
                 }
             }
+            HistoryAction::AddLayer { layer_idx, prev_active, .. } => {
+                if *layer_idx < project.layers.len() {
+                    project.layers.remove(*layer_idx);
+                }
+                project.active_layer_idx = (*prev_active).min(project.layers.len().saturating_sub(1));
+                project.rebuild_composite();
+            }
+            HistoryAction::DeleteLayer { layer_idx, layer, .. } => {
+                let mut target_layer = (**layer).clone();
+                target_layer.mark_dirty_full();
+                if *layer_idx <= project.layers.len() {
+                    project.layers.insert(*layer_idx, target_layer);
+                } else {
+                    project.layers.push(target_layer);
+                }
+                project.active_layer_idx = *layer_idx;
+                project.rebuild_composite();
+            }
         }
 
         self.redo_stack.push(entry);
@@ -155,9 +183,92 @@ impl HistoryManager {
                     project.rebuild_composite();
                 }
             }
+            HistoryAction::AddLayer { layer_idx, layer, .. } => {
+                let mut target_layer = (**layer).clone();
+                target_layer.mark_dirty_full();
+                if *layer_idx <= project.layers.len() {
+                    project.layers.insert(*layer_idx, target_layer);
+                } else {
+                    project.layers.push(target_layer);
+                }
+                project.active_layer_idx = *layer_idx;
+                project.rebuild_composite();
+            }
+            HistoryAction::DeleteLayer { layer_idx, prev_active, .. } => {
+                if *layer_idx < project.layers.len() {
+                    project.layers.remove(*layer_idx);
+                }
+                project.active_layer_idx = (*prev_active).min(project.layers.len().saturating_sub(1));
+                project.rebuild_composite();
+            }
         }
 
         self.undo_stack.push(entry);
         Some(desc)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_history_add_and_delete_layer_undo_redo() {
+        let mut project = Project::new_default(64, 64);
+        let mut history = HistoryManager::new();
+
+        assert_eq!(project.layers.len(), 1);
+
+        // 1. Add Fill Layer
+        let prev_active = project.active_layer_idx;
+        let new_idx = project.add_fill_layer(
+            Some("Test Fill".to_string()),
+            glam::Vec4::new(1.0, 0.0, 0.0, 1.0),
+            0.2,
+            0.8,
+        );
+        let layer_clone = Box::new(project.layers[new_idx].clone());
+        history.push("Add Fill Layer", HistoryAction::AddLayer {
+            layer_idx: new_idx,
+            layer: layer_clone,
+            prev_active,
+        });
+
+        assert_eq!(project.layers.len(), 2);
+        assert_eq!(project.active_layer_idx, 1);
+
+        // Undo adding layer
+        let undone = history.undo(&mut project);
+        assert!(undone.is_some());
+        assert_eq!(project.layers.len(), 1);
+        assert_eq!(project.active_layer_idx, 0);
+
+        // Redo adding layer
+        let redone = history.redo(&mut project);
+        assert!(redone.is_some());
+        assert_eq!(project.layers.len(), 2);
+        assert_eq!(project.active_layer_idx, 1);
+
+        // 2. Delete Layer
+        let prev_active = project.active_layer_idx;
+        let removed = project.delete_layer(1).expect("Layer should be deleted");
+        history.push("Delete Layer", HistoryAction::DeleteLayer {
+            layer_idx: 1,
+            layer: Box::new(removed),
+            prev_active,
+        });
+
+        assert_eq!(project.layers.len(), 1);
+
+        // Undo deleting layer
+        let undone_del = history.undo(&mut project);
+        assert!(undone_del.is_some());
+        assert_eq!(project.layers.len(), 2);
+        assert_eq!(project.active_layer_idx, 1);
+
+        // Redo deleting layer
+        let redone_del = history.redo(&mut project);
+        assert!(redone_del.is_some());
+        assert_eq!(project.layers.len(), 1);
     }
 }

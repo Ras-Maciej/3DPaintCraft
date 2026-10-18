@@ -1374,346 +1374,467 @@ impl Layer {
             return;
         }
 
+        // Fast path for solid color fill layers: bypass per-pixel noise math and Sobel filters
+        if self.fill_generator == ProceduralGenerator::None
+            && !self.triplanar
+            && self.fill_color_tex.is_none()
+            && self.fill_roughness_tex.is_none()
+            && self.fill_metallic_tex.is_none()
+            && self.fill_emissive_tex.is_none()
+            && self.fill_opacity_tex.is_none()
+            && self.fill_normal_tex.is_none()
+        {
+            self.base_color_buf.data.fill(self.fill_color);
+            self.roughness_buf.data.fill(self.fill_roughness);
+            self.metallic_buf.data.fill(self.fill_metallic);
+            self.height_buf.data.fill(self.fill_height);
+            self.emissive_buf.data.fill(self.fill_emissive);
+            self.opacity_buf.data.fill(self.fill_opacity);
+            self.clearcoat_buf.data.fill(self.fill_clearcoat);
+            self.anisotropy_buf.data.fill(self.fill_anisotropy);
+            self.anisotropy_angle_buf.data.fill(self.fill_anisotropy_angle);
+            self.normal_buf.data.fill(glam::Vec4::new(0.5, 0.5, 1.0, 1.0));
+            self.mark_dirty_full();
+            return;
+        }
+
+        self.clearcoat_buf.data.fill(self.fill_clearcoat);
+        self.anisotropy_buf.data.fill(self.fill_anisotropy);
+        self.anisotropy_angle_buf.data.fill(self.fill_anisotropy_angle);
+
         let w = self.base_color_buf.width;
         let h = self.base_color_buf.height;
         let uv_scale = self.uv_scale.max(0.001);
 
         let rad = self.uv_rotation.to_radians();
         let (sin_r, cos_r) = rad.sin_cos();
+        let uv_offset = self.uv_offset;
+        let triplanar = self.triplanar;
+        let fill_generator = self.fill_generator;
+        let generator_scale = self.generator_scale;
+        let generator_contrast = self.generator_contrast;
+        let generator_invert = self.generator_invert;
+        let fill_color = self.fill_color;
+        let fill_roughness = self.fill_roughness;
+        let fill_metallic = self.fill_metallic;
+        let fill_height = self.fill_height;
+        let fill_emissive = self.fill_emissive;
+        let fill_opacity = self.fill_opacity;
 
-        for y in 0..h {
-            for x in 0..w {
-                // UV coordinates with scale, offset, and centered rotation
-                let u_base = (x as f32 / w as f32) + self.uv_offset.x;
-                let v_base = (y as f32 / h as f32) + self.uv_offset.y;
+        let fill_color_tex = self.fill_color_tex.as_ref();
+        let fill_roughness_tex = self.fill_roughness_tex.as_ref();
+        let fill_metallic_tex = self.fill_metallic_tex.as_ref();
+        let fill_emissive_tex = self.fill_emissive_tex.as_ref();
+        let fill_opacity_tex = self.fill_opacity_tex.as_ref();
 
-                let cu = u_base - 0.5;
-                let cv = v_base - 0.5;
-                let ru = (cu * cos_r - cv * sin_r + 0.5) * uv_scale;
-                let rv = (cu * sin_r + cv * cos_r + 0.5) * uv_scale;
-                let uv_mesh = glam::Vec2::new((x as f32 + 0.5) / w as f32, (y as f32 + 0.5) / h as f32);
+        self.base_color_buf.data
+            .par_chunks_exact_mut(w as usize)
+            .zip(self.roughness_buf.data.par_chunks_exact_mut(w as usize))
+            .zip(self.metallic_buf.data.par_chunks_exact_mut(w as usize))
+            .zip(self.height_buf.data.par_chunks_exact_mut(w as usize))
+            .zip(self.emissive_buf.data.par_chunks_exact_mut(w as usize))
+            .zip(self.opacity_buf.data.par_chunks_exact_mut(w as usize))
+            .enumerate()
+            .for_each(|(y, (((((base_row, rough_row), metal_row), height_row), emissive_row), opacity_row))| {
+                let y = y as u32;
+                for x in 0..w {
+                    // UV coordinates with scale, offset, and centered rotation
+                    let u_base = (x as f32 / w as f32) + uv_offset.x;
+                    let v_base = (y as f32 / h as f32) + uv_offset.y;
 
-                let (noise_factor, bump_factor) = if self.triplanar && position_map.is_some() {
-                    let pos_sample = position_map.unwrap().sample_bilinear(uv_mesh);
-                    let norm_sample = normal_map.map(|nm| nm.sample_bilinear(uv_mesh)).unwrap_or(glam::Vec4::new(0.5, 0.5, 1.0, 1.0));
-                    let p3 = glam::Vec3::new(pos_sample.x, pos_sample.y, pos_sample.z) * self.generator_scale * 4.0;
-                    let n = (norm_sample.truncate() * 2.0 - glam::Vec3::ONE).normalize_or_zero();
-                    let mut weights = glam::Vec3::new(n.x.abs().powi(4), n.y.abs().powi(4), n.z.abs().powi(4));
-                    let sum = weights.x + weights.y + weights.z;
-                    if sum > 1e-4 { weights /= sum; } else { weights = glam::Vec3::new(0.33, 0.34, 0.33); }
+                    let cu = u_base - 0.5;
+                    let cv = v_base - 0.5;
+                    let ru = (cu * cos_r - cv * sin_r + 0.5) * uv_scale;
+                    let rv = (cu * sin_r + cv * cos_r + 0.5) * uv_scale;
+                    let uv_mesh = glam::Vec2::new((x as f32 + 0.5) / w as f32, (y as f32 + 0.5) / h as f32);
 
-                    let nx = NoiseGenerator::fbm_2d(p3.y, p3.z, 4, 2.0, 0.5);
-                    let ny = NoiseGenerator::fbm_2d(p3.x, p3.z, 4, 2.0, 0.5);
-                    let nz = NoiseGenerator::fbm_2d(p3.x, p3.y, 4, 2.0, 0.5);
-                    let tri = weights.x * nx + weights.y * ny + weights.z * nz;
-                    (tri, tri)
-                } else {
-                    match self.fill_generator {
-                        ProceduralGenerator::None => (1.0, 0.5),
-                        ProceduralGenerator::PerlinNoise => {
-                            let n = NoiseGenerator::fbm_perlin_2d(ru * self.generator_scale, rv * self.generator_scale, 4, 2.0, 0.5);
-                            (n, n)
-                        }
-                        ProceduralGenerator::WorleyGrunge => {
-                            let (d1, d2) = NoiseGenerator::voronoi_2d(ru * self.generator_scale, rv * self.generator_scale);
-                            let edge = (d2 - d1).clamp(0.0, 1.0);
-                            (edge, 1.0 - edge)
-                        }
-                        ProceduralGenerator::BillowNoise => {
-                            let n = NoiseGenerator::billow_2d(ru * self.generator_scale, rv * self.generator_scale, 4, 2.0, 0.5);
-                            (n, n)
-                        }
-                        ProceduralGenerator::RidgedMultifractal => {
-                            let n = NoiseGenerator::ridged_fbm_2d(ru * self.generator_scale, rv * self.generator_scale, 4, 2.0, 0.5);
-                            (n, n)
-                        }
-                        ProceduralGenerator::DomainWarpGrunge => {
-                            let n = NoiseGenerator::domain_warp_2d(ru * self.generator_scale * 0.5, rv * self.generator_scale * 0.5);
-                            (n, n)
-                        }
-                        ProceduralGenerator::SplatterDirt => {
-                            let n = NoiseGenerator::splatter_spots_2d(ru * self.generator_scale * 2.0, rv * self.generator_scale * 2.0);
-                            (n, n)
-                        }
-                        ProceduralGenerator::WoodGrain => {
-                            let n = NoiseGenerator::wood_grain_2d(ru * self.generator_scale, rv * self.generator_scale);
-                            (n, n)
-                        }
-                        ProceduralGenerator::FabricWeave => {
-                            let n = NoiseGenerator::fabric_weave_2d(ru * self.generator_scale, rv * self.generator_scale);
-                            (n, n)
-                        }
-                        ProceduralGenerator::Scratches => {
-                            let s = NoiseGenerator::scratches_2d(ru * self.generator_scale, rv * self.generator_scale);
-                            (1.0 - s * 0.75, 0.5 - s * 0.35)
-                        }
-                        ProceduralGenerator::CurvatureWear => {
-                            let noise = NoiseGenerator::fbm_perlin_2d(ru * self.generator_scale, rv * self.generator_scale, 4, 2.0, 0.5);
-                            let (w1, w2) = NoiseGenerator::voronoi_2d(ru * self.generator_scale * 2.5, rv * self.generator_scale * 2.5);
-                            let chip = (w2 - w1).clamp(0.0, 1.0);
-                            let ridge = NoiseGenerator::ridged_fbm_2d(ru * self.generator_scale * 3.5, rv * self.generator_scale * 3.5, 3, 2.0, 0.5);
+                    let (noise_factor, bump_factor) = if triplanar && position_map.is_some() {
+                        let pos_sample = position_map.unwrap().sample_bilinear(uv_mesh);
+                        let norm_sample = normal_map.map(|nm| nm.sample_bilinear(uv_mesh)).unwrap_or(glam::Vec4::new(0.5, 0.5, 1.0, 1.0));
+                        let p3 = glam::Vec3::new(pos_sample.x, pos_sample.y, pos_sample.z) * generator_scale * 4.0;
+                        let n = (norm_sample.truncate() * 2.0 - glam::Vec3::ONE).normalize_or_zero();
+                        let mut weights = glam::Vec3::new(n.x.abs().powi(4), n.y.abs().powi(4), n.z.abs().powi(4));
+                        let sum = weights.x + weights.y + weights.z;
+                        if sum > 1e-4 { weights /= sum; } else { weights = glam::Vec3::new(0.33, 0.34, 0.33); }
 
-                            let raw_edge = if let Some(cm) = curvature_map {
-                                let curv = cm.sample_bilinear(uv_mesh);
-                                if curv > 0.505 { ((curv - 0.505) * 6.0).clamp(0.0, 1.0).powf(0.7) } else { 0.0 }
-                            } else {
-                                (ridge * 0.7 + chip * 0.3).powf(2.0) * 0.85
-                            };
+                        let nx = NoiseGenerator::fbm_2d(p3.y, p3.z, 4, 2.0, 0.5);
+                        let ny = NoiseGenerator::fbm_2d(p3.x, p3.z, 4, 2.0, 0.5);
+                        let nz = NoiseGenerator::fbm_2d(p3.x, p3.y, 4, 2.0, 0.5);
+                        let tri = weights.x * nx + weights.y * ny + weights.z * nz;
+                        (tri, tri)
+                    } else {
+                        match fill_generator {
+                            ProceduralGenerator::None => (1.0, 0.5),
+                            ProceduralGenerator::PerlinNoise => {
+                                let n = NoiseGenerator::fbm_perlin_2d(ru * generator_scale, rv * generator_scale, 4, 2.0, 0.5);
+                                (n, n)
+                            }
+                            ProceduralGenerator::WorleyGrunge => {
+                                let (d1, d2) = NoiseGenerator::voronoi_2d(ru * generator_scale, rv * generator_scale);
+                                let edge = (d2 - d1).clamp(0.0, 1.0);
+                                (edge, 1.0 - edge)
+                            }
+                            ProceduralGenerator::BillowNoise => {
+                                let n = NoiseGenerator::billow_2d(ru * generator_scale, rv * generator_scale, 4, 2.0, 0.5);
+                                (n, n)
+                            }
+                            ProceduralGenerator::RidgedMultifractal => {
+                                let n = NoiseGenerator::ridged_fbm_2d(ru * generator_scale, rv * generator_scale, 4, 2.0, 0.5);
+                                (n, n)
+                            }
+                            ProceduralGenerator::DomainWarpGrunge => {
+                                let n = NoiseGenerator::domain_warp_2d(ru * generator_scale * 0.5, rv * generator_scale * 0.5);
+                                (n, n)
+                            }
+                            ProceduralGenerator::SplatterDirt => {
+                                let n = NoiseGenerator::splatter_spots_2d(ru * generator_scale * 2.0, rv * generator_scale * 2.0);
+                                (n, n)
+                            }
+                            ProceduralGenerator::WoodGrain => {
+                                let n = NoiseGenerator::wood_grain_2d(ru * generator_scale, rv * generator_scale);
+                                (n, n)
+                            }
+                            ProceduralGenerator::FabricWeave => {
+                                let n = NoiseGenerator::fabric_weave_2d(ru * generator_scale, rv * generator_scale);
+                                (n, n)
+                            }
+                            ProceduralGenerator::Scratches => {
+                                let s = NoiseGenerator::scratches_2d(ru * generator_scale, rv * generator_scale);
+                                (1.0 - s * 0.75, 0.5 - s * 0.35)
+                            }
+                            ProceduralGenerator::CurvatureWear => {
+                                let noise = NoiseGenerator::fbm_perlin_2d(ru * generator_scale, rv * generator_scale, 4, 2.0, 0.5);
+                                let (w1, w2) = NoiseGenerator::voronoi_2d(ru * generator_scale * 2.5, rv * generator_scale * 2.5);
+                                let chip = (w2 - w1).clamp(0.0, 1.0);
+                                let ridge = NoiseGenerator::ridged_fbm_2d(ru * generator_scale * 3.5, rv * generator_scale * 3.5, 3, 2.0, 0.5);
 
-                            let wear_core = (raw_edge * 1.8).clamp(0.0, 1.0);
-                            let wear_fringe = (raw_edge * 2.5 - 0.3).clamp(0.0, 1.0) * (0.35 * noise + 0.45 * chip + 0.20 * ridge);
-                            let wear = (wear_core * 0.65 + wear_fringe * 1.3).clamp(0.0, 1.0);
-                            (1.0 - wear * 0.75, 0.5 + wear * 0.3)
-                        }
-                        ProceduralGenerator::PositionGradient => {
-                            let pos_y = position_map
-                                .map(|pm| pm.sample_bilinear(uv_mesh).y)
-                                .unwrap_or(rv);
-                            (pos_y, pos_y)
-                        }
-                        ProceduralGenerator::DirectionalDust => {
-                            let norm_y = normal_map
-                                .map(|nm| nm.sample_bilinear(uv_mesh).y * 2.0 - 1.0)
-                                .unwrap_or(0.85);
-                            let ao = ao_map.map(|am| am.sample_bilinear(uv_mesh)).unwrap_or(1.0);
-                            let billow = NoiseGenerator::billow_2d(ru * self.generator_scale * 1.5, rv * self.generator_scale * 1.5, 3, 2.0, 0.5);
-                            let fine_dust = NoiseGenerator::splatter_spots_2d(ru * self.generator_scale * 4.0, rv * self.generator_scale * 4.0);
+                                let raw_edge = if let Some(cm) = curvature_map {
+                                    let curv = cm.sample_bilinear(uv_mesh);
+                                    if curv > 0.505 { ((curv - 0.505) * 6.0).clamp(0.0, 1.0).powf(0.7) } else { 0.0 }
+                                } else {
+                                    (ridge * 0.7 + chip * 0.3).powf(2.0) * 0.85
+                                };
 
-                            let facing_up = (norm_y - 0.1).max(0.0).powf(0.6).clamp(0.0, 1.0);
-                            let pocket_boost = 0.7 + (1.0 - ao) * 0.6;
-                            let dust = (facing_up * (0.35 + 0.40 * billow + 0.25 * fine_dust) * pocket_boost).clamp(0.0, 1.0);
-                            (1.0 - dust * 0.4, 0.5 + dust * 0.1)
-                        }
-                        ProceduralGenerator::Checkerboard => {
-                            let cx = (ru * self.generator_scale).floor() as i32;
-                            let cy = (rv * self.generator_scale).floor() as i32;
-                            let val = if (cx + cy) % 2 == 0 { 0.9 } else { 0.2 };
-                            (val, val)
-                        }
-                        ProceduralGenerator::Bricks => {
-                            let scaled_y = rv * self.generator_scale;
-                            let row = scaled_y.floor() as i32;
-                            let offset_x = if row % 2 != 0 { 0.5 } else { 0.0 };
-                            let scaled_x = ru * self.generator_scale + offset_x;
-                            let fx = (scaled_x - scaled_x.floor()).abs();
-                            let fy = (scaled_y - scaled_y.floor()).abs();
-                            let is_mortar = fx < 0.07 || fy < 0.07;
-                            let val = if is_mortar { 0.2 } else { 0.85 };
-                            (val, if is_mortar { 0.1 } else { 0.6 })
-                        }
-                        ProceduralGenerator::AmbientOcclusion => {
-                            let ao_val = ao_map.map(|am| am.sample_bilinear(uv_mesh)).unwrap_or(0.85);
-                            let curv_val = curvature_map.map(|cm| cm.sample_bilinear(uv_mesh)).unwrap_or(0.5);
-                            let grunge = NoiseGenerator::domain_warp_2d(ru * self.generator_scale * 1.2, rv * self.generator_scale * 1.2);
-                            let splatter = NoiseGenerator::splatter_spots_2d(ru * self.generator_scale * 2.5, rv * self.generator_scale * 2.5);
+                                let wear_core = (raw_edge * 1.8).clamp(0.0, 1.0);
+                                let wear_fringe = (raw_edge * 2.5 - 0.3).clamp(0.0, 1.0) * (0.35 * noise + 0.45 * chip + 0.20 * ridge);
+                                let wear = (wear_core * 0.65 + wear_fringe * 1.3).clamp(0.0, 1.0);
+                                (1.0 - wear * 0.75, 0.5 + wear * 0.3)
+                            }
+                            ProceduralGenerator::PositionGradient => {
+                                let pos_y = position_map
+                                    .map(|pm| pm.sample_bilinear(uv_mesh).y)
+                                    .unwrap_or(rv);
+                                (pos_y, pos_y)
+                            }
+                            ProceduralGenerator::DirectionalDust => {
+                                let norm_y = normal_map
+                                    .map(|nm| nm.sample_bilinear(uv_mesh).y * 2.0 - 1.0)
+                                    .unwrap_or(0.85);
+                                let ao = ao_map.map(|am| am.sample_bilinear(uv_mesh)).unwrap_or(1.0);
+                                let billow = NoiseGenerator::billow_2d(ru * generator_scale * 1.5, rv * generator_scale * 1.5, 3, 2.0, 0.5);
+                                let fine_dust = NoiseGenerator::splatter_spots_2d(ru * generator_scale * 4.0, rv * generator_scale * 4.0);
 
-                            let crevice_ao = (1.0 - ao_val).clamp(0.0, 1.0).powf(0.8);
-                            let crevice_curv = if curv_val < 0.495 { ((0.495 - curv_val) * 4.5).clamp(0.0, 1.0).powf(0.7) } else { 0.0 };
-                            let crevice = (crevice_ao * 1.5 + crevice_curv * 1.2).clamp(0.0, 1.0);
+                                let facing_up = (norm_y - 0.1).max(0.0).powf(0.6).clamp(0.0, 1.0);
+                                let pocket_boost = 0.7 + (1.0 - ao) * 0.6;
+                                let dust = (facing_up * (0.35 + 0.40 * billow + 0.25 * fine_dust) * pocket_boost).clamp(0.0, 1.0);
+                                (1.0 - dust * 0.4, 0.5 + dust * 0.1)
+                            }
+                            ProceduralGenerator::Checkerboard => {
+                                let cx = (ru * generator_scale).floor() as i32;
+                                let cy = (rv * generator_scale).floor() as i32;
+                                let val = if (cx + cy) % 2 == 0 { 0.9 } else { 0.2 };
+                                (val, val)
+                            }
+                            ProceduralGenerator::Bricks => {
+                                let scaled_y = rv * generator_scale;
+                                let row = scaled_y.floor() as i32;
+                                let offset_x = if row % 2 != 0 { 0.5 } else { 0.0 };
+                                let scaled_x = ru * generator_scale + offset_x;
+                                let fx = (scaled_x - scaled_x.floor()).abs();
+                                let fy = (scaled_y - scaled_y.floor()).abs();
+                                let is_mortar = fx < 0.07 || fy < 0.07;
+                                let val = if is_mortar { 0.2 } else { 0.85 };
+                                (val, if is_mortar { 0.1 } else { 0.6 })
+                            }
+                            ProceduralGenerator::AmbientOcclusion => {
+                                let ao_val = ao_map.map(|am| am.sample_bilinear(uv_mesh)).unwrap_or(0.85);
+                                let curv_val = curvature_map.map(|cm| cm.sample_bilinear(uv_mesh)).unwrap_or(0.5);
+                                let grunge = NoiseGenerator::domain_warp_2d(ru * generator_scale * 1.2, rv * generator_scale * 1.2);
+                                let splatter = NoiseGenerator::splatter_spots_2d(ru * generator_scale * 2.5, rv * generator_scale * 2.5);
 
-                            let sediment = 0.40 + 0.35 * grunge + 0.25 * splatter;
-                            let factor = (crevice * sediment * 1.6).clamp(0.0, 1.0);
-                            (1.0 - factor * 0.7, 0.5 + factor * 0.2)
-                        }
-                        ProceduralGenerator::DrippingLeaks => {
-                            let drip = NoiseGenerator::dripping_leaks_2d(ru * self.generator_scale, rv * self.generator_scale);
-                            (1.0 - drip * 0.6, 0.5 - drip * 0.1)
-                        }
-                        ProceduralGenerator::PeelingPaint => {
-                            let peel = NoiseGenerator::peeling_paint_2d(ru * self.generator_scale, rv * self.generator_scale);
-                            (1.0 - peel * 0.35, 0.5 + peel * 0.25)
-                        }
-                        ProceduralGenerator::RustPits => {
-                            let pit = NoiseGenerator::rust_crater_2d(ru * self.generator_scale, rv * self.generator_scale);
-                            (1.0 - pit * 0.5, (0.5 - pit * 0.35).clamp(0.0, 1.0))
-                        }
-                        ProceduralGenerator::MetalEdgeHighlight => {
-                            let curv = curvature_map.map(|cm| cm.sample_bilinear(uv_mesh)).unwrap_or(0.5);
-                            let edge = if curv > 0.515 { ((curv - 0.515) * 8.0).clamp(0.0, 1.0).powf(1.4) } else { 0.0 };
-                            (1.0 + edge * 0.3, 0.5 + edge * 0.15)
-                        }
-                        ProceduralGenerator::GroundSplash => {
-                            let pos_y = position_map.map(|pm| pm.sample_bilinear(uv_mesh).y).unwrap_or(rv);
-                            let splash = (1.0 - pos_y).clamp(0.0, 1.0).powf(1.8) * NoiseGenerator::splatter_spots_2d(ru * self.generator_scale, rv * self.generator_scale);
-                            (1.0 - splash * 0.4, 0.5 + splash * 0.2)
-                        }
-                        ProceduralGenerator::PerforatedMesh => {
-                            let scaled_y = rv * self.generator_scale * 1.73205;
-                            let row = scaled_y.floor() as i32;
-                            let offset_x = if row % 2 != 0 { 0.5 } else { 0.0 };
-                            let scaled_x = ru * self.generator_scale + offset_x;
-                            let fx = (scaled_x - scaled_x.floor()) - 0.5;
-                            let fy = (scaled_y - scaled_y.floor()) - 0.5;
-                            let dist = (fx * fx + fy * fy).sqrt();
-                            let is_hole = dist < 0.36;
-                            let val = if is_hole { 0.1 } else { 0.95 };
-                            (val, if is_hole { 0.1 } else { 0.6 })
-                        }
-                        ProceduralGenerator::WireFence => {
-                            let rot_u = (ru + rv) * 0.7071 * self.generator_scale;
-                            let rot_v = (rv - ru) * 0.7071 * self.generator_scale;
-                            let fx = (rot_u - rot_u.floor() - 0.5).abs();
-                            let fy = (rot_v - rot_v.floor() - 0.5).abs();
-                            let wire_thickness = 0.09;
-                            let wire = (wire_thickness - fx).max(wire_thickness - fy);
-                            let is_wire = wire > 0.0;
-                            let val = if is_wire { 0.95 } else { 0.1 };
-                            (val, if is_wire { 0.7 } else { 0.2 })
-                        }
-                        ProceduralGenerator::TornFabricEdge => {
-                            let fbm = NoiseGenerator::fbm_2d(ru * self.generator_scale * 3.0, rv * self.generator_scale * 3.0, 4, 2.0, 0.5);
-                            let fibers = NoiseGenerator::ridged_fbm_2d(ru * self.generator_scale * 12.0, rv * self.generator_scale * 12.0, 3, 2.0, 0.5);
-                            let v_center = (rv - 0.5).abs() * 2.0;
-                            let tear = v_center + (fbm - 0.5) * 0.7 + (fibers - 0.5) * 0.25;
-                            let is_solid = tear >= 0.5;
-                            (if is_solid { 0.9 } else { 0.1 }, if is_solid { 0.5 + fibers * 0.2 } else { 0.1 })
-                        }
-                        ProceduralGenerator::CircularDots => {
-                            let fx = (ru * self.generator_scale - (ru * self.generator_scale).floor()) - 0.5;
-                            let fy = (rv * self.generator_scale - (rv * self.generator_scale).floor()) - 0.5;
-                            let dist = (fx * fx + fy * fy).sqrt();
-                            let is_hole = dist < 0.32;
-                            (if is_hole { 0.1 } else { 0.9 }, if is_hole { 0.1 } else { 0.55 })
-                        }
-                        ProceduralGenerator::BnWSpots1 => {
-                            let n = NoiseGenerator::bnw_spots_1_2d(ru * self.generator_scale, rv * self.generator_scale);
-                            (n, n)
-                        }
-                        ProceduralGenerator::BnWSpots2 => {
-                            let n = NoiseGenerator::bnw_spots_2_2d(ru * self.generator_scale, rv * self.generator_scale);
-                            (n, n)
-                        }
-                        ProceduralGenerator::BnWSpots3 => {
-                            let n = NoiseGenerator::bnw_spots_3_2d(ru * self.generator_scale, rv * self.generator_scale);
-                            (n, n)
-                        }
-                        ProceduralGenerator::GrungeMap => {
-                            let n = NoiseGenerator::grunge_map_2d(ru * self.generator_scale, rv * self.generator_scale);
-                            (n, n)
-                        }
-                        ProceduralGenerator::DirectionalNoise => {
-                            let n = NoiseGenerator::directional_noise_2d(ru * self.generator_scale, rv * self.generator_scale, 0.785);
-                            (n, n)
-                        }
-                        ProceduralGenerator::Clouds => {
-                            let n = NoiseGenerator::clouds_noise_2d(ru * self.generator_scale, rv * self.generator_scale);
-                            (n, n)
-                        }
-                        ProceduralGenerator::MarbleVeins => {
-                            let n = NoiseGenerator::marble_veins_2d(ru * self.generator_scale, rv * self.generator_scale);
-                            (n, n)
-                        }
-                        ProceduralGenerator::MoistureNoise => {
-                            let n = NoiseGenerator::moisture_noise_2d(ru * self.generator_scale, rv * self.generator_scale);
-                            (n, n)
-                        }
-                    }
-                };
+                                let crevice_ao = (1.0 - ao_val).clamp(0.0, 1.0).powf(0.8);
+                                let crevice_curv = if curv_val < 0.495 { ((0.495 - curv_val) * 4.5).clamp(0.0, 1.0).powf(0.7) } else { 0.0 };
+                                let crevice = (crevice_ao * 1.5 + crevice_curv * 1.2).clamp(0.0, 1.0);
 
-                let (eff_noise, eff_bump) = if self.fill_generator != ProceduralGenerator::None {
-                    let contrasted = ((noise_factor - 0.5) * self.generator_contrast + 0.5).clamp(0.0, 1.0);
-                    let final_noise = if self.generator_invert { 1.0 - contrasted } else { contrasted };
-                    let final_bump = if self.generator_invert { 1.0 - bump_factor } else { bump_factor };
-                    (final_noise, final_bump)
-                } else {
-                    (1.0, 0.5)
-                };
+                                let sediment = 0.40 + 0.35 * grunge + 0.25 * splatter;
+                                let factor = (crevice * sediment * 1.6).clamp(0.0, 1.0);
+                                (1.0 - factor * 0.7, 0.5 + factor * 0.2)
+                            }
+                            ProceduralGenerator::DrippingLeaks => {
+                                let drip = NoiseGenerator::dripping_leaks_2d(ru * generator_scale, rv * generator_scale);
+                                (1.0 - drip * 0.6, 0.5 - drip * 0.1)
+                            }
+                            ProceduralGenerator::PeelingPaint => {
+                                let peel = NoiseGenerator::peeling_paint_2d(ru * generator_scale, rv * generator_scale);
+                                (1.0 - peel * 0.35, 0.5 + peel * 0.25)
+                            }
+                            ProceduralGenerator::RustPits => {
+                                let pit = NoiseGenerator::rust_crater_2d(ru * generator_scale, rv * generator_scale);
+                                (1.0 - pit * 0.5, (0.5 - pit * 0.35).clamp(0.0, 1.0))
+                            }
+                            ProceduralGenerator::MetalEdgeHighlight => {
+                                let curv = curvature_map.map(|cm| cm.sample_bilinear(uv_mesh)).unwrap_or(0.5);
+                                let edge = if curv > 0.515 { ((curv - 0.515) * 8.0).clamp(0.0, 1.0).powf(1.4) } else { 0.0 };
+                                (1.0 + edge * 0.3, 0.5 + edge * 0.15)
+                            }
+                            ProceduralGenerator::GroundSplash => {
+                                let pos_y = position_map.map(|pm| pm.sample_bilinear(uv_mesh).y).unwrap_or(rv);
+                                let splash = (1.0 - pos_y).clamp(0.0, 1.0).powf(1.8) * NoiseGenerator::splatter_spots_2d(ru * generator_scale, rv * generator_scale);
+                                (1.0 - splash * 0.4, 0.5 + splash * 0.2)
+                            }
+                            ProceduralGenerator::PerforatedMesh => {
+                                let scaled_y = rv * generator_scale * 1.73205;
+                                let row = scaled_y.floor() as i32;
+                                let offset_x = if row % 2 != 0 { 0.5 } else { 0.0 };
+                                let scaled_x = ru * generator_scale + offset_x;
+                                let fx = (scaled_x - scaled_x.floor()) - 0.5;
+                                let fy = (scaled_y - scaled_y.floor()) - 0.5;
+                                let dist = (fx * fx + fy * fy).sqrt();
+                                let is_hole = dist < 0.36;
+                                let val = if is_hole { 0.1 } else { 0.95 };
+                                (val, if is_hole { 0.1 } else { 0.6 })
+                            }
+                            ProceduralGenerator::WireFence => {
+                                let rot_u = (ru + rv) * 0.7071 * generator_scale;
+                                let rot_v = (rv - ru) * 0.7071 * generator_scale;
+                                let fx = (rot_u - rot_u.floor() - 0.5).abs();
+                                let fy = (rot_v - rot_v.floor() - 0.5).abs();
+                                let wire_thickness = 0.09;
+                                let wire = (wire_thickness - fx).max(wire_thickness - fy);
+                                let is_wire = wire > 0.0;
+                                let val = if is_wire { 0.95 } else { 0.1 };
+                                (val, if is_wire { 0.7 } else { 0.2 })
+                            }
+                            ProceduralGenerator::TornFabricEdge => {
+                                let fbm = NoiseGenerator::fbm_2d(ru * generator_scale * 3.0, rv * generator_scale * 3.0, 4, 2.0, 0.5);
+                                let fibers = NoiseGenerator::ridged_fbm_2d(ru * generator_scale * 12.0, rv * generator_scale * 12.0, 3, 2.0, 0.5);
+                                let v_center = (rv - 0.5).abs() * 2.0;
+                                let tear = v_center + (fbm - 0.5) * 0.7 + (fibers - 0.5) * 0.25;
+                                let is_solid = tear >= 0.5;
+                                (if is_solid { 0.9 } else { 0.1 }, if is_solid { 0.5 + fibers * 0.2 } else { 0.1 })
+                            }
+                            ProceduralGenerator::CircularDots => {
+                                let fx = (ru * generator_scale - (ru * generator_scale).floor()) - 0.5;
+                                let fy = (rv * generator_scale - (rv * generator_scale).floor()) - 0.5;
+                                let dist = (fx * fx + fy * fy).sqrt();
+                                let is_hole = dist < 0.32;
+                                (if is_hole { 0.1 } else { 0.9 }, if is_hole { 0.1 } else { 0.55 })
+                            }
+                            ProceduralGenerator::BnWSpots1 => {
+                                let n = NoiseGenerator::bnw_spots_1_2d(ru * generator_scale, rv * generator_scale);
+                                (n, n)
+                            }
+                            ProceduralGenerator::BnWSpots2 => {
+                                let n = NoiseGenerator::bnw_spots_2_2d(ru * generator_scale, rv * generator_scale);
+                                (n, n)
+                            }
+                            ProceduralGenerator::BnWSpots3 => {
+                                let n = NoiseGenerator::bnw_spots_3_2d(ru * generator_scale, rv * generator_scale);
+                                (n, n)
+                            }
+                            ProceduralGenerator::GrungeMap => {
+                                let n = NoiseGenerator::grunge_map_2d(ru * generator_scale, rv * generator_scale);
+                                (n, n)
+                            }
+                            ProceduralGenerator::DirectionalNoise => {
+                                let n = NoiseGenerator::directional_noise_2d(ru * generator_scale, rv * generator_scale, 0.785);
+                                (n, n)
+                            }
+                            ProceduralGenerator::Clouds => {
+                                let n = NoiseGenerator::clouds_noise_2d(ru * generator_scale, rv * generator_scale);
+                                (n, n)
+                            }
+                            ProceduralGenerator::MarbleVeins => {
+                                let n = NoiseGenerator::marble_veins_2d(ru * generator_scale, rv * generator_scale);
+                                (n, n)
+                            }
+                            ProceduralGenerator::MoistureNoise => {
+                                let n = NoiseGenerator::moisture_noise_2d(ru * generator_scale, rv * generator_scale);
+                                (n, n)
+                            }
+                        }
+                    };
 
-                let col = if self.fill_generator == ProceduralGenerator::None {
-                    self.fill_color
-                } else {
-                    Vec4::new(
-                        (self.fill_color.x * eff_noise).clamp(0.0, 1.0),
-                        (self.fill_color.y * eff_noise).clamp(0.0, 1.0),
-                        (self.fill_color.z * eff_noise).clamp(0.0, 1.0),
-                        self.fill_color.w,
-                    )
-                };
+                    let (eff_noise, eff_bump) = if fill_generator != ProceduralGenerator::None {
+                        let contrasted = ((noise_factor - 0.5) * generator_contrast + 0.5).clamp(0.0, 1.0);
+                        let final_noise = if generator_invert { 1.0 - contrasted } else { contrasted };
+                        let final_bump = if generator_invert { 1.0 - bump_factor } else { bump_factor };
+                        (final_noise, final_bump)
+                    } else {
+                        (1.0, 0.5)
+                    };
 
-                let rough = if self.fill_generator == ProceduralGenerator::None {
-                    self.fill_roughness
-                } else {
-                    (self.fill_roughness * (0.65 + 0.7 * eff_noise)).clamp(0.0, 1.0)
-                };
+                    let col = if fill_generator == ProceduralGenerator::None {
+                        fill_color
+                    } else {
+                        Vec4::new(
+                            (fill_color.x * eff_noise).clamp(0.0, 1.0),
+                            (fill_color.y * eff_noise).clamp(0.0, 1.0),
+                            (fill_color.z * eff_noise).clamp(0.0, 1.0),
+                            fill_color.w,
+                        )
+                    };
 
-                let metal = self.fill_metallic;
+                    let rough = if fill_generator == ProceduralGenerator::None {
+                        fill_roughness
+                    } else {
+                        (fill_roughness * (0.65 + 0.7 * eff_noise)).clamp(0.0, 1.0)
+                    };
 
-                let height = if self.fill_generator == ProceduralGenerator::None {
-                    self.fill_height
-                } else {
-                    (self.fill_height + (eff_bump - 0.5) * 0.4).clamp(0.0, 1.0)
-                };
+                    let metal = fill_metallic;
 
-                // UV coords for texture sampling (already includes scale/offset/rotation)
-                let tx = (ru.rem_euclid(1.0) * w as f32).clamp(0.0, w as f32 - 1.0) as u32;
-                let ty = (rv.rem_euclid(1.0) * h as f32).clamp(0.0, h as f32 - 1.0) as u32;
+                    let height = if fill_generator == ProceduralGenerator::None {
+                        fill_height
+                    } else {
+                        (fill_height + (eff_bump - 0.5) * 0.4).clamp(0.0, 1.0)
+                    };
 
-                let final_col = if let Some(ref tex) = self.fill_color_tex {
-                    let t = tex.get_pixel(tx, ty);
-                    Vec4::new(
-                        (t.x * eff_noise).clamp(0.0, 1.0),
-                        (t.y * eff_noise).clamp(0.0, 1.0),
-                        (t.z * eff_noise).clamp(0.0, 1.0),
-                        t.w,
-                    )
-                } else {
-                    col
-                };
+                    // UV coords for texture sampling (already includes scale/offset/rotation)
+                    let tx = (ru.rem_euclid(1.0) * w as f32).clamp(0.0, w as f32 - 1.0) as u32;
+                    let ty = (rv.rem_euclid(1.0) * h as f32).clamp(0.0, h as f32 - 1.0) as u32;
 
-                let final_rough = if let Some(ref tex) = self.fill_roughness_tex {
-                    tex.get_pixel(tx, ty)
-                } else {
-                    rough
-                };
+                    let final_col = if let Some(tex) = fill_color_tex {
+                        let t = tex.get_pixel(tx, ty);
+                        Vec4::new(
+                            (t.x * eff_noise).clamp(0.0, 1.0),
+                            (t.y * eff_noise).clamp(0.0, 1.0),
+                            (t.z * eff_noise).clamp(0.0, 1.0),
+                            t.w,
+                        )
+                    } else {
+                        col
+                    };
 
-                let final_metal = if let Some(ref tex) = self.fill_metallic_tex {
-                    tex.get_pixel(tx, ty)
-                } else {
-                    metal
-                };
+                    let final_rough = if let Some(tex) = fill_roughness_tex {
+                        tex.get_pixel(tx, ty)
+                    } else {
+                        rough
+                    };
 
-                let final_emissive = if let Some(ref tex) = self.fill_emissive_tex {
-                    let t = tex.get_pixel(tx, ty);
-                    Vec4::new(
-                        t.x * self.fill_emissive.x,
-                        t.y * self.fill_emissive.y,
-                        t.z * self.fill_emissive.z,
-                        t.w * self.fill_emissive.w,
-                    )
-                } else {
-                    self.fill_emissive
-                };
+                    let final_metal = if let Some(tex) = fill_metallic_tex {
+                        tex.get_pixel(tx, ty)
+                    } else {
+                        metal
+                    };
 
-                let final_opacity = if let Some(ref tex) = self.fill_opacity_tex {
-                    tex.get_pixel(tx, ty) * self.fill_opacity
-                } else {
-                    self.fill_opacity
-                };
+                    let final_emissive = if let Some(tex) = fill_emissive_tex {
+                        let t = tex.get_pixel(tx, ty);
+                        Vec4::new(
+                            t.x * fill_emissive.x,
+                            t.y * fill_emissive.y,
+                            t.z * fill_emissive.z,
+                            t.w * fill_emissive.w,
+                        )
+                    } else {
+                        fill_emissive
+                    };
 
-                self.base_color_buf.set_pixel(x, y, final_col);
-                self.roughness_buf.set_pixel(x, y, final_rough);
-                self.metallic_buf.set_pixel(x, y, final_metal);
-                self.height_buf.set_pixel(x, y, height);
-                self.emissive_buf.set_pixel(x, y, final_emissive);
-                self.opacity_buf.set_pixel(x, y, final_opacity);
-                self.clearcoat_buf.set_pixel(x, y, self.fill_clearcoat);
-                self.anisotropy_buf.set_pixel(x, y, self.fill_anisotropy);
-                self.anisotropy_angle_buf.set_pixel(x, y, self.fill_anisotropy_angle);
-            }
-        }
+                    let final_opacity = if let Some(tex) = fill_opacity_tex {
+                        tex.get_pixel(tx, ty) * fill_opacity
+                    } else {
+                        fill_opacity
+                    };
+
+                    let xi = x as usize;
+                    base_row[xi] = final_col;
+                    rough_row[xi] = final_rough;
+                    metal_row[xi] = final_metal;
+                    height_row[xi] = height;
+                    emissive_row[xi] = final_emissive;
+                    opacity_row[xi] = final_opacity;
+                }
+            });
 
         // Generate tangent normal map from height variations and imported normal texture
-        self.update_normal_from_height(self.fill_normal_strength);
+        if self.fill_normal_tex.is_some() || self.fill_generator != ProceduralGenerator::None {
+            self.update_normal_from_height(self.fill_normal_strength);
+        } else {
+            self.normal_buf.data.fill(glam::Vec4::new(0.5, 0.5, 1.0, 1.0));
+        }
         self.mark_dirty_full();
     }
 
-    /// Update normal_buf from height_buf across the entire layer
+    /// Update normal_buf from height_buf across the entire layer in parallel using Rayon
     pub fn update_normal_from_height(&mut self, strength: f32) {
         let w = self.height_buf.width;
         let h = self.height_buf.height;
-        if w > 0 && h > 0 {
-            self.update_normal_from_height_rect(0, 0, w - 1, h - 1, strength);
+        if w < 2 || h < 2 {
+            return;
         }
+
+        let rad = self.uv_rotation.to_radians();
+        let (sin_r, cos_r) = rad.sin_cos();
+        let uv_scale = self.uv_scale.max(0.001);
+        let uv_offset = self.uv_offset;
+        let norm_tex_opt = self.fill_normal_tex.as_ref();
+        let height_buf = &self.height_buf;
+
+        self.normal_buf.data
+            .par_chunks_exact_mut(w as usize)
+            .enumerate()
+            .for_each(|(y, norm_row)| {
+                let y = y as u32;
+                let ym = if y > 0 { y - 1 } else { h - 1 };
+                let yp = if y + 1 < h { y + 1 } else { 0 };
+
+                for x in 0..w {
+                    let xm = if x > 0 { x - 1 } else { w - 1 };
+                    let xp = if x + 1 < w { x + 1 } else { 0 };
+
+                    let h_tl = height_buf.get_pixel(xm, yp);
+                    let h_tc = height_buf.get_pixel(x, yp);
+                    let h_tr = height_buf.get_pixel(xp, yp);
+                    let h_ml = height_buf.get_pixel(xm, y);
+                    let h_mr = height_buf.get_pixel(xp, y);
+                    let h_bl = height_buf.get_pixel(xm, ym);
+                    let h_bc = height_buf.get_pixel(x, ym);
+                    let h_br = height_buf.get_pixel(xp, ym);
+
+                    let sobel_x = (h_tr + 2.0 * h_mr + h_br) - (h_tl + 2.0 * h_ml + h_bl);
+                    let sobel_y = (h_tl + 2.0 * h_tc + h_tr) - (h_bl + 2.0 * h_bc + h_br);
+
+                    let dx = (sobel_x / 8.0) * strength * 4.0;
+                    let dy = (sobel_y / 8.0) * strength * 4.0;
+                    let bump_n = glam::Vec3::new(-dx, -dy, 1.0).normalize();
+
+                    let final_n = if let Some(norm_tex) = norm_tex_opt {
+                        let u_base = (x as f32 / w as f32) + uv_offset.x;
+                        let v_base = (y as f32 / h as f32) + uv_offset.y;
+                        let cu = u_base - 0.5;
+                        let cv = v_base - 0.5;
+                        let ru = (cu * cos_r - cv * sin_r + 0.5) * uv_scale;
+                        let rv = (cu * sin_r + cv * cos_r + 0.5) * uv_scale;
+                        let tx = (ru.rem_euclid(1.0) * norm_tex.width as f32).clamp(0.0, norm_tex.width as f32 - 1.0) as u32;
+                        let ty = (rv.rem_euclid(1.0) * norm_tex.height as f32).clamp(0.0, norm_tex.height as f32 - 1.0) as u32;
+                        let base_sample = norm_tex.get_pixel(tx, ty);
+                        let base_n = (base_sample.truncate() * 2.0 - glam::Vec3::ONE).normalize_or_zero();
+
+                        if base_n.length_squared() > 1e-4 {
+                            let t = base_n + glam::Vec3::Z;
+                            let u = glam::Vec3::new(-bump_n.x, -bump_n.y, bump_n.z);
+                            let nz = t.z.max(0.001);
+                            (t * (t.dot(u) / nz) - u).normalize()
+                        } else {
+                            bump_n
+                        }
+                    } else {
+                        bump_n
+                    };
+
+                    let cur_h = height_buf.get_pixel(x, y);
+                    norm_row[x as usize] = glam::Vec4::new(final_n.x * 0.5 + 0.5, final_n.y * 0.5 + 0.5, final_n.z * 0.5 + 0.5, cur_h);
+                }
+            });
     }
 
     /// Update normal_buf from height_buf within a bounded bounding box with 8-neighbor Sobel filtering and RNM blending
@@ -2457,6 +2578,53 @@ mod tests {
         // Verify painted buffer was restored while target's static texture map remained intact
         assert_eq!(layer.base_color_buf.get_pixel(10, 10), Vec4::new(1.0, 0.0, 0.0, 1.0));
         assert!(layer.fill_color_tex.is_some(), "Restoring stroke snapshot must preserve target's fill textures");
+    }
+
+    #[test]
+    fn test_solid_fill_fast_path_and_parallel_noise() {
+        let mut layer = Layer::new_fill_layer(
+            1,
+            "Solid Fill".to_string(),
+            64,
+            64,
+            Vec4::new(0.2, 0.4, 0.8, 1.0),
+            0.35,
+            0.75,
+        );
+        layer.fill_clearcoat = 0.5;
+        layer.fill_anisotropy = 0.6;
+        layer.fill_anisotropy_angle = 0.25;
+
+        // Evaluate solid fill (triggers SIMD fast-path)
+        layer.evaluate_fill_advanced(None, None, None, None);
+
+        assert_eq!(layer.base_color_buf.get_pixel(0, 0), Vec4::new(0.2, 0.4, 0.8, 1.0));
+        assert_eq!(layer.base_color_buf.get_pixel(63, 63), Vec4::new(0.2, 0.4, 0.8, 1.0));
+        assert_eq!(layer.roughness_buf.get_pixel(32, 32), 0.35);
+        assert_eq!(layer.metallic_buf.get_pixel(32, 32), 0.75);
+        assert_eq!(layer.clearcoat_buf.get_pixel(32, 32), 0.5);
+        assert_eq!(layer.anisotropy_buf.get_pixel(32, 32), 0.6);
+        assert_eq!(layer.anisotropy_angle_buf.get_pixel(32, 32), 0.25);
+        assert_eq!(layer.normal_buf.get_pixel(0, 0), Vec4::new(0.5, 0.5, 1.0, 1.0));
+
+        // Now test procedural fill with Perlin Noise (triggers Rayon parallel evaluation)
+        layer.fill_generator = ProceduralGenerator::PerlinNoise;
+        layer.generator_scale = 4.0;
+        layer.evaluate_fill_advanced(None, None, None, None);
+
+        // Procedural noise will vary across pixels
+        let c0 = layer.base_color_buf.get_pixel(0, 0);
+        let c1 = layer.base_color_buf.get_pixel(32, 32);
+        assert!(c0.w == 1.0);
+        assert!(c1.w == 1.0);
+        assert!(c0.x >= 0.0 && c0.x <= 1.0);
+
+        // Test Rayon parallel normal map generation from height
+        layer.update_normal_from_height(1.0);
+        let n0 = layer.normal_buf.get_pixel(10, 10);
+        assert!(n0.x >= 0.0 && n0.x <= 1.0);
+        assert!(n0.y >= 0.0 && n0.y <= 1.0);
+        assert!(n0.z >= 0.0 && n0.z <= 1.0);
     }
 }
 

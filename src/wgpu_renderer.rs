@@ -288,6 +288,7 @@ pub struct WgpuViewport {
     pub adapter_info: Option<eframe::wgpu::AdapterInfo>,
     pub cmd_encoding_ms: f32,
     pub queue_submit_ms: f32,
+    aniso_staging: Vec<f32>,
 }
 
 impl WgpuViewport {
@@ -866,6 +867,7 @@ impl WgpuViewport {
             adapter_info: Some(render_state.adapter.get_info()),
             cmd_encoding_ms: 0.0,
             queue_submit_ms: 0.0,
+            aniso_staging: Vec::new(),
         }
     }
 
@@ -1031,20 +1033,23 @@ impl WgpuViewport {
         }
         if project.composite_textures.anisotropy.width == w && project.composite_textures.anisotropy.height == h {
             let total = (w * h) as usize;
-            let mut packed_aniso = vec![0.0f32; total * 4];
+            let req_len = total * 4;
+            if self.aniso_staging.len() != req_len {
+                self.aniso_staging.resize(req_len, 0.0);
+            }
             let aniso_data = &project.composite_textures.anisotropy.data;
             let angle_data = &project.composite_textures.anisotropy_angle.data;
             for i in 0..total {
                 let a = if i < aniso_data.len() { aniso_data[i] } else { 0.0 };
                 let ang = if i < angle_data.len() { angle_data[i] } else { 0.0 };
-                packed_aniso[i * 4 + 0] = a;
-                packed_aniso[i * 4 + 1] = ang;
-                packed_aniso[i * 4 + 2] = 0.0;
-                packed_aniso[i * 4 + 3] = 1.0;
+                self.aniso_staging[i * 4 + 0] = a;
+                self.aniso_staging[i * 4 + 1] = ang;
+                self.aniso_staging[i * 4 + 2] = 0.0;
+                self.aniso_staging[i * 4 + 3] = 1.0;
             }
             self.queue.write_texture(
                 wgpu::ImageCopyTexture { texture: &self.tex_anisotropy, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-                bytemuck::cast_slice(&packed_aniso),
+                bytemuck::cast_slice(&self.aniso_staging),
                 wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(w * 16), rows_per_image: Some(h) },
                 size,
             );
