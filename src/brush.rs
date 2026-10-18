@@ -125,6 +125,12 @@ pub struct BrushSettings {
     pub lazy_mouse_radius: f32, // fraction of screen or distance
     pub position_jitter: f32,
 
+    // Follow Path / Directional Tangent Rotation
+    #[serde(default)]
+    pub follow_path: bool,
+    #[serde(default)]
+    pub follow_path_offset: f32,
+
     // Tablet Stylus Dynamics
     pub pressure_size: bool,
     pub pressure_opacity: bool,
@@ -185,6 +191,8 @@ impl Default for BrushSettings {
             lazy_mouse_enabled: false,
             lazy_mouse_radius: 0.05,
             position_jitter: 0.0,
+            follow_path: false,
+            follow_path_offset: 0.0,
             pressure_size: false,
             pressure_opacity: false,
             paint_color: Vec4::new(0.88, 0.22, 0.18, 1.0),
@@ -240,6 +248,9 @@ pub struct BrushEngine {
 
     // Clone stamp tool state
     pub clone_anchor_uv: Option<Vec2>,
+
+    // Dynamic Follow Path tangent angle
+    pub follow_path_angle: f32,
 }
 
 impl BrushEngine {
@@ -263,6 +274,7 @@ impl BrushEngine {
             smudge_height: None,
             smudge_emissive: None,
             clone_anchor_uv: None,
+            follow_path_angle: 0.0,
         }
     }
 
@@ -366,6 +378,7 @@ impl BrushEngine {
         self.smudge_height = None;
         self.smudge_emissive = None;
         self.clone_anchor_uv = None;
+        self.follow_path_angle = 0.0;
     }
 
     /// Paint continuous stroke from previous UV to current UV
@@ -394,7 +407,12 @@ impl BrushEngine {
 
         let uv_list = match self.last_uv {
             Some(prev_uv) => {
-                let dist = (current_uv - prev_uv).length();
+                let delta = current_uv - prev_uv;
+                if self.settings.follow_path && delta.length_squared() > 1e-9 {
+                    let raw_angle = delta.y.atan2(delta.x);
+                    self.follow_path_angle = raw_angle + self.settings.follow_path_offset;
+                }
+                let dist = delta.length();
                 let tex_dim = layer.base_color_buf.width as f32;
                 let pixel_dist = dist * tex_dim;
                 let step_size = (self.settings.radius * self.settings.spacing).max(1.0);
@@ -578,12 +596,39 @@ impl BrushEngine {
 
         let buf_w = w as usize;
 
+        let active_angle = if self.settings.follow_path {
+            self.follow_path_angle
+        } else {
+            0.0
+        } + if self.settings.angle_jitter > 0.001 {
+            (NoiseGenerator::value_noise_2d(self.stroke_counter as f32 * 3.1, 71.0) - 0.5) * 2.0 * std::f32::consts::PI * self.settings.angle_jitter
+        } else {
+            0.0
+        };
+
+        let has_rot = active_angle.abs() > 1e-4;
+        let (sin_a, cos_a) = if has_rot { active_angle.sin_cos() } else { (0.0, 1.0) };
+
         for py in min_y..=max_y {
-            let tip_y = (py - center_y + rad) as usize;
+            let rel_y = (py - center_y) as f32;
+            let tip_y_direct = (py - center_y + rad) as usize;
             let buf_y_offset = (py as usize) * buf_w;
             for px in min_x..=max_x {
-                let tip_x = (px - center_x + rad) as usize;
-                let alpha_val = self.cached_tip[tip_y * (dim as usize) + tip_x];
+                let alpha_val = if has_rot {
+                    let rel_x = (px - center_x) as f32;
+                    let rot_x = rel_x * cos_a + rel_y * sin_a;
+                    let rot_y = -rel_x * sin_a + rel_y * cos_a;
+                    let tip_x = (rot_x + rad as f32).round() as i32;
+                    let tip_y = (rot_y + rad as f32).round() as i32;
+                    if tip_x >= 0 && tip_x < dim as i32 && tip_y >= 0 && tip_y < dim as i32 {
+                        self.cached_tip[tip_y as usize * (dim as usize) + tip_x as usize]
+                    } else {
+                        0.0
+                    }
+                } else {
+                    let tip_x_direct = (px - center_x + rad) as usize;
+                    self.cached_tip[tip_y_direct * (dim as usize) + tip_x_direct]
+                };
                 
                 let weight = (alpha_val * flow).clamp(0.0, 1.0);
                 if weight <= 1e-4 { continue; }
@@ -1116,7 +1161,20 @@ pub fn barycentric_3d(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> (f32, f32, f32) {
     ) {
         let (points, normals) = match (self.last_hit_pos, self.last_hit_normal) {
             (Some(prev_pos), Some(prev_norm)) => {
-                let dist = (hit_pos - prev_pos).length();
+                let delta = hit_pos - prev_pos;
+                if self.settings.follow_path && delta.length_squared() > 1e-8 {
+                    let n = hit_normal.normalize_or_zero();
+                    let tan_delta = delta - n * n.dot(delta);
+                    if tan_delta.length_squared() > 1e-8 {
+                        let up = if n.y.abs() < 0.95 { Vec3::Y } else { Vec3::X };
+                        let t_axis = n.cross(up).normalize();
+                        let b_axis = n.cross(t_axis);
+                        let u_proj = tan_delta.dot(t_axis);
+                        let v_proj = tan_delta.dot(b_axis);
+                        self.follow_path_angle = v_proj.atan2(u_proj) + self.settings.follow_path_offset;
+                    }
+                }
+                let dist = delta.length();
                 let step_dist = (world_radius * self.settings.spacing).max(0.001);
                 let steps = ((dist / step_dist).ceil() as usize).clamp(1, 6);
 
@@ -1612,5 +1670,47 @@ mod tests {
         let cloned_r = layer.roughness_buf.get_pixel(24, 24);
         assert!(cloned_col.y > 0.5, "Clone stamp should copy green color from source, got g={}", cloned_col.y);
         assert!(cloned_r < 0.35, "Clone stamp should copy roughness from source, got r={}", cloned_r);
+    }
+
+    #[test]
+    fn test_brush_follow_path_dynamics() {
+        let mut layer = Layer::new_paint_layer(1, "Paint".to_string(), 64, 64);
+        let mut engine = BrushEngine::new();
+        engine.settings.radius = 4.0;
+        engine.settings.spacing = 0.5;
+        engine.settings.follow_path = true;
+        engine.settings.follow_path_offset = 0.25;
+        engine.update_cache();
+
+        assert_eq!(engine.follow_path_angle, 0.0);
+
+        // 2D stroke: move along +Y direction (delta.x = 0, delta.y = 0.4)
+        engine.paint_stroke(&mut layer, Vec2::new(0.3, 0.1));
+        engine.paint_stroke(&mut layer, Vec2::new(0.3, 0.5));
+
+        // Angle should be atan2(0.4, 0.0) + 0.25 = PI/2 + 0.25
+        let expected_angle = std::f32::consts::FRAC_PI_2 + 0.25;
+        assert!(
+            (engine.follow_path_angle - expected_angle).abs() < 1e-3,
+            "Expected follow path angle ~ {}, got {}",
+            expected_angle,
+            engine.follow_path_angle
+        );
+
+        // 3D stroke: move on XY plane with +Z normal
+        engine.end_stroke();
+        assert_eq!(engine.follow_path_angle, 0.0, "end_stroke must reset follow_path_angle");
+
+        let mesh = crate::mesh::Mesh::create_cube_mesh("TestCube", 1.0);
+        engine.paint_stroke_3d(&mut layer, &mesh, Vec3::new(0.0, 0.0, 0.5), Vec3::Z, 0.1);
+        engine.paint_stroke_3d(&mut layer, &mesh, Vec3::new(0.5, 0.0, 0.5), Vec3::Z, 0.1);
+        assert!(
+            engine.follow_path_angle.abs() > 1e-4,
+            "3D paint stroke should compute tangent angle for follow path, got {}",
+            engine.follow_path_angle
+        );
+
+        engine.end_stroke();
+        assert_eq!(engine.follow_path_angle, 0.0);
     }
 }

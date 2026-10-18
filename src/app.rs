@@ -262,9 +262,11 @@ pub struct PaintcraftApp {
     // Real-Time Hardware Performance & Diagnostics Metrics
     pub perf_metrics: PerformanceMetrics,
 
-    // Synchronized 2D/3D Viewport Hover State
+    // Synchronized 2D/3D Viewport Hover State & Polygon Fill Drag Tracking
     pub last_hovered_hit_3d: Option<(glam::Vec3, glam::Vec3, glam::Vec2)>,
     pub last_hovered_uv_2d: Option<glam::Vec2>,
+    pub last_hovered_tri: Option<usize>,
+    pub polygon_fill_drag_tris: std::collections::HashSet<usize>,
 
     // Dedicated Baking Screen & Background Worker State
     pub bake_worker_state: Option<Arc<Mutex<BakeProgressState>>>,
@@ -554,6 +556,8 @@ impl PaintcraftApp {
             },
             last_hovered_hit_3d: None,
             last_hovered_uv_2d: None,
+            last_hovered_tri: None,
+            polygon_fill_drag_tris: std::collections::HashSet::new(),
             bake_worker_state: None,
             bake_receiver: None,
             bake_selected_texture_sets: Vec::new(),
@@ -2269,6 +2273,15 @@ impl eframe::App for PaintcraftApp {
                             let pres_op = self.brush_engine.settings.pressure_opacity;
                             if ui.selectable_label(pres_op, "Pres.Flow").on_hover_text("Pen Tablet Pressure scales brush opacity and flow").clicked() {
                                 self.brush_engine.settings.pressure_opacity = !pres_op;
+                            }
+
+                            // Follow Path Brush Dynamics
+                            let follow = self.brush_engine.settings.follow_path;
+                            if ui.selectable_label(follow, "Follow Path").on_hover_text("Rotate brush stamp along stroke movement tangent vector (for stitches, seams, tracks)").clicked() {
+                                self.brush_engine.settings.follow_path = !follow;
+                            }
+                            if self.brush_engine.settings.follow_path {
+                                ui.add(egui::Slider::new(&mut self.brush_engine.settings.follow_path_offset, -std::f32::consts::PI..=std::f32::consts::PI).text("Offset"));
                             }
 
                             if self.brush_engine.settings.mode == ToolMode::Smudge {
@@ -6351,6 +6364,7 @@ impl PaintcraftApp {
                         self.stroke_start_layer = Some(layer.clone_stroke_snapshot());
                         self.is_stroke_active = true;
                     }
+                    self.polygon_fill_drag_tris.clear();
                 }
 
                 if let Some(raw_mouse_pos) = input.pointer.hover_pos() {
@@ -6421,86 +6435,92 @@ impl PaintcraftApp {
                                 crate::brush::PolygonFillMode::UvIsland => self.project.mesh.get_connected_uv_island(hit.triangle_idx),
                                 crate::brush::PolygonFillMode::MeshElement => self.project.mesh.get_connected_mesh_element(hit.triangle_idx),
                             };
-                            let tri_uvs: Vec<(glam::Vec2, glam::Vec2, glam::Vec2)> = tris.iter().map(|&t| {
-                                let i0 = self.project.mesh.indices[t * 3] as usize;
-                                let i1 = self.project.mesh.indices[t * 3 + 1] as usize;
-                                let i2 = self.project.mesh.indices[t * 3 + 2] as usize;
-                                (
-                                    self.project.mesh.vertices[i0].uv,
-                                    self.project.mesh.vertices[i1].uv,
-                                    self.project.mesh.vertices[i2].uv,
-                                )
-                            }).collect();
+                            let new_tris: Vec<usize> = tris.into_iter().filter(|t| !self.polygon_fill_drag_tris.contains(t)).collect();
+                            if !new_tris.is_empty() {
+                                for &t in &new_tris {
+                                    self.polygon_fill_drag_tris.insert(t);
+                                }
+                                let tri_uvs: Vec<(glam::Vec2, glam::Vec2, glam::Vec2)> = new_tris.iter().map(|&t| {
+                                    let i0 = self.project.mesh.indices[t * 3] as usize;
+                                    let i1 = self.project.mesh.indices[t * 3 + 1] as usize;
+                                    let i2 = self.project.mesh.indices[t * 3 + 2] as usize;
+                                    (
+                                        self.project.mesh.vertices[i0].uv,
+                                        self.project.mesh.vertices[i1].uv,
+                                        self.project.mesh.vertices[i2].uv,
+                                    )
+                                }).collect();
 
-                            let act_idx = self.project.active_layer_idx;
-                            if act_idx < self.project.layers.len() {
-                                let layer = &mut self.project.layers[act_idx];
+                                let act_idx = self.project.active_layer_idx;
+                                if act_idx < self.project.layers.len() {
+                                    let layer = &mut self.project.layers[act_idx];
 
-                                if self.brush_engine.settings.target == PaintTarget::Mask {
-                                    if layer.has_mask {
-                                        let val = self.brush_engine.settings.polygon_fill_value;
-                                        let w = layer.mask_buf.width;
-                                        let h = layer.mask_buf.height;
-                                        for &(uv0, uv1, uv2) in &tri_uvs {
-                                            crate::mesh::Mesh::rasterize_triangle_uv(w, h, uv0, uv1, uv2, |px, py| {
-                                                layer.mask_buf.set_pixel(px, py, val);
-                                            });
+                                    if self.brush_engine.settings.target == PaintTarget::Mask {
+                                        if layer.has_mask {
+                                            let val = self.brush_engine.settings.polygon_fill_value;
+                                            let w = layer.mask_buf.width;
+                                            let h = layer.mask_buf.height;
+                                            for &(uv0, uv1, uv2) in &tri_uvs {
+                                                crate::mesh::Mesh::rasterize_triangle_uv(w, h, uv0, uv1, uv2, |px, py| {
+                                                    layer.mask_buf.set_pixel(px, py, val);
+                                                });
+                                            }
+                                            layer.mark_dirty_full();
+                                            self.project.rebuild_composite();
+                                            self.update_uv_texture(ctx);
+                                            if let Some(wgpu) = &mut self.wgpu_viewport {
+                                                wgpu.sync_textures(&mut self.project);
+                                            }
+                                            ctx.request_repaint();
+                                            self.status_message = format!("Polygon Fill ({}) filled {} triangles on mask", mode.name(), new_tris.len());
+                                        } else {
+                                            self.status_message = "Active layer does not have a mask. Add a mask to use Polygon Fill on mask.".to_string();
                                         }
-                                        layer.mark_dirty_full();
-                                        self.project.rebuild_composite();
-                                        self.update_uv_texture(ctx);
-                                        if let Some(wgpu) = &mut self.wgpu_viewport {
-                                            wgpu.sync_textures(&mut self.project);
-                                        }
-                                        ctx.request_repaint();
-                                        self.status_message = format!("Polygon Fill ({}) filled {} triangles on mask", mode.name(), tris.len());
                                     } else {
-                                        self.status_message = "Active layer does not have a mask. Add a mask to use Polygon Fill on mask.".to_string();
-                                    }
-                                } else {
-                                    // Target: Material
-                                    if layer.layer_type == LayerType::Paint {
-                                        let col = self.brush_engine.settings.paint_color;
-                                        let rough = self.brush_engine.settings.paint_roughness;
-                                        let metal = self.brush_engine.settings.paint_metallic;
-                                        let height = self.brush_engine.settings.paint_height;
-                                        let emis = self.brush_engine.settings.paint_emissive;
-                                        let opac = self.brush_engine.settings.paint_opacity;
-                                        let do_col = layer.channel_flags.base_color;
-                                        let do_rough = layer.channel_flags.roughness;
-                                        let do_metal = layer.channel_flags.metallic;
-                                        let do_h = layer.channel_flags.height;
-                                        let do_emis = layer.channel_flags.emission;
-                                        let do_opac = layer.channel_flags.opacity;
-                                        let w = layer.base_color_buf.width;
-                                        let h = layer.base_color_buf.height;
-                                        for &(uv0, uv1, uv2) in &tri_uvs {
-                                            crate::mesh::Mesh::rasterize_triangle_uv(w, h, uv0, uv1, uv2, |px, py| {
-                                                if do_col {
-                                                    layer.base_color_buf.set_pixel(px, py, col);
-                                                } else {
-                                                    let mut cur = layer.base_color_buf.get_pixel(px, py);
-                                                    cur.w = 1.0;
-                                                    layer.base_color_buf.set_pixel(px, py, cur);
-                                                }
-                                                if do_rough { layer.roughness_buf.set_pixel(px, py, rough); }
-                                                if do_metal { layer.metallic_buf.set_pixel(px, py, metal); }
-                                                if do_h { layer.height_buf.set_pixel(px, py, height); }
-                                                if do_emis { layer.emissive_buf.set_pixel(px, py, emis); }
-                                                if do_opac { layer.opacity_buf.set_pixel(px, py, opac); }
-                                            });
+                                        // Target: Material
+                                        if layer.layer_type == LayerType::Paint {
+                                            let col = self.brush_engine.settings.paint_color;
+                                            let rough = self.brush_engine.settings.paint_roughness;
+                                            let metal = self.brush_engine.settings.paint_metallic;
+                                            let height = self.brush_engine.settings.paint_height;
+                                            let emis = self.brush_engine.settings.paint_emissive;
+                                            let opac = self.brush_engine.settings.paint_opacity;
+                                            let do_col = layer.channel_flags.base_color;
+                                            let do_rough = layer.channel_flags.roughness;
+                                            let do_metal = layer.channel_flags.metallic;
+                                            let do_h = layer.channel_flags.height;
+                                            let do_emis = layer.channel_flags.emission;
+                                            let do_opac = layer.channel_flags.opacity;
+                                            let w = layer.base_color_buf.width;
+                                            let h = layer.base_color_buf.height;
+                                            for &(uv0, uv1, uv2) in &tri_uvs {
+                                                crate::mesh::Mesh::rasterize_triangle_uv(w, h, uv0, uv1, uv2, |px, py| {
+                                                    if do_col {
+                                                        layer.base_color_buf.set_pixel(px, py, col);
+                                                    } else {
+                                                        let mut cur = layer.base_color_buf.get_pixel(px, py);
+                                                        cur.w = 1.0;
+                                                        layer.base_color_buf.set_pixel(px, py, cur);
+                                                    }
+                                                    if do_rough { layer.roughness_buf.set_pixel(px, py, rough); }
+                                                    if do_metal { layer.metallic_buf.set_pixel(px, py, metal); }
+                                                    if do_h { layer.height_buf.set_pixel(px, py, height); }
+                                                    if do_emis { layer.emissive_buf.set_pixel(px, py, emis); }
+                                                    if do_opac { layer.opacity_buf.set_pixel(px, py, opac); }
+                                                });
+                                            }
+                                            layer.update_normal_from_height(1.0);
+                                            layer.mark_dirty_full();
+                                            self.project.rebuild_composite();
+                                            self.update_uv_texture(ctx);
+                                            if let Some(wgpu) = &mut self.wgpu_viewport {
+                                                wgpu.sync_textures(&mut self.project);
+                                            }
+                                            ctx.request_repaint();
+                                            self.status_message = format!("Polygon Fill ({}) filled {} triangles with material", mode.name(), new_tris.len());
+                                        } else {
+                                            self.status_message = "Cannot fill material on Fill layer. Switch target to Mask or add a Paint layer.".to_string();
                                         }
-                                        layer.update_normal_from_height(1.0);
-                                        layer.mark_dirty_full();
-                                        self.project.rebuild_composite();
-                                        self.update_uv_texture(ctx);
-                                        if let Some(wgpu) = &mut self.wgpu_viewport {
-                                            wgpu.sync_textures(&mut self.project);
-                                        }
-                                        ctx.request_repaint();
-                                        self.status_message = format!("Polygon Fill ({}) filled {} triangles with material", mode.name(), tris.len());
-                                    } else {
-                                        self.status_message = "Cannot fill material on Fill layer. Switch target to Mask or add a Paint layer.".to_string();
                                     }
                                 }
                             }
@@ -6600,8 +6620,9 @@ impl PaintcraftApp {
                     }
                     }
                 }
-            } else if response.drag_stopped() {
+            } else if response.drag_stopped() || (!input.pointer.any_down() && self.is_stroke_active) {
                 self.brush_engine.end_stroke();
+                self.polygon_fill_drag_tris.clear();
                 if self.wgpu_viewport.is_none() {
                     self.project.rebuild_composite();
                 }
@@ -6609,11 +6630,16 @@ impl PaintcraftApp {
                     if let Some(prev) = self.stroke_start_layer.take() {
                         if let Some(next) = self.project.active_layer() {
                             let idx = self.project.active_layer_idx;
-                            self.history.push("Paint Stroke", HistoryAction::Stroke {
+                            let desc = if self.brush_engine.settings.mode == ToolMode::FillBucket {
+                                format!("Polygon Fill ({})", self.brush_engine.settings.polygon_fill_mode.name())
+                            } else {
+                                "Paint Stroke".to_string()
+                            };
+                            self.history.push(&desc.clone(), HistoryAction::Stroke {
                                 layer_idx: idx,
                                 prev_layer: prev,
                                 next_layer: next.clone_stroke_snapshot(),
-                                description: "Paint Stroke".to_string(),
+                                description: desc,
                             });
                         }
                     }
@@ -6733,6 +6759,56 @@ impl PaintcraftApp {
             );
         }
 
+        // --- 3D POLYGON FILL HOVER PREVIEW HIGHLIGHT ---
+        if self.brush_engine.settings.mode == ToolMode::FillBucket {
+            if let Some(tri_idx) = self.last_hovered_tri {
+                let mode = self.brush_engine.settings.polygon_fill_mode;
+                let preview_tris = match mode {
+                    crate::brush::PolygonFillMode::Triangle => vec![tri_idx],
+                    crate::brush::PolygonFillMode::Polygon => self.project.mesh.get_polygon_quad(tri_idx),
+                    crate::brush::PolygonFillMode::UvIsland => self.project.mesh.get_connected_uv_island(tri_idx),
+                    crate::brush::PolygonFillMode::MeshElement => self.project.mesh.get_connected_mesh_element(tri_idx),
+                };
+
+                let fill_col = egui::Color32::from_rgba_unmultiplied(243, 94, 24, 75);
+                let edge_col = egui::Color32::from_rgba_unmultiplied(243, 140, 40, 230);
+                let cam_pos = self.camera.eye_position();
+
+                for &t in &preview_tris {
+                    if t * 3 + 2 >= self.project.mesh.indices.len() { continue; }
+                    let i0 = self.project.mesh.indices[t * 3] as usize;
+                    let i1 = self.project.mesh.indices[t * 3 + 1] as usize;
+                    let i2 = self.project.mesh.indices[t * 3 + 2] as usize;
+                    if i0 >= self.project.mesh.vertices.len() || i1 >= self.project.mesh.vertices.len() || i2 >= self.project.mesh.vertices.len() { continue; }
+                    let p0_3d = self.project.mesh.vertices[i0].position;
+                    let p1_3d = self.project.mesh.vertices[i1].position;
+                    let p2_3d = self.project.mesh.vertices[i2].position;
+
+                    // Backface cull preview against camera
+                    let fnorm = (p1_3d - p0_3d).cross(p2_3d - p0_3d);
+                    let view_vec = cam_pos - (p0_3d + p1_3d + p2_3d) * (1.0 / 3.0);
+                    if fnorm.dot(view_vec) <= 0.0 { continue; }
+
+                    let sp0 = self.camera.world_to_screen(p0_3d, vp_w, vp_h);
+                    let sp1 = self.camera.world_to_screen(p1_3d, vp_w, vp_h);
+                    let sp2 = self.camera.world_to_screen(p2_3d, vp_w, vp_h);
+
+                    if let (Some(s0), Some(s1), Some(s2)) = (sp0, sp1, sp2) {
+                        let pts = vec![
+                            rect.min + egui::vec2(s0.x, s0.y),
+                            rect.min + egui::vec2(s1.x, s1.y),
+                            rect.min + egui::vec2(s2.x, s2.y),
+                        ];
+                        ui.painter().add(egui::Shape::convex_polygon(
+                            pts,
+                            fill_col,
+                            egui::Stroke::new(1.2_f32, edge_col),
+                        ));
+                    }
+                }
+            }
+        }
+
         // --- INTERACTIVE BRUSH CURSOR, LAZY LEASH & 3D SYMMETRY GHOST CURSORS ---
         if response.hovered() && !input.modifiers.alt {
             ctx.request_repaint();
@@ -6750,11 +6826,19 @@ impl PaintcraftApp {
                 let hit_opt = self.project.mesh.raycast(&ray);
                 if let Some(hit) = &hit_opt {
                     self.last_hovered_hit_3d = Some((hit.point, hit.normal, hit.uv));
+                    self.last_hovered_tri = Some(hit.triangle_idx);
                 } else {
                     self.last_hovered_hit_3d = None;
+                    if self.last_hovered_uv_2d.is_none() {
+                        self.last_hovered_tri = None;
+                    }
                 }
 
-                if self.brush_engine.settings.lazy_mouse_enabled {
+                if self.brush_engine.settings.mode == ToolMode::FillBucket {
+                    // Precision cursor dot and ring for Polygon Fill
+                    ui.painter().circle_filled(mouse_pos, 3.0, egui::Color32::from_rgb(243, 94, 24));
+                    ui.painter().circle_stroke(mouse_pos, 6.0, egui::Stroke::new(1.2_f32, egui::Color32::WHITE));
+                } else if self.brush_engine.settings.lazy_mouse_enabled {
                     if let Some(l_pos) = self.brush_engine.lazy_screen_pos {
                         let stabilized_pos = egui::pos2(l_pos[0], l_pos[1]);
                         // Tether line from stabilized point to mouse
@@ -6816,6 +6900,9 @@ impl PaintcraftApp {
             }
         } else {
             self.last_hovered_hit_3d = None;
+            if self.last_hovered_uv_2d.is_none() {
+                self.last_hovered_tri = None;
+            }
         }
 
         // Synchronized 2D-to-3D cross-viewport cursor indicator
@@ -7009,6 +7096,7 @@ impl PaintcraftApp {
                         self.stroke_start_layer = Some(layer.clone_stroke_snapshot());
                         self.is_stroke_active = true;
                     }
+                    self.polygon_fill_drag_tris.clear();
                 }
 
                 if let Some(mouse_pos) = ui.input(|i| i.pointer.hover_pos()) {
@@ -7039,85 +7127,91 @@ impl PaintcraftApp {
                                     crate::brush::PolygonFillMode::UvIsland => self.project.mesh.get_connected_uv_island(tri_idx),
                                     crate::brush::PolygonFillMode::MeshElement => self.project.mesh.get_connected_mesh_element(tri_idx),
                                 };
-                                let tri_uvs: Vec<(glam::Vec2, glam::Vec2, glam::Vec2)> = tris.iter().map(|&t| {
-                                    let i0 = self.project.mesh.indices[t * 3] as usize;
-                                    let i1 = self.project.mesh.indices[t * 3 + 1] as usize;
-                                    let i2 = self.project.mesh.indices[t * 3 + 2] as usize;
-                                    (
-                                        self.project.mesh.vertices[i0].uv,
-                                        self.project.mesh.vertices[i1].uv,
-                                        self.project.mesh.vertices[i2].uv,
-                                    )
-                                }).collect();
+                                let new_tris: Vec<usize> = tris.into_iter().filter(|t| !self.polygon_fill_drag_tris.contains(t)).collect();
+                                if !new_tris.is_empty() {
+                                    for &t in &new_tris {
+                                        self.polygon_fill_drag_tris.insert(t);
+                                    }
+                                    let tri_uvs: Vec<(glam::Vec2, glam::Vec2, glam::Vec2)> = new_tris.iter().map(|&t| {
+                                        let i0 = self.project.mesh.indices[t * 3] as usize;
+                                        let i1 = self.project.mesh.indices[t * 3 + 1] as usize;
+                                        let i2 = self.project.mesh.indices[t * 3 + 2] as usize;
+                                        (
+                                            self.project.mesh.vertices[i0].uv,
+                                            self.project.mesh.vertices[i1].uv,
+                                            self.project.mesh.vertices[i2].uv,
+                                        )
+                                    }).collect();
 
-                                let act_idx = self.project.active_layer_idx;
-                                if act_idx < self.project.layers.len() {
-                                    let layer = &mut self.project.layers[act_idx];
-                                    if self.brush_engine.settings.target == PaintTarget::Mask {
-                                        if layer.has_mask {
-                                            let val = self.brush_engine.settings.polygon_fill_value;
-                                            let w = layer.mask_buf.width;
-                                            let h = layer.mask_buf.height;
-                                            for &(uv0, uv1, uv2) in &tri_uvs {
-                                                crate::mesh::Mesh::rasterize_triangle_uv(w, h, uv0, uv1, uv2, |px, py| {
-                                                    layer.mask_buf.set_pixel(px, py, val);
-                                                });
+                                    let act_idx = self.project.active_layer_idx;
+                                    if act_idx < self.project.layers.len() {
+                                        let layer = &mut self.project.layers[act_idx];
+                                        if self.brush_engine.settings.target == PaintTarget::Mask {
+                                            if layer.has_mask {
+                                                let val = self.brush_engine.settings.polygon_fill_value;
+                                                let w = layer.mask_buf.width;
+                                                let h = layer.mask_buf.height;
+                                                for &(uv0, uv1, uv2) in &tri_uvs {
+                                                    crate::mesh::Mesh::rasterize_triangle_uv(w, h, uv0, uv1, uv2, |px, py| {
+                                                        layer.mask_buf.set_pixel(px, py, val);
+                                                    });
+                                                }
+                                                layer.mark_dirty_full();
+                                                self.project.rebuild_composite();
+                                                self.update_uv_texture(ctx);
+                                                if let Some(wgpu) = &mut self.wgpu_viewport {
+                                                    wgpu.sync_textures(&mut self.project);
+                                                }
+                                                ctx.request_repaint();
+                                                self.status_message = format!("2D Polygon Fill ({}) filled {} triangles on mask", mode.name(), new_tris.len());
+                                            } else {
+                                                self.status_message = "Active layer does not have a mask. Add a mask to use Polygon Fill on mask.".to_string();
                                             }
-                                            layer.mark_dirty_full();
-                                            self.project.rebuild_composite();
-                                            self.update_uv_texture(ctx);
-                                            if let Some(wgpu) = &mut self.wgpu_viewport {
-                                                wgpu.sync_textures(&mut self.project);
-                                            }
-                                            ctx.request_repaint();
-                                            self.status_message = format!("2D Polygon Fill ({}) filled {} triangles on mask", mode.name(), tris.len());
                                         } else {
-                                            self.status_message = "Active layer does not have a mask. Add a mask to use Polygon Fill on mask.".to_string();
-                                        }
-                                    } else {
-                                        // Target: Material
-                                        if layer.layer_type == LayerType::Paint {
-                                            let col = self.brush_engine.settings.paint_color;
-                                            let rough = self.brush_engine.settings.paint_roughness;
-                                            let metal = self.brush_engine.settings.paint_metallic;
-                                            let height = self.brush_engine.settings.paint_height;
-                                            let emis = self.brush_engine.settings.paint_emissive;
-                                            let opac = self.brush_engine.settings.paint_opacity;
-                                            let do_col = layer.channel_flags.base_color;
-                                            let do_rough = layer.channel_flags.roughness;
-                                            let do_metal = layer.channel_flags.metallic;
-                                            let do_h = layer.channel_flags.height;
-                                            let do_emis = layer.channel_flags.emission;
-                                            let do_opac = layer.channel_flags.opacity;
-                                            let w = layer.base_color_buf.width;
-                                            let h = layer.base_color_buf.height;
-                                            for &(uv0, uv1, uv2) in &tri_uvs {
-                                                crate::mesh::Mesh::rasterize_triangle_uv(w, h, uv0, uv1, uv2, |px, py| {
-                                                    if do_col {
-                                                        layer.base_color_buf.set_pixel(px, py, col);
-                                                    } else {
-                                                        let mut cur = layer.base_color_buf.get_pixel(px, py);
-                                                        cur.w = 1.0;
-                                                        layer.base_color_buf.set_pixel(px, py, cur);
-                                                    }
-                                                    if do_rough { layer.roughness_buf.set_pixel(px, py, rough); }
-                                                    if do_metal { layer.metallic_buf.set_pixel(px, py, metal); }
-                                                    if do_h { layer.height_buf.set_pixel(px, py, height); }
-                                                    if do_emis { layer.emissive_buf.set_pixel(px, py, emis); }
-                                                    if do_opac { layer.opacity_buf.set_pixel(px, py, opac); }
-                                                });
+                                            // Target: Material
+                                            if layer.layer_type == LayerType::Paint {
+                                                let col = self.brush_engine.settings.paint_color;
+                                                let rough = self.brush_engine.settings.paint_roughness;
+                                                let metal = self.brush_engine.settings.paint_metallic;
+                                                let height = self.brush_engine.settings.paint_height;
+                                                let emis = self.brush_engine.settings.paint_emissive;
+                                                let opac = self.brush_engine.settings.paint_opacity;
+                                                let do_col = layer.channel_flags.base_color;
+                                                let do_rough = layer.channel_flags.roughness;
+                                                let do_metal = layer.channel_flags.metallic;
+                                                let do_h = layer.channel_flags.height;
+                                                let do_emis = layer.channel_flags.emission;
+                                                let do_opac = layer.channel_flags.opacity;
+                                                let w = layer.base_color_buf.width;
+                                                let h = layer.base_color_buf.height;
+                                                for &(uv0, uv1, uv2) in &tri_uvs {
+                                                    crate::mesh::Mesh::rasterize_triangle_uv(w, h, uv0, uv1, uv2, |px, py| {
+                                                        if do_col {
+                                                            layer.base_color_buf.set_pixel(px, py, col);
+                                                        } else {
+                                                            let mut cur = layer.base_color_buf.get_pixel(px, py);
+                                                            cur.w = 1.0;
+                                                            layer.base_color_buf.set_pixel(px, py, cur);
+                                                        }
+                                                        if do_rough { layer.roughness_buf.set_pixel(px, py, rough); }
+                                                        if do_metal { layer.metallic_buf.set_pixel(px, py, metal); }
+                                                        if do_h { layer.height_buf.set_pixel(px, py, height); }
+                                                        if do_emis { layer.emissive_buf.set_pixel(px, py, emis); }
+                                                        if do_opac { layer.opacity_buf.set_pixel(px, py, opac); }
+                                                    });
+                                                }
+                                                layer.update_normal_from_height(1.0);
+                                                layer.mark_dirty_full();
+                                                self.project.rebuild_composite();
+                                                self.update_uv_texture(ctx);
+                                                if let Some(wgpu) = &mut self.wgpu_viewport {
+                                                    wgpu.sync_textures(&mut self.project);
+                                                }
+                                                ctx.request_repaint();
+                                                self.status_message = format!("2D Polygon Fill ({}) filled {} triangles with material", mode.name(), new_tris.len());
+                                            } else {
+                                                self.status_message = "Cannot fill material on Fill layer. Switch target to Mask or add a Paint layer.".to_string();
                                             }
-                                            layer.update_normal_from_height(1.0);
-                                            layer.mark_dirty_full();
-                                            self.project.rebuild_composite();
-                                            self.update_uv_texture(ctx);
-                                            if let Some(wgpu) = &mut self.wgpu_viewport {
-                                                wgpu.sync_textures(&mut self.project);
-                                            }
-                                            ctx.request_repaint();
-                                            self.status_message = format!("2D Polygon Fill ({}) filled {} triangles with material", mode.name(), tris.len());
-                                        } else {
-                                            self.status_message = "Cannot fill material on Fill layer. Switch target to Mask or add a Paint layer.".to_string();
                                         }
                                     }
                                 }
@@ -7162,22 +7256,68 @@ impl PaintcraftApp {
                         }
                     }
                 }
-            } else if response.drag_stopped() {
+            } else if response.drag_stopped() || (!ui.input(|i| i.pointer.any_down()) && self.is_stroke_active) {
                 self.brush_engine.end_stroke();
+                self.polygon_fill_drag_tris.clear();
                 self.project.rebuild_composite();
                 if self.is_stroke_active {
                     if let Some(prev) = self.stroke_start_layer.take() {
                         if let Some(next) = self.project.active_layer() {
                             let idx = self.project.active_layer_idx;
-                            self.history.push("2D UV Paint Stroke", HistoryAction::Stroke {
+                            let desc = if self.brush_engine.settings.mode == ToolMode::FillBucket {
+                                format!("2D Polygon Fill ({})", self.brush_engine.settings.polygon_fill_mode.name())
+                            } else {
+                                "2D UV Paint Stroke".to_string()
+                            };
+                            self.history.push(&desc.clone(), HistoryAction::Stroke {
                                 layer_idx: idx,
                                 prev_layer: prev,
                                 next_layer: next.clone_stroke_snapshot(),
-                                description: "2D UV Paint Stroke".to_string(),
+                                description: desc,
                             });
                         }
                     }
                     self.is_stroke_active = false;
+                }
+            }
+
+            // --- 2D POLYGON FILL HOVER PREVIEW HIGHLIGHT ---
+            if self.brush_engine.settings.mode == ToolMode::FillBucket {
+                if let Some(tri_idx) = self.last_hovered_tri {
+                    let mode = self.brush_engine.settings.polygon_fill_mode;
+                    let preview_tris = match mode {
+                        crate::brush::PolygonFillMode::Triangle => vec![tri_idx],
+                        crate::brush::PolygonFillMode::Polygon => self.project.mesh.get_polygon_quad(tri_idx),
+                        crate::brush::PolygonFillMode::UvIsland => self.project.mesh.get_connected_uv_island(tri_idx),
+                        crate::brush::PolygonFillMode::MeshElement => self.project.mesh.get_connected_mesh_element(tri_idx),
+                    };
+
+                    let fill_col = egui::Color32::from_rgba_unmultiplied(243, 94, 24, 75);
+                    let edge_col = egui::Color32::from_rgba_unmultiplied(243, 140, 40, 230);
+                    let cw = canvas_rect.width();
+                    let ch = canvas_rect.height();
+                    let cmin = canvas_rect.min;
+
+                    for &t in &preview_tris {
+                        if t * 3 + 2 >= self.project.mesh.indices.len() { continue; }
+                        let i0 = self.project.mesh.indices[t * 3] as usize;
+                        let i1 = self.project.mesh.indices[t * 3 + 1] as usize;
+                        let i2 = self.project.mesh.indices[t * 3 + 2] as usize;
+                        if i0 >= self.project.mesh.vertices.len() || i1 >= self.project.mesh.vertices.len() || i2 >= self.project.mesh.vertices.len() { continue; }
+                        let uv0 = self.project.mesh.vertices[i0].uv;
+                        let uv1 = self.project.mesh.vertices[i1].uv;
+                        let uv2 = self.project.mesh.vertices[i2].uv;
+
+                        let p0 = cmin + egui::vec2(uv0.x * cw, uv0.y * ch);
+                        let p1 = cmin + egui::vec2(uv1.x * cw, uv1.y * ch);
+                        let p2 = cmin + egui::vec2(uv2.x * cw, uv2.y * ch);
+
+                        ui.painter().add(egui::Shape::convex_polygon(
+                            vec![p0, p1, p2],
+                            fill_col,
+                            egui::Stroke::new(1.2_f32, edge_col),
+                        ));
+                    }
                 }
             }
 
@@ -7188,39 +7328,54 @@ impl PaintcraftApp {
                     let u = ((mouse_pos.x - canvas_rect.min.x) / canvas_rect.width()).clamp(0.0, 1.0);
                     let v = ((mouse_pos.y - canvas_rect.min.y) / canvas_rect.height()).clamp(0.0, 1.0);
                     self.last_hovered_uv_2d = Some(glam::Vec2::new(u, v));
+                    let uv_point = glam::Vec2::new(u, v);
+                    if let Some(tri_idx) = self.project.mesh.find_triangle_at_uv(uv_point) {
+                        self.last_hovered_tri = Some(tri_idx);
+                    } else if self.last_hovered_hit_3d.is_none() {
+                        self.last_hovered_tri = None;
+                    }
 
-                    let screen_rad = (self.brush_engine.settings.radius / self.project.texture_width as f32 * canvas_rect.width()).max(2.0);
+                    if self.brush_engine.settings.mode == ToolMode::FillBucket {
+                        // Precision cursor dot and ring for Polygon Fill
+                        ui.painter().circle_filled(mouse_pos, 3.0, egui::Color32::from_rgb(243, 94, 24));
+                        ui.painter().circle_stroke(mouse_pos, 6.0, egui::Stroke::new(1.2_f32, egui::Color32::WHITE));
+                    } else {
+                        let screen_rad = (self.brush_engine.settings.radius / self.project.texture_width as f32 * canvas_rect.width()).max(2.0);
 
-                    // Primary brush ring
-                    ui.painter().circle_stroke(
-                        mouse_pos,
-                        screen_rad,
-                        egui::Stroke::new(1.2_f32, egui::Color32::from_rgba_unmultiplied(255, 255, 255, 220)),
-                    );
-                    ui.painter().circle_filled(
-                        mouse_pos,
-                        1.5,
-                        egui::Color32::from_rgba_unmultiplied(255, 255, 255, 240),
-                    );
+                        // Primary brush ring
+                        ui.painter().circle_stroke(
+                            mouse_pos,
+                            screen_rad,
+                            egui::Stroke::new(1.2_f32, egui::Color32::from_rgba_unmultiplied(255, 255, 255, 220)),
+                        );
+                        ui.painter().circle_filled(
+                            mouse_pos,
+                            1.5,
+                            egui::Color32::from_rgba_unmultiplied(255, 255, 255, 240),
+                        );
 
-                    // Mirrored symmetry ghost cursors in 2D
-                    if self.brush_engine.settings.symmetry_x || self.brush_engine.settings.symmetry_y {
-                        let sym_stroke = egui::Stroke::new(1.2_f32, egui::Color32::from_rgba_unmultiplied(60, 180, 255, 220));
+                        // Mirrored symmetry ghost cursors in 2D
+                        if self.brush_engine.settings.symmetry_x || self.brush_engine.settings.symmetry_y {
+                            let sym_stroke = egui::Stroke::new(1.2_f32, egui::Color32::from_rgba_unmultiplied(60, 180, 255, 220));
 
-                        if self.brush_engine.settings.symmetry_x {
-                            let sym_pos = canvas_rect.min + egui::vec2((1.0 - u) * canvas_rect.width(), v * canvas_rect.height());
-                            ui.painter().circle_stroke(sym_pos, screen_rad, sym_stroke);
-                            ui.painter().circle_filled(sym_pos, 1.5, egui::Color32::from_rgba_unmultiplied(60, 180, 255, 255));
-                        }
-                        if self.brush_engine.settings.symmetry_y {
-                            let sym_pos = canvas_rect.min + egui::vec2(u * canvas_rect.width(), (1.0 - v) * canvas_rect.height());
-                            ui.painter().circle_stroke(sym_pos, screen_rad, sym_stroke);
-                            ui.painter().circle_filled(sym_pos, 1.5, egui::Color32::from_rgba_unmultiplied(60, 180, 255, 255));
+                            if self.brush_engine.settings.symmetry_x {
+                                let sym_pos = canvas_rect.min + egui::vec2((1.0 - u) * canvas_rect.width(), v * canvas_rect.height());
+                                ui.painter().circle_stroke(sym_pos, screen_rad, sym_stroke);
+                                ui.painter().circle_filled(sym_pos, 1.5, egui::Color32::from_rgba_unmultiplied(60, 180, 255, 255));
+                            }
+                            if self.brush_engine.settings.symmetry_y {
+                                let sym_pos = canvas_rect.min + egui::vec2(u * canvas_rect.width(), (1.0 - v) * canvas_rect.height());
+                                ui.painter().circle_stroke(sym_pos, screen_rad, sym_stroke);
+                                ui.painter().circle_filled(sym_pos, 1.5, egui::Color32::from_rgba_unmultiplied(60, 180, 255, 255));
+                            }
                         }
                     }
                 }
             } else {
                 self.last_hovered_uv_2d = None;
+                if self.last_hovered_hit_3d.is_none() {
+                    self.last_hovered_tri = None;
+                }
             }
 
             // Synchronized 3D-to-2D cross-viewport cursor indicator
@@ -9330,6 +9485,124 @@ mod tests {
         assert_eq!(parametric_cfg.mode.name(), "Parametric Cage (Inflation)");
         assert_eq!(crate::baker::BakeCageMode::ExternalCage.name(), "External Cage Mesh");
         assert_eq!(crate::baker::BakeCageMode::None.name(), "None (Ray Distances)");
+    }
+
+    #[test]
+    fn test_polygon_fill_drag_tracking_and_consolidated_undo() {
+        let mut proj = Project::new_default(32, 32);
+        let mut history = HistoryManager::new();
+        let mut drag_tris: std::collections::HashSet<usize> = std::collections::HashSet::new();
+
+        let initial_snapshot = proj.layers[0].clone_stroke_snapshot();
+
+        // Simulate dragging across triangles 0 and 1 (a quad face)
+        let tri_candidates = vec![0, 1];
+        let new_tris: Vec<usize> = tri_candidates.into_iter().filter(|t| !drag_tris.contains(t)).collect();
+        assert_eq!(new_tris.len(), 2);
+        for &t in &new_tris {
+            drag_tris.insert(t);
+        }
+
+        // Subsequent drag frame hovering same triangles should yield 0 new triangles
+        let duplicate_check: Vec<usize> = vec![0, 1].into_iter().filter(|t| !drag_tris.contains(t)).collect();
+        assert_eq!(duplicate_check.len(), 0, "Already filled triangles should not be re-rasterized during drag");
+
+        // Rasterize triangles 0 and 1
+        let fill_color = glam::Vec4::new(1.0, 0.5, 0.0, 1.0);
+        let layer = &mut proj.layers[0];
+        for &t in &new_tris {
+            let i0 = proj.mesh.indices[t * 3] as usize;
+            let i1 = proj.mesh.indices[t * 3 + 1] as usize;
+            let i2 = proj.mesh.indices[t * 3 + 2] as usize;
+            let uv0 = proj.mesh.vertices[i0].uv;
+            let uv1 = proj.mesh.vertices[i1].uv;
+            let uv2 = proj.mesh.vertices[i2].uv;
+            crate::mesh::Mesh::rasterize_triangle_uv(32, 32, uv0, uv1, uv2, |px, py| {
+                layer.base_color_buf.set_pixel(px, py, fill_color);
+            });
+        }
+        layer.mark_dirty_full();
+
+        // Check that at least some pixels were colored
+        let mut colored_pixels = 0;
+        for py in 0..32 {
+            for px in 0..32 {
+                if layer.base_color_buf.get_pixel(px, py).x > 0.9 {
+                    colored_pixels += 1;
+                }
+            }
+        }
+        assert!(colored_pixels > 0, "Rasterized triangles must fill pixels in the layer");
+
+        // Finish stroke: push single consolidated undo snapshot
+        let final_snapshot = proj.layers[0].clone_stroke_snapshot();
+        history.push("Polygon Fill (Polygon (Quad))", HistoryAction::Stroke {
+            layer_idx: 0,
+            prev_layer: initial_snapshot,
+            next_layer: final_snapshot,
+            description: "Polygon Fill (Polygon (Quad))".to_string(),
+        });
+        drag_tris.clear();
+        assert!(drag_tris.is_empty(), "Drag triangles tracking must be cleared on stroke release");
+
+        assert_eq!(history.undo_stack.len(), 1);
+        assert!(history.can_undo());
+
+        // Test Undo
+        let desc = history.undo(&mut proj).expect("Undo must return an action description");
+        assert_eq!(desc, "Polygon Fill (Polygon (Quad))");
+
+        // Verify layer reverted to initial state
+        let mut reverted_colored = 0;
+        for py in 0..32 {
+            for px in 0..32 {
+                if proj.layers[0].base_color_buf.get_pixel(px, py).x > 0.9 {
+                    reverted_colored += 1;
+                }
+            }
+        }
+        assert_eq!(reverted_colored, 0, "Undo must revert filled pixels back to blank layer");
+    }
+
+    #[test]
+    fn test_polygon_fill_modes_and_hover_preview() {
+        let cube = crate::mesh::Mesh::create_cube_mesh("HoverCube", 1.0);
+
+        // Test mode names
+        assert_eq!(crate::brush::PolygonFillMode::Triangle.name(), "Triangle");
+        assert_eq!(crate::brush::PolygonFillMode::Polygon.name(), "Polygon (Quad)");
+        assert_eq!(crate::brush::PolygonFillMode::UvIsland.name(), "UV Island");
+        assert_eq!(crate::brush::PolygonFillMode::MeshElement.name(), "Mesh Element");
+
+        // Triangle mode
+        let tri_preview = vec![0];
+        assert_eq!(tri_preview.len(), 1);
+
+        // Polygon (Quad) mode
+        let quad_preview = cube.get_polygon_quad(0);
+        assert_eq!(quad_preview.len(), 2);
+        assert!(quad_preview.contains(&0) && quad_preview.contains(&1));
+
+        // UV Island mode
+        let island_preview = cube.get_connected_uv_island(0);
+        assert!(!island_preview.is_empty());
+        assert!(island_preview.contains(&0));
+
+        // Mesh Element mode (contiguous 3D mesh)
+        let element_preview = cube.get_connected_mesh_element(0);
+        assert_eq!(element_preview.len(), 12, "A closed cube element consists of 12 triangles (6 quads)");
+    }
+
+    #[test]
+    fn test_follow_path_settings_and_offset() {
+        let mut settings = crate::brush::BrushSettings::default();
+        assert!(!settings.follow_path);
+        assert_eq!(settings.follow_path_offset, 0.0);
+
+        settings.follow_path = true;
+        settings.follow_path_offset = std::f32::consts::FRAC_PI_2;
+        assert!(settings.follow_path);
+        assert!((settings.follow_path_offset - std::f32::consts::FRAC_PI_2).abs() < 1e-5);
     }
 }
 
