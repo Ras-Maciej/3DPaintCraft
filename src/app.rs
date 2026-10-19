@@ -147,6 +147,7 @@ pub struct PaintcraftApp {
     // Texture handles for egui rendering
     pub viewport_texture: Option<TextureHandle>,
     pub uv_canvas_texture: Option<TextureHandle>,
+    pub uv_pixel_buffer: Vec<u8>,
 
     // UI state
     pub status_message: String,
@@ -254,6 +255,8 @@ pub struct PaintcraftApp {
     pub uv_2d_pan: egui::Vec2,
     pub uv_2d_zoom: f32,
     pub show_uv_wireframe: bool,
+    pub split_view_ratio: f32,
+    pub uv_view_mask_mode: bool,
 
     // Recent Projects
     pub recent_projects: Vec<String>,
@@ -458,6 +461,7 @@ impl PaintcraftApp {
             layout: ViewLayout::View3DOnly,
             viewport_texture: None,
             uv_canvas_texture: None,
+            uv_pixel_buffer: Vec::new(),
             status_message: "Ready. Select a tool or material to begin painting in 3D.".to_string(),
             export_preset: ExportPreset::UnrealEngine,
             export_dir: {
@@ -499,7 +503,7 @@ impl PaintcraftApp {
             new_proj_custom_path: String::new(),
             new_proj_resolution: 2048,
             new_proj_normal_format: 0,
-            new_proj_auto_bake: true,
+            new_proj_auto_bake: false,
             new_proj_bake_res: 1024,
             dragged_layer_idx: None,
             renaming_layer_idx: None,
@@ -557,6 +561,8 @@ impl PaintcraftApp {
             uv_2d_pan: egui::Vec2::ZERO,
             uv_2d_zoom: 1.0,
             show_uv_wireframe: false,
+            split_view_ratio: 0.5,
+            uv_view_mask_mode: false,
             recent_projects: Self::load_recent_projects(),
             zen_mode: false,
             continuous_60fps: true,
@@ -683,13 +689,27 @@ impl PaintcraftApp {
 
     /// Update 2D UV canvas texture in egui
     fn update_uv_texture(&mut self, ctx: &egui::Context) {
+        if self.layout == ViewLayout::View3DOnly {
+            return;
+        }
+
         let w = self.project.texture_width as usize;
         let h = self.project.texture_height as usize;
-        let mut pixels = vec![0u8; w * h * 4];
+        let total_bytes = w * h * 4;
+        if self.uv_pixel_buffer.len() != total_bytes {
+            self.uv_pixel_buffer.resize(total_bytes, 0);
+        }
+        let pixels = &mut self.uv_pixel_buffer;
 
         use rayon::prelude::*;
 
         let view_mode = self.view_mode;
+        let is_mask_mode = self.uv_view_mask_mode;
+        let active_mask_buf = if is_mask_mode {
+            self.project.active_layer().and_then(|l| if l.has_mask { Some(l.mask_buf.clone()) } else { None })
+        } else {
+            None
+        };
         let base_col = &self.project.composite_textures.base_color;
         let rough = &self.project.composite_textures.roughness;
         let metal = &self.project.composite_textures.metallic;
@@ -709,14 +729,21 @@ impl PaintcraftApp {
         pixels.par_chunks_exact_mut(w * 4).enumerate().for_each(|(y, row)| {
             for x in 0..w {
                 let idx = x * 4;
-                match view_mode {
-                    ViewportChannelMode::Material | ViewportChannelMode::BaseColor => {
-                        let col = base_col.get_pixel(x as u32, y as u32);
-                        row[idx] = (col.x.clamp(0.0, 1.0) * 255.0) as u8;
-                        row[idx + 1] = (col.y.clamp(0.0, 1.0) * 255.0) as u8;
-                        row[idx + 2] = (col.z.clamp(0.0, 1.0) * 255.0) as u8;
-                        row[idx + 3] = (col.w.clamp(0.0, 1.0) * 255.0) as u8;
-                    }
+                if let Some(mask) = &active_mask_buf {
+                    let m = (mask.get_pixel(x as u32, y as u32).clamp(0.0, 1.0) * 255.0) as u8;
+                    row[idx] = m;
+                    row[idx + 1] = m;
+                    row[idx + 2] = m;
+                    row[idx + 3] = 255;
+                } else {
+                    match view_mode {
+                        ViewportChannelMode::Material | ViewportChannelMode::BaseColor => {
+                            let col = base_col.get_pixel(x as u32, y as u32);
+                            row[idx] = (col.x.clamp(0.0, 1.0) * 255.0) as u8;
+                            row[idx + 1] = (col.y.clamp(0.0, 1.0) * 255.0) as u8;
+                            row[idx + 2] = (col.z.clamp(0.0, 1.0) * 255.0) as u8;
+                            row[idx + 3] = (col.w.clamp(0.0, 1.0) * 255.0) as u8;
+                        }
                     ViewportChannelMode::Roughness => {
                         let r = (rough.get_pixel(x as u32, y as u32).clamp(0.0, 1.0) * 255.0) as u8;
                         row[idx] = r; row[idx + 1] = r; row[idx + 2] = r; row[idx + 3] = 255;
@@ -803,10 +830,11 @@ impl PaintcraftApp {
                         row[idx] = a; row[idx + 1] = ang; row[idx + 2] = 0; row[idx + 3] = 255;
                     }
                 }
+                }
             }
         });
 
-        let color_image = ColorImage::from_rgba_unmultiplied([w, h], &pixels);
+        let color_image = ColorImage::from_rgba_unmultiplied([w, h], pixels);
         if let Some(tex) = &mut self.uv_canvas_texture {
             tex.set(color_image, TextureOptions::LINEAR);
         } else {
@@ -1850,10 +1878,31 @@ impl eframe::App for PaintcraftApp {
         // --- GLOBAL KEYBOARD SHORTCUTS ---
         let input = ctx.input(|i| i.clone());
 
-        // Performance Diagnostic HUD Toggle: F3
+        // Substance 3D Painter Standard Viewport Shortcuts (F1: Split, F2: 3D, F3: 2D)
+        if input.key_pressed(egui::Key::F1) {
+            self.layout = ViewLayout::SplitDualView;
+            self.status_message = "Viewport Layout: 3D | 2D Split View [F1]".to_string();
+        }
+        if input.key_pressed(egui::Key::F2) {
+            self.layout = ViewLayout::View3DOnly;
+            self.status_message = "Viewport Layout: 3D Viewport Only [F2]".to_string();
+        }
         if input.key_pressed(egui::Key::F3) {
+            self.layout = ViewLayout::View2DOnly;
+            self.status_message = "Viewport Layout: 2D UV Canvas Only [F3]".to_string();
+        }
+
+        // Performance Diagnostic HUD Toggle: F12
+        if input.key_pressed(egui::Key::F12) {
             self.perf_metrics.show_debug_hud = !self.perf_metrics.show_debug_hud;
-            self.status_message = format!("Performance Diagnostic HUD: {}", if self.perf_metrics.show_debug_hud { "ON" } else { "OFF" });
+            self.status_message = format!("Performance Diagnostic HUD: {} [F12]", if self.perf_metrics.show_debug_hud { "ON" } else { "OFF" });
+        }
+
+        // Wireframe Overlay Toggle: F4
+        if input.key_pressed(egui::Key::F4) {
+            self.renderer.show_wireframe = !self.renderer.show_wireframe;
+            self.show_uv_wireframe = self.renderer.show_wireframe;
+            self.status_message = format!("Wireframe Overlay: {}", if self.renderer.show_wireframe { "ON" } else { "OFF" });
         }
 
         // Progressive Path Tracer Viewport (Iray Mode): F10
@@ -2551,14 +2600,14 @@ impl eframe::App for PaintcraftApp {
                         ui.separator();
 
                         // 4. Viewport Layout Mode (3D | 3D|2D | 2D)
-                        if ui.selectable_label(self.layout == ViewLayout::View2DOnly, "2D").on_hover_text("2D UV Texture View").clicked() {
-                            self.layout = ViewLayout::View2DOnly;
+                        if ui.selectable_label(self.layout == ViewLayout::View3DOnly, "3D").on_hover_text("3D Viewport Only [F2]").clicked() {
+                            self.layout = ViewLayout::View3DOnly;
                         }
-                        if ui.selectable_label(self.layout == ViewLayout::SplitDualView, "3D|2D").on_hover_text("Split 3D & 2D Dual View").clicked() {
+                        if ui.selectable_label(self.layout == ViewLayout::SplitDualView, "3D|2D").on_hover_text("Split 3D & 2D Dual View [F1]").clicked() {
                             self.layout = ViewLayout::SplitDualView;
                         }
-                        if ui.selectable_label(self.layout == ViewLayout::View3DOnly, "3D").on_hover_text("3D Viewport Only").clicked() {
-                            self.layout = ViewLayout::View3DOnly;
+                        if ui.selectable_label(self.layout == ViewLayout::View2DOnly, "2D").on_hover_text("2D UV Texture Canvas Only [F3]").clicked() {
+                            self.layout = ViewLayout::View2DOnly;
                         }
 
                         ui.separator();
@@ -2589,6 +2638,23 @@ impl eframe::App for PaintcraftApp {
                         // 6. Camera reset quick button
                         if ui.small_button("Cam [F]").on_hover_text("Reset Camera (F)").clicked() {
                             self.camera.reset();
+                        }
+
+                        // 7. Wireframe overlay quick toggle button
+                        if ui.selectable_label(self.renderer.show_wireframe, "Wireframe [F4]")
+                            .on_hover_text("Toggle Wireframe Overlay (F4)")
+                            .clicked()
+                        {
+                            self.renderer.show_wireframe = !self.renderer.show_wireframe;
+                            self.show_uv_wireframe = self.renderer.show_wireframe;
+                        }
+
+                        // 8. Real-time shadows quick toggle button
+                        if ui.selectable_label(self.shader_settings.shadows_enabled, "Shadows")
+                            .on_hover_text("Toggle Real-Time Directional Sun Shadows")
+                            .clicked()
+                        {
+                            self.shader_settings.shadows_enabled = !self.shader_settings.shadows_enabled;
                         }
                     });
                 });
@@ -3616,6 +3682,30 @@ impl eframe::App for PaintcraftApp {
                                                 layer.add_mask_paint_effect(curv_ref);
                                                 prop_changed = true;
                                             }
+                                            egui::ComboBox::from_id_source("add_generator_quick_menu")
+                                                .selected_text("+ Add Generator...")
+                                                .show_ui(ui, |ui| {
+                                                    if ui.selectable_label(false, "Curvature Edge Wear").on_hover_text("Substance convex edge wear & paint chipping").clicked() {
+                                                        layer.add_mask_generator_curvature_wear(curv_ref, ao_ref, pos_ref, wn_ref);
+                                                        prop_changed = true;
+                                                    }
+                                                    if ui.selectable_label(false, "Cavity Dirt (AO)").on_hover_text("Substance concave crevice grime & sediment accumulation").clicked() {
+                                                        layer.add_mask_generator_cavity_dirt(curv_ref, ao_ref, pos_ref, wn_ref);
+                                                        prop_changed = true;
+                                                    }
+                                                    if ui.selectable_label(false, "Directional Dust (+Y)").on_hover_text("Sky-facing dust settling into upward concave pockets").clicked() {
+                                                        layer.add_mask_generator_directional_dust(curv_ref, ao_ref, pos_ref, wn_ref);
+                                                        prop_changed = true;
+                                                    }
+                                                    if ui.selectable_label(false, "Ground Mud & Splash").on_hover_text("Height-based ground mud accumulation with organic splatter").clicked() {
+                                                        layer.add_mask_generator_ground_dirt(curv_ref, ao_ref, pos_ref, wn_ref);
+                                                        prop_changed = true;
+                                                    }
+                                                    if ui.selectable_label(false, "Mask Editor (Compound)").on_hover_text("Compound mask editor fusing all baked mesh maps").clicked() {
+                                                        layer.add_mask_generator_mask_editor(curv_ref, ao_ref, pos_ref, wn_ref);
+                                                        prop_changed = true;
+                                                    }
+                                                });
                                             if ui.button("+ Color Select").on_hover_text("Isolate submesh or UV island using baked ID Map").clicked() {
                                                 layer.add_mask_color_selection_effect([1.0, 0.0, 0.0], 0.1, 0.05);
                                                 prop_changed = true;
@@ -3948,6 +4038,241 @@ impl eframe::App for PaintcraftApp {
                                                         if ui.checkbox(invert, "Invert Anchor").changed() {
                                                             prop_changed = true;
                                                         }
+                                                    }
+                                                    crate::layer::MaskEffectType::GeneratorCurvatureWear {
+                                                        ref mut wear_level,
+                                                        ref mut edge_width,
+                                                        ref mut edge_contrast,
+                                                        ref mut grunge_amount,
+                                                        ref mut grunge_scale,
+                                                        ref mut ao_inhibit,
+                                                        ref mut invert,
+                                                    } => {
+                                                        ui.label(egui::RichText::new("Substance Curvature Edge Wear").strong().color(Color32::from_rgb(220, 180, 80)));
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Wear Level:");
+                                                            if ui.add(egui::Slider::new(wear_level, 0.0..=1.0)).changed() { prop_changed = true; }
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Edge Width:");
+                                                            if ui.add(egui::Slider::new(edge_width, 0.1..=4.0)).changed() { prop_changed = true; }
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Edge Contrast:");
+                                                            if ui.add(egui::Slider::new(edge_contrast, 0.5..=5.0)).changed() { prop_changed = true; }
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Grunge Breakup:");
+                                                            if ui.add(egui::Slider::new(grunge_amount, 0.0..=1.0)).changed() { prop_changed = true; }
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Grunge Scale:");
+                                                            if ui.add(egui::Slider::new(grunge_scale, 1.0..=64.0).clamp_to_range(false)).changed() { prop_changed = true; }
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("AO Inhibit (Cavities):");
+                                                            if ui.add(egui::Slider::new(ao_inhibit, 0.0..=1.0)).changed() { prop_changed = true; }
+                                                        });
+                                                        if ui.checkbox(invert, "Invert Wear").changed() { prop_changed = true; }
+                                                    }
+                                                    crate::layer::MaskEffectType::GeneratorCavityDirt {
+                                                        ref mut dirt_level,
+                                                        ref mut dirt_contrast,
+                                                        ref mut dirt_reach,
+                                                        ref mut grunge_clumping,
+                                                        ref mut grunge_scale,
+                                                        ref mut invert,
+                                                    } => {
+                                                        ui.label(egui::RichText::new("Substance Cavity & Crevice Grime (AO)").strong().color(Color32::from_rgb(180, 140, 100)));
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Dirt Level:");
+                                                            if ui.add(egui::Slider::new(dirt_level, 0.0..=1.0)).changed() { prop_changed = true; }
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Dirt Contrast:");
+                                                            if ui.add(egui::Slider::new(dirt_contrast, 0.5..=5.0)).changed() { prop_changed = true; }
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Dirt Reach / Bleed:");
+                                                            if ui.add(egui::Slider::new(dirt_reach, 0.1..=4.0)).changed() { prop_changed = true; }
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Grunge Clumping:");
+                                                            if ui.add(egui::Slider::new(grunge_clumping, 0.0..=1.0)).changed() { prop_changed = true; }
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Grunge Scale:");
+                                                            if ui.add(egui::Slider::new(grunge_scale, 1.0..=64.0).clamp_to_range(false)).changed() { prop_changed = true; }
+                                                        });
+                                                        if ui.checkbox(invert, "Invert Cavity").changed() { prop_changed = true; }
+                                                    }
+                                                    crate::layer::MaskEffectType::GeneratorDirectionalDust {
+                                                        ref mut dust_direction,
+                                                        ref mut dust_level,
+                                                        ref mut angle_tolerance,
+                                                        ref mut cavity_trap,
+                                                        ref mut grunge_breakup,
+                                                        ref mut grunge_scale,
+                                                    } => {
+                                                        ui.label(egui::RichText::new("Substance Directional Dust (World Normal)").strong().color(Color32::from_rgb(200, 200, 180)));
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Direction:");
+                                                            if ui.selectable_label(dust_direction[1] > 0.5, "Up (+Y)").clicked() {
+                                                                *dust_direction = [0.0, 1.0, 0.0];
+                                                                prop_changed = true;
+                                                            }
+                                                            if ui.selectable_label(dust_direction[1] < -0.5, "Down (-Y)").clicked() {
+                                                                *dust_direction = [0.0, -1.0, 0.0];
+                                                                prop_changed = true;
+                                                            }
+                                                            if ui.selectable_label(dust_direction[2] > 0.5, "Forward (+Z)").clicked() {
+                                                                *dust_direction = [0.0, 0.0, 1.0];
+                                                                prop_changed = true;
+                                                            }
+                                                            if ui.selectable_label(dust_direction[0] > 0.5, "Right (+X)").clicked() {
+                                                                *dust_direction = [1.0, 0.0, 0.0];
+                                                                prop_changed = true;
+                                                            }
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Dust Level:");
+                                                            if ui.add(egui::Slider::new(dust_level, 0.0..=1.0)).changed() { prop_changed = true; }
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Angle Spread:");
+                                                            if ui.add(egui::Slider::new(angle_tolerance, 0.1..=2.0)).changed() { prop_changed = true; }
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Cavity Trap:");
+                                                            if ui.add(egui::Slider::new(cavity_trap, 0.0..=1.0)).changed() { prop_changed = true; }
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Grunge Breakup:");
+                                                            if ui.add(egui::Slider::new(grunge_breakup, 0.0..=1.0)).changed() { prop_changed = true; }
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Grunge Scale:");
+                                                            if ui.add(egui::Slider::new(grunge_scale, 1.0..=64.0).clamp_to_range(false)).changed() { prop_changed = true; }
+                                                        });
+                                                    }
+                                                    crate::layer::MaskEffectType::GeneratorGroundDirt {
+                                                        ref mut bottom_level,
+                                                        ref mut gradient_softness,
+                                                        ref mut splash_amount,
+                                                        ref mut splash_scale,
+                                                    } => {
+                                                        ui.label(egui::RichText::new("Substance Ground Mud & Splash (Position)").strong().color(Color32::from_rgb(170, 130, 90)));
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Bottom Height Level:");
+                                                            if ui.add(egui::Slider::new(bottom_level, 0.0..=1.0)).changed() { prop_changed = true; }
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Gradient Softness:");
+                                                            if ui.add(egui::Slider::new(gradient_softness, 0.01..=1.0)).changed() { prop_changed = true; }
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Splash Amount:");
+                                                            if ui.add(egui::Slider::new(splash_amount, 0.0..=1.0)).changed() { prop_changed = true; }
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Splash Scale:");
+                                                            if ui.add(egui::Slider::new(splash_scale, 1.0..=64.0).clamp_to_range(false)).changed() { prop_changed = true; }
+                                                        });
+                                                    }
+                                                    crate::layer::MaskEffectType::GeneratorMaskEditor {
+                                                        ref mut curv_weight,
+                                                        ref mut curv_width,
+                                                        ref mut curv_contrast,
+                                                        ref mut curv_invert,
+                                                        ref mut ao_weight,
+                                                        ref mut ao_contrast,
+                                                        ref mut world_normal_weight,
+                                                        ref mut world_normal_dir,
+                                                        ref mut pos_weight,
+                                                        ref mut pos_height,
+                                                        ref mut grunge_weight,
+                                                        ref mut grunge_scale,
+                                                        ref mut global_balance,
+                                                        ref mut global_contrast,
+                                                        ref mut invert,
+                                                    } => {
+                                                        ui.label(egui::RichText::new("Substance Painter Mask Editor (Compound)").strong().color(Color32::from_rgb(200, 160, 240)));
+                                                        ui.collapsing("Curvature Parameters", |ui| {
+                                                            ui.horizontal(|ui| {
+                                                                ui.label("Weight:");
+                                                                if ui.add(egui::Slider::new(curv_weight, 0.0..=1.0)).changed() { prop_changed = true; }
+                                                            });
+                                                            ui.horizontal(|ui| {
+                                                                ui.label("Edge Width:");
+                                                                if ui.add(egui::Slider::new(curv_width, 0.1..=4.0)).changed() { prop_changed = true; }
+                                                            });
+                                                            ui.horizontal(|ui| {
+                                                                ui.label("Contrast:");
+                                                                if ui.add(egui::Slider::new(curv_contrast, 0.5..=5.0)).changed() { prop_changed = true; }
+                                                            });
+                                                            if ui.checkbox(curv_invert, "Invert Curvature (Cavities)").changed() { prop_changed = true; }
+                                                        });
+                                                        ui.collapsing("Ambient Occlusion Parameters", |ui| {
+                                                            ui.horizontal(|ui| {
+                                                                ui.label("Weight:");
+                                                                if ui.add(egui::Slider::new(ao_weight, 0.0..=1.0)).changed() { prop_changed = true; }
+                                                            });
+                                                            ui.horizontal(|ui| {
+                                                                ui.label("Contrast:");
+                                                                if ui.add(egui::Slider::new(ao_contrast, 0.5..=5.0)).changed() { prop_changed = true; }
+                                                            });
+                                                        });
+                                                        ui.collapsing("World Normal Direction", |ui| {
+                                                            ui.horizontal(|ui| {
+                                                                ui.label("Weight:");
+                                                                if ui.add(egui::Slider::new(world_normal_weight, 0.0..=1.0)).changed() { prop_changed = true; }
+                                                            });
+                                                            ui.horizontal(|ui| {
+                                                                ui.label("Preset:");
+                                                                if ui.selectable_label(world_normal_dir[1] > 0.5, "Up (+Y)").clicked() {
+                                                                    *world_normal_dir = [0.0, 1.0, 0.0];
+                                                                    prop_changed = true;
+                                                                }
+                                                                if ui.selectable_label(world_normal_dir[1] < -0.5, "Down (-Y)").clicked() {
+                                                                    *world_normal_dir = [0.0, -1.0, 0.0];
+                                                                    prop_changed = true;
+                                                                }
+                                                                if ui.selectable_label(world_normal_dir[2] > 0.5, "Forward (+Z)").clicked() {
+                                                                    *world_normal_dir = [0.0, 0.0, 1.0];
+                                                                    prop_changed = true;
+                                                                }
+                                                            });
+                                                        });
+                                                        ui.collapsing("Position Height", |ui| {
+                                                            ui.horizontal(|ui| {
+                                                                ui.label("Weight:");
+                                                                if ui.add(egui::Slider::new(pos_weight, 0.0..=1.0)).changed() { prop_changed = true; }
+                                                            });
+                                                            ui.horizontal(|ui| {
+                                                                ui.label("Target Height:");
+                                                                if ui.add(egui::Slider::new(pos_height, 0.0..=1.0)).changed() { prop_changed = true; }
+                                                            });
+                                                        });
+                                                        ui.collapsing("Grunge Modulation", |ui| {
+                                                            ui.horizontal(|ui| {
+                                                                ui.label("Grunge Weight:");
+                                                                if ui.add(egui::Slider::new(grunge_weight, 0.0..=1.0)).changed() { prop_changed = true; }
+                                                            });
+                                                            ui.horizontal(|ui| {
+                                                                ui.label("Grunge Scale:");
+                                                                if ui.add(egui::Slider::new(grunge_scale, 1.0..=64.0).clamp_to_range(false)).changed() { prop_changed = true; }
+                                                            });
+                                                        });
+                                                        ui.separator();
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Global Balance:");
+                                                            if ui.add(egui::Slider::new(global_balance, 0.0..=1.0)).changed() { prop_changed = true; }
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Global Contrast:");
+                                                            if ui.add(egui::Slider::new(global_contrast, 0.1..=4.0)).changed() { prop_changed = true; }
+                                                        });
+                                                        if ui.checkbox(invert, "Global Invert").changed() { prop_changed = true; }
                                                     }
                                                 }
                                             });
@@ -4962,10 +5287,73 @@ impl eframe::App for PaintcraftApp {
                     self.render_2d_uv_viewport_ui(ui, available_size, ctx);
                 }
                 ViewLayout::SplitDualView => {
-                    ui.columns(2, |columns| {
-                        let col_size = Vec2::new(columns[0].available_width(), available_size.y);
-                        self.render_3d_viewport_ui(&mut columns[0], col_size, ctx);
-                        self.render_2d_uv_viewport_ui(&mut columns[1], col_size, ctx);
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
+                        let splitter_w = 6.0f32;
+                        let total_w = (available_size.x - splitter_w).max(200.0);
+                        let left_w = (total_w * self.split_view_ratio).clamp(120.0, (total_w - 120.0).max(120.0));
+                        let right_w = (total_w - left_w).max(120.0);
+
+                        // 1. Left Viewport (3D Viewport)
+                        let left_size = egui::vec2(left_w, available_size.y);
+                        ui.allocate_ui_with_layout(left_size, egui::Layout::top_down(egui::Align::Min), |left_ui| {
+                            self.render_3d_viewport_ui(left_ui, left_size, ctx);
+                        });
+
+                        // 2. Interactive Draggable Splitter Handle
+                        let (splitter_rect, splitter_response) = ui.allocate_exact_size(
+                            egui::vec2(splitter_w, available_size.y),
+                            egui::Sense::click_and_drag(),
+                        );
+                        let splitter_response = splitter_response.on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
+
+                        if splitter_response.dragged() {
+                            let delta_x = splitter_response.drag_delta().x;
+                            self.split_view_ratio = ((left_w + delta_x) / total_w).clamp(0.15, 0.85);
+                            ctx.request_repaint();
+                        }
+
+                        if splitter_response.double_clicked() {
+                            self.split_view_ratio = 0.5;
+                            self.status_message = "Split view reset to 50/50".to_string();
+                            ctx.request_repaint();
+                        }
+
+                        // Splitter visual rendering
+                        let is_hovered = splitter_response.hovered();
+                        let is_dragged = splitter_response.dragged();
+                        let bar_color = if is_dragged {
+                            egui::Color32::from_rgb(243, 94, 24) // Substance 3D orange
+                        } else if is_hovered {
+                            egui::Color32::from_rgb(100, 100, 110)
+                        } else {
+                            egui::Color32::from_rgb(35, 36, 40)
+                        };
+                        ui.painter().rect_filled(splitter_rect, egui::Rounding::ZERO, bar_color);
+
+                        // Gripper notches in the center of the splitter bar
+                        let mid_y = splitter_rect.center().y;
+                        let notch_color = if is_hovered || is_dragged {
+                            egui::Color32::from_rgb(255, 255, 255)
+                        } else {
+                            egui::Color32::from_rgb(80, 80, 88)
+                        };
+                        for i in -2..=2 {
+                            let ny = mid_y + (i as f32) * 6.0;
+                            ui.painter().line_segment(
+                                [
+                                    egui::pos2(splitter_rect.min.x + 1.5, ny),
+                                    egui::pos2(splitter_rect.max.x - 1.5, ny),
+                                ],
+                                egui::Stroke::new(1.0_f32, notch_color),
+                            );
+                        }
+
+                        // 3. Right Viewport (2D UV Canvas)
+                        let right_size = egui::vec2(right_w, available_size.y);
+                        ui.allocate_ui_with_layout(right_size, egui::Layout::top_down(egui::Align::Min), |right_ui| {
+                            self.render_2d_uv_viewport_ui(right_ui, right_size, ctx);
+                        });
                     });
                 }
             }
@@ -5320,8 +5708,25 @@ impl eframe::App for PaintcraftApp {
 
                     ui.separator();
                     ui.heading("Mesh Overlays");
-                    if ui.checkbox(&mut self.renderer.show_wireframe, "Wireframe Overlay").changed() {
+                    if ui.checkbox(&mut self.renderer.show_wireframe, "Wireframe Overlay (F4)").changed() {
                         self.show_uv_wireframe = self.renderer.show_wireframe;
+                    }
+                    if self.renderer.show_wireframe {
+                        ui.horizontal(|ui| {
+                            ui.label("Wireframe Line Color:");
+                            let mut wire_rgb = [
+                                self.shader_settings.wireframe_color[0],
+                                self.shader_settings.wireframe_color[1],
+                                self.shader_settings.wireframe_color[2],
+                            ];
+                            if crate::color_picker::color_picker_button_rgb(ui, egui::Id::new("vp_wire_color"), &mut wire_rgb) {
+                                self.shader_settings.wireframe_color[0] = wire_rgb[0];
+                                self.shader_settings.wireframe_color[1] = wire_rgb[1];
+                                self.shader_settings.wireframe_color[2] = wire_rgb[2];
+                            }
+                            ui.label(crate::color_picker::rgb_to_hex(wire_rgb[0], wire_rgb[1], wire_rgb[2]));
+                        });
+                        ui.add(egui::Slider::new(&mut self.shader_settings.wireframe_opacity, 0.05..=1.0).text("Line Opacity"));
                     }
 
                     ui.separator();
@@ -5549,6 +5954,15 @@ impl eframe::App for PaintcraftApp {
                                 ui.add(egui::Slider::new(&mut self.shader_settings.ssao_radius, 0.1..=2.0).text("Sample Radius"));
                             }
                             ui.label(egui::RichText::new("Substance Painter real-time contact shadowing and crevice darkening in the viewport.").small().color(Color32::from_rgb(160, 165, 175)));
+                        });
+
+                        ui.collapsing("Directional Sun Shadows (PCF)", |ui| {
+                            ui.checkbox(&mut self.shader_settings.shadows_enabled, "Enable Real-Time Directional Shadows");
+                            if self.shader_settings.shadows_enabled {
+                                ui.add(egui::Slider::new(&mut self.shader_settings.shadow_softness, 0.2..=3.0).text("Shadow Penumbra Softness"));
+                                ui.add(egui::Slider::new(&mut self.shader_settings.shadow_bias, 0.0005..=0.015).text("Normal Offset Bias"));
+                            }
+                            ui.label(egui::RichText::new("2048x2048 depth shadow map with 16-tap Poisson disk percentage-closer filtering (PCF) and slope-scaled normal offset bias.").small().color(Color32::from_rgb(160, 165, 175)));
                         });
 
                         ui.collapsing("Viewport Denoiser (Joint-Bilateral Filter)", |ui| {
@@ -6007,9 +6421,12 @@ impl PaintcraftApp {
 
         let mut frame_settings = self.shader_settings;
         if is_interacting && self.shader_settings.adaptive_resolution {
-            // Bypass heavy Screen-Space Ray Tracing & SSAO during fast camera orbit or brush drag
+            // Bypass heavy Screen-Space Ray Tracing, SSAO, Bloom & Depth-of-Field during fast camera orbit or brush drag
             frame_settings.ssr_enabled = false;
             frame_settings.ssao_enabled = false;
+            frame_settings.bloom_enabled = false;
+            frame_settings.dof_enabled = false;
+            frame_settings.shadow_softness = 0.0; // Fast single-tap shadow lookup during interaction
         }
 
         let texture_id = if self.iray_mode {
@@ -6156,6 +6573,8 @@ impl PaintcraftApp {
             }
             if self.shader_settings.denoiser_enabled { pp_badges.push("Denoiser"); }
             if self.shader_settings.ssao_enabled { pp_badges.push("SSAO"); }
+            if self.shader_settings.shadows_enabled { pp_badges.push("Shadows"); }
+            if self.renderer.show_wireframe { pp_badges.push("Wireframe"); }
             if self.shader_settings.bloom_enabled { pp_badges.push("Bloom"); }
             if self.shader_settings.dof_enabled { pp_badges.push("DoF"); }
             let pp_str = if pp_badges.is_empty() { String::new() } else { format!(" | PP: [{}]", pp_badges.join(", ")) };
@@ -6667,10 +7086,14 @@ impl PaintcraftApp {
                                         || self.brush_engine.settings.channels.opacity
                                         || self.brush_engine.settings.channels.anisotropy
                                     {
-                                        self.project.rebuild_composite();
-                                        if let Some(wgpu) = &mut self.wgpu_viewport {
-                                            wgpu.sync_textures(&mut self.project);
+                                        if let Some(active_layer) = self.project.active_layer() {
+                                            if let Some(d_rect) = active_layer.dirty_rect {
+                                                if let Some(wgpu) = &mut self.wgpu_viewport {
+                                                    wgpu.sync_extended_dirty_rect(active_layer, d_rect, self.brush_engine.settings.channels);
+                                                }
+                                            }
                                         }
+                                        self.need_cpu_composite_sync = true;
                                     }
 
                                     self.perf_metrics.paint_stroke_ms = t_stroke.elapsed().as_secs_f32() * 1000.0;
@@ -7002,13 +7425,18 @@ impl PaintcraftApp {
         // Synchronized 2D-to-3D cross-viewport cursor indicator
         if !response.hovered() {
             if let Some(uv) = self.last_hovered_uv_2d {
-                if let Some((pos_3d, _norm_3d)) = self.project.mesh.uv_to_3d_point(uv) {
+                if let Some((pos_3d, norm_3d)) = self.project.mesh.uv_to_3d_point(uv) {
                     if let Some(screen_p) = self.camera.world_to_screen(pos_3d, vp_w, vp_h) {
                         let p = rect.min + egui::vec2(screen_p.x, screen_p.y);
                         if rect.contains(p) {
+                            let dist = (self.camera.eye_position() - pos_3d).length().max(0.01);
+                            let fov_factor = (self.camera.fov_y / 2.0).tan();
+                            let world_rad = (self.brush_engine.settings.radius / (self.project.texture_width as f32)) * self.project.mesh.bounds_radius();
+                            let proj_screen_rad = ((world_rad / (dist * fov_factor)) * vp_h * 0.5).clamp(4.0, 300.0);
+
                             ui.painter().circle_stroke(
                                 p,
-                                7.0,
+                                proj_screen_rad,
                                 egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(0, 220, 255)),
                             );
                             ui.painter().circle_filled(
@@ -7016,6 +7444,12 @@ impl PaintcraftApp {
                                 2.0,
                                 egui::Color32::from_rgb(0, 220, 255),
                             );
+
+                            // Surface normal tick indicator
+                            if let Some(norm_end) = self.camera.world_to_screen(pos_3d + norm_3d * (world_rad * 0.4).max(0.02), vp_w, vp_h) {
+                                let norm_p = rect.min + egui::vec2(norm_end.x, norm_end.y);
+                                ui.painter().line_segment([p, norm_p], egui::Stroke::new(1.0_f32, egui::Color32::from_rgba_unmultiplied(0, 220, 255, 180)));
+                            }
                         }
                     }
                 }
@@ -7359,6 +7793,9 @@ impl PaintcraftApp {
                                 self.perf_metrics.paint_stroke_ms = t_stroke.elapsed().as_secs_f32() * 1000.0;
                                 self.brush_engine.settings.radius = orig_rad;
                                 self.brush_engine.settings.flow = orig_flow;
+                                if self.brush_engine.settings.channels.height {
+                                    layer.update_normal_from_height(1.0);
+                                }
                                 self.project.composite_textures.composite_layers(&self.project.layers);
                                 self.update_uv_texture(ctx);
                                 if let Some(wgpu) = &mut self.wgpu_viewport {
@@ -7377,7 +7814,16 @@ impl PaintcraftApp {
             } else if response.drag_stopped() || (!ui.input(|i| i.pointer.any_down()) && self.is_stroke_active) {
                 self.brush_engine.end_stroke();
                 self.polygon_fill_drag_tris.clear();
+                if let Some(layer) = self.project.active_layer_mut() {
+                    if self.brush_engine.settings.channels.height {
+                        layer.update_normal_from_height(1.0);
+                    }
+                }
                 self.project.rebuild_composite();
+                self.update_uv_texture(ctx);
+                if let Some(wgpu) = &mut self.wgpu_viewport {
+                    wgpu.sync_textures(&mut self.project);
+                }
                 if self.is_stroke_active {
                     if let Some(prev) = self.stroke_start_layer.take() {
                         if let Some(next) = self.project.active_layer() {
@@ -7523,9 +7969,10 @@ impl PaintcraftApp {
                     let screen_y = canvas_rect.min.y + uv.y * canvas_rect.height();
                     let p = egui::pos2(screen_x, screen_y);
                     if canvas_rect.contains(p) {
+                        let screen_rad = (self.brush_engine.settings.radius / (self.project.texture_width as f32) * canvas_rect.width()).max(3.0);
                         ui.painter().circle_stroke(
                             p,
-                            7.0,
+                            screen_rad,
                             egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(0, 220, 255)),
                         );
                         ui.painter().circle_filled(
@@ -7538,8 +7985,8 @@ impl PaintcraftApp {
             }
 
             // Top-right floating controls pill
-            let hud_pos = rect.right_top() + egui::vec2(-240.0, 10.0);
-            let hud_rect = egui::Rect::from_min_size(hud_pos, egui::vec2(230.0, 30.0));
+            let hud_pos = rect.right_top() + egui::vec2(-360.0, 10.0);
+            let hud_rect = egui::Rect::from_min_size(hud_pos, egui::vec2(350.0, 30.0));
             ui.painter().rect_filled(hud_rect, egui::Rounding::same(15.0), egui::Color32::from_rgba_unmultiplied(28, 30, 36, 225));
             ui.painter().rect_stroke(hud_rect, egui::Rounding::same(15.0), egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(58, 62, 74)));
 
@@ -7547,6 +7994,9 @@ impl PaintcraftApp {
                 ui.horizontal_centered(|ui| {
                     ui.add_space(8.0);
                     ui.label(egui::RichText::new(format!("{:.0}%", self.uv_2d_zoom * 100.0)).small().strong().color(Color32::from_rgb(180, 190, 205)));
+                    if ui.small_button("1:1").on_hover_text("Reset zoom to 100% (1:1 pixel scale)").clicked() {
+                        self.uv_2d_zoom = 1.0;
+                    }
                     if ui.small_button("Fit (F)").on_hover_text("Reset 2D UV view and zoom to fit (F)").clicked() {
                         self.uv_2d_pan = egui::Vec2::ZERO;
                         self.uv_2d_zoom = 1.0;
@@ -7556,12 +8006,25 @@ impl PaintcraftApp {
                     if ui.selectable_label(wire_active, wire_label).on_hover_text("Toggle UV wireframe overlay").clicked() {
                         self.show_uv_wireframe = !self.show_uv_wireframe;
                     }
+
+                    let has_mask = self.project.active_layer().map(|l| l.has_mask).unwrap_or(false);
+                    if has_mask {
+                        let mask_label = if self.uv_view_mask_mode { "Mask: ON" } else { "Mask: OFF" };
+                        if ui.selectable_label(self.uv_view_mask_mode, mask_label).on_hover_text("Preview and paint directly on active layer mask in 2D UV canvas").clicked() {
+                            self.uv_view_mask_mode = !self.uv_view_mask_mode;
+                            self.update_uv_texture(ctx);
+                        }
+                    }
                 });
             });
 
             // Top-left HUD channel badge
             let title_pos = rect.left_top() + egui::vec2(12.0, 12.0);
-            let title_text = format!("2D UV Viewport | Channel: {:?} | {}x{}", self.view_mode, self.project.texture_width, self.project.texture_height);
+            let title_text = if self.uv_view_mask_mode {
+                format!("2D UV Viewport | MASK PREVIEW | {}x{}", self.project.texture_width, self.project.texture_height)
+            } else {
+                format!("2D UV Viewport | Channel: {} | {}x{}", self.view_mode.name(), self.project.texture_width, self.project.texture_height)
+            };
             ui.painter().text(
                 title_pos,
                 egui::Align2::LEFT_TOP,
@@ -8698,7 +9161,7 @@ impl PaintcraftApp {
                     self.project.texture_height,
                     self.project.curvature_map.as_ref(),
                     self.project.ao_map.as_ref(),
-                    self.project.world_normal_map.as_ref(),
+                    self.project.world_space_normal_map.as_ref(),
                     self.project.position_map.as_ref(),
                 );
                 for mut layer in new_layers {
@@ -8737,7 +9200,7 @@ impl PaintcraftApp {
                 if act_idx < self.project.layers.len() {
                     let curv = self.project.curvature_map.clone();
                     let ao = self.project.ao_map.clone();
-                    let norm = self.project.world_normal_map.clone();
+                    let norm = self.project.world_space_normal_map.clone();
                     let pos = self.project.position_map.clone();
                     let layer = &mut self.project.layers[act_idx];
                     crate::smart_materials::SmartMaterialLibrary::apply_smart_mask_advanced(
@@ -8753,45 +9216,105 @@ impl PaintcraftApp {
                 }
             }
             crate::shelf::ShelfCategory::Generators => {
-                let gen = match asset.id {
-                    "gen_perlin" => crate::layer::ProceduralGenerator::PerlinNoise,
-                    "gen_worley" => crate::layer::ProceduralGenerator::WorleyGrunge,
-                    "gen_billow" => crate::layer::ProceduralGenerator::BillowNoise,
-                    "gen_ridged" => crate::layer::ProceduralGenerator::RidgedMultifractal,
-                    "gen_domain_warp" => crate::layer::ProceduralGenerator::DomainWarpGrunge,
-                    "gen_splatter" => crate::layer::ProceduralGenerator::SplatterDirt,
-                    "gen_wood" => crate::layer::ProceduralGenerator::WoodGrain,
-                    "gen_fabric" => crate::layer::ProceduralGenerator::FabricWeave,
-                    "gen_scratches" => crate::layer::ProceduralGenerator::Scratches,
-                    "gen_curvature" => crate::layer::ProceduralGenerator::CurvatureWear,
-                    "gen_cavity" => crate::layer::ProceduralGenerator::AmbientOcclusion,
-                    "gen_dust" => crate::layer::ProceduralGenerator::DirectionalDust,
-                    "gen_leaks" => crate::layer::ProceduralGenerator::DrippingLeaks,
-                    "gen_position" => crate::layer::ProceduralGenerator::PositionGradient,
-                    "gen_checker" => crate::layer::ProceduralGenerator::Checkerboard,
-                    "gen_bricks" => crate::layer::ProceduralGenerator::Bricks,
-                    "gen_perforated" => crate::layer::ProceduralGenerator::PerforatedMesh,
-                    "gen_wire_fence" => crate::layer::ProceduralGenerator::WireFence,
-                    "gen_torn_fabric" => crate::layer::ProceduralGenerator::TornFabricEdge,
-                    "gen_dots" => crate::layer::ProceduralGenerator::CircularDots,
-                    _ => crate::layer::ProceduralGenerator::PerlinNoise,
-                };
                 let act_idx = self.project.active_layer_idx;
-                if act_idx < self.project.layers.len() && self.brush_engine.settings.target == crate::brush::PaintTarget::Mask {
+                let is_mask_target = self.brush_engine.settings.target == crate::brush::PaintTarget::Mask;
+                if act_idx < self.project.layers.len() && is_mask_target {
                     let curv = self.project.curvature_map.clone();
                     let ao = self.project.ao_map.clone();
                     let pos = self.project.position_map.clone();
                     let wn = self.project.world_space_normal_map.clone();
                     let layer = &mut self.project.layers[act_idx];
-                    layer.add_mask_fill_effect_advanced(
-                        gen,
-                        curv.as_ref(),
-                        ao.as_ref(),
-                        pos.as_ref(),
-                        wn.as_ref(),
-                    );
-                    self.status_message = format!("Added Fill Effect to Mask: {}", asset.name);
+
+                    match asset.id {
+                        "gen_curvature" => {
+                            layer.add_mask_generator_curvature_wear(curv.as_ref(), ao.as_ref(), pos.as_ref(), wn.as_ref());
+                            self.status_message = format!("Added Curvature Edge Wear Generator to Mask: {}", asset.name);
+                        }
+                        "gen_cavity" => {
+                            layer.add_mask_generator_cavity_dirt(curv.as_ref(), ao.as_ref(), pos.as_ref(), wn.as_ref());
+                            self.status_message = format!("Added Cavity Dirt Generator to Mask: {}", asset.name);
+                        }
+                        "gen_dust" => {
+                            layer.add_mask_generator_directional_dust(curv.as_ref(), ao.as_ref(), pos.as_ref(), wn.as_ref());
+                            self.status_message = format!("Added Directional Dust Generator to Mask: {}", asset.name);
+                        }
+                        "gen_ground_dirt" => {
+                            layer.add_mask_generator_ground_dirt(curv.as_ref(), ao.as_ref(), pos.as_ref(), wn.as_ref());
+                            self.status_message = format!("Added Ground Mud Generator to Mask: {}", asset.name);
+                        }
+                        "gen_mask_editor" => {
+                            layer.add_mask_generator_mask_editor(curv.as_ref(), ao.as_ref(), pos.as_ref(), wn.as_ref());
+                            self.status_message = format!("Added Mask Editor Generator to Mask: {}", asset.name);
+                        }
+                        _ => {
+                            let gen = match asset.id {
+                                "gen_perlin" => crate::layer::ProceduralGenerator::PerlinNoise,
+                                "gen_worley" => crate::layer::ProceduralGenerator::WorleyGrunge,
+                                "gen_billow" => crate::layer::ProceduralGenerator::BillowNoise,
+                                "gen_ridged" => crate::layer::ProceduralGenerator::RidgedMultifractal,
+                                "gen_domain_warp" => crate::layer::ProceduralGenerator::DomainWarpGrunge,
+                                "gen_splatter" => crate::layer::ProceduralGenerator::SplatterDirt,
+                                "gen_wood" => crate::layer::ProceduralGenerator::WoodGrain,
+                                "gen_fabric" => crate::layer::ProceduralGenerator::FabricWeave,
+                                "gen_scratches" => crate::layer::ProceduralGenerator::Scratches,
+                                "gen_leaks" => crate::layer::ProceduralGenerator::DrippingLeaks,
+                                "gen_position" => crate::layer::ProceduralGenerator::PositionGradient,
+                                "gen_checker" => crate::layer::ProceduralGenerator::Checkerboard,
+                                "gen_bricks" => crate::layer::ProceduralGenerator::Bricks,
+                                "gen_perforated" => crate::layer::ProceduralGenerator::PerforatedMesh,
+                                "gen_wire_fence" => crate::layer::ProceduralGenerator::WireFence,
+                                "gen_torn_fabric" => crate::layer::ProceduralGenerator::TornFabricEdge,
+                                "gen_dots" => crate::layer::ProceduralGenerator::CircularDots,
+                                "gen_bnw_spots_1" => crate::layer::ProceduralGenerator::BnWSpots1,
+                                "gen_bnw_spots_2" => crate::layer::ProceduralGenerator::BnWSpots2,
+                                "gen_bnw_spots_3" => crate::layer::ProceduralGenerator::BnWSpots3,
+                                "gen_grunge_map" => crate::layer::ProceduralGenerator::GrungeMap,
+                                "gen_directional_noise" => crate::layer::ProceduralGenerator::DirectionalNoise,
+                                "gen_clouds" => crate::layer::ProceduralGenerator::Clouds,
+                                "gen_marble_veins" => crate::layer::ProceduralGenerator::MarbleVeins,
+                                _ => crate::layer::ProceduralGenerator::PerlinNoise,
+                            };
+                            layer.add_mask_fill_effect_advanced(
+                                gen,
+                                curv.as_ref(),
+                                ao.as_ref(),
+                                pos.as_ref(),
+                                wn.as_ref(),
+                            );
+                            self.status_message = format!("Added Fill Effect to Mask: {}", asset.name);
+                        }
+                    }
                 } else {
+                    let gen = match asset.id {
+                        "gen_perlin" => crate::layer::ProceduralGenerator::PerlinNoise,
+                        "gen_worley" => crate::layer::ProceduralGenerator::WorleyGrunge,
+                        "gen_billow" => crate::layer::ProceduralGenerator::BillowNoise,
+                        "gen_ridged" => crate::layer::ProceduralGenerator::RidgedMultifractal,
+                        "gen_domain_warp" => crate::layer::ProceduralGenerator::DomainWarpGrunge,
+                        "gen_splatter" => crate::layer::ProceduralGenerator::SplatterDirt,
+                        "gen_wood" => crate::layer::ProceduralGenerator::WoodGrain,
+                        "gen_fabric" => crate::layer::ProceduralGenerator::FabricWeave,
+                        "gen_scratches" => crate::layer::ProceduralGenerator::Scratches,
+                        "gen_curvature" => crate::layer::ProceduralGenerator::CurvatureWear,
+                        "gen_cavity" => crate::layer::ProceduralGenerator::AmbientOcclusion,
+                        "gen_dust" => crate::layer::ProceduralGenerator::DirectionalDust,
+                        "gen_leaks" => crate::layer::ProceduralGenerator::DrippingLeaks,
+                        "gen_position" | "gen_ground_dirt" => crate::layer::ProceduralGenerator::PositionGradient,
+                        "gen_checker" => crate::layer::ProceduralGenerator::Checkerboard,
+                        "gen_bricks" => crate::layer::ProceduralGenerator::Bricks,
+                        "gen_perforated" => crate::layer::ProceduralGenerator::PerforatedMesh,
+                        "gen_wire_fence" => crate::layer::ProceduralGenerator::WireFence,
+                        "gen_torn_fabric" => crate::layer::ProceduralGenerator::TornFabricEdge,
+                        "gen_dots" => crate::layer::ProceduralGenerator::CircularDots,
+                        "gen_bnw_spots_1" => crate::layer::ProceduralGenerator::BnWSpots1,
+                        "gen_bnw_spots_2" => crate::layer::ProceduralGenerator::BnWSpots2,
+                        "gen_bnw_spots_3" => crate::layer::ProceduralGenerator::BnWSpots3,
+                        "gen_grunge_map" => crate::layer::ProceduralGenerator::GrungeMap,
+                        "gen_directional_noise" => crate::layer::ProceduralGenerator::DirectionalNoise,
+                        "gen_clouds" => crate::layer::ProceduralGenerator::Clouds,
+                        "gen_marble_veins" => crate::layer::ProceduralGenerator::MarbleVeins,
+                        _ => crate::layer::ProceduralGenerator::PerlinNoise,
+                    };
                     let mut fill_layer = crate::layer::Layer::new_fill_layer(
                         self.project.next_layer_id,
                         format!("Fill - {}", asset.name),
@@ -10049,6 +10572,74 @@ mod tests {
         settings.follow_path_offset = std::f32::consts::FRAC_PI_2;
         assert!(settings.follow_path);
         assert!((settings.follow_path_offset - std::f32::consts::FRAC_PI_2).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_shadow_and_wireframe_shader_settings() {
+        let mut settings = crate::wgpu_renderer::ShaderSettings::default();
+        assert!(settings.shadows_enabled);
+        assert!((settings.shadow_bias - 0.015).abs() < 1e-5);
+        assert!((settings.shadow_softness - 1.0).abs() < 1e-4);
+        assert_eq!(settings.wireframe_color, [0.2, 0.75, 1.0, 1.0]);
+        assert!((settings.wireframe_opacity - 0.85).abs() < 1e-4);
+
+        settings.shadows_enabled = false;
+        settings.shadow_bias = 0.008;
+        settings.shadow_softness = 2.5;
+        settings.wireframe_color = [1.0, 0.5, 0.2, 1.0];
+        settings.wireframe_opacity = 0.5;
+
+        assert!(!settings.shadows_enabled);
+        assert!((settings.shadow_bias - 0.008).abs() < 1e-5);
+        assert!((settings.shadow_softness - 2.5).abs() < 1e-4);
+        assert_eq!(settings.wireframe_color, [1.0, 0.5, 0.2, 1.0]);
+        assert!((settings.wireframe_opacity - 0.5).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_split_viewport_and_mask_mode() {
+        let cube = crate::mesh::Mesh::create_cube_mesh("Cube", 1.0);
+        assert!(cube.bounds_radius() > 0.5);
+
+        // Verify UV to 3D point mapping on cube
+        let uv_hit = cube.uv_to_3d_point(glam::Vec2::new(0.5, 0.5));
+        assert!(uv_hit.is_some(), "Cube center UV should map to a valid 3D surface point");
+        let (pos, norm) = uv_hit.unwrap();
+        assert!(pos.length() > 0.0);
+        assert!((norm.length() - 1.0).abs() < 1e-4);
+
+        // View layout states
+        let mut layout = ViewLayout::SplitDualView;
+        assert_eq!(layout, ViewLayout::SplitDualView);
+        layout = ViewLayout::View3DOnly;
+        assert_eq!(layout, ViewLayout::View3DOnly);
+        layout = ViewLayout::View2DOnly;
+        assert_eq!(layout, ViewLayout::View2DOnly);
+
+        // Split ratio clamping
+        let ratio_default = 0.5f32;
+        let ratio_clamped = 1.2f32.clamp(0.15, 0.85);
+        assert_eq!(ratio_default, 0.5);
+        assert_eq!(ratio_clamped, 0.85);
+    }
+
+    #[test]
+    fn test_new_project_auto_bake_disabled_by_default() {
+        let mut proj = Project::new_default(64, 64);
+        let mesh = crate::mesh::Mesh::create_rounded_cube();
+        proj.set_mesh(mesh);
+
+        // Setting mesh must NOT bake mesh maps automatically
+        assert!(proj.curvature_map.is_none(), "Setting mesh must not automatically bake curvature map");
+        assert!(proj.ao_map.is_none(), "Setting mesh must not automatically bake AO map");
+        assert!(proj.world_normal_map.is_none(), "Setting mesh must not automatically bake world normal map");
+        assert!(proj.position_map.is_none(), "Setting mesh must not automatically bake position map");
+        assert!(proj.thickness_map.is_none(), "Setting mesh must not automatically bake thickness map");
+
+        // Explicit baking should populate mesh maps when requested
+        proj.bake_mesh_maps(32, 0.1, 0.1);
+        assert!(proj.curvature_map.is_some(), "Explicit bake must populate curvature map");
+        assert!(proj.ao_map.is_some(), "Explicit bake must populate AO map");
     }
 }
 

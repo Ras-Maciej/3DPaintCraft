@@ -309,6 +309,12 @@ impl SpatialHash {
         let mut closest_t = max_dist;
         let mut best_normal = None;
 
+        // Track visited triangles to avoid duplicate ray-triangle intersection math
+        // across adjacent 3D spatial hash cells.
+        let mut visited_stack = [0usize; 64];
+        let mut visited_count = 0;
+        let mut visited_fallback: Option<HashSet<usize>> = None;
+
         for z in min_coord[2]..=max_coord[2] {
             for y in min_coord[1]..=max_coord[1] {
                 for x in min_coord[0]..=max_coord[0] {
@@ -319,6 +325,24 @@ impl SpatialHash {
                                     continue;
                                 }
                             }
+
+                            if visited_count < 64 {
+                                if visited_stack[..visited_count].contains(&t) {
+                                    continue;
+                                }
+                                visited_stack[visited_count] = t;
+                                visited_count += 1;
+                            } else {
+                                let set = visited_fallback.get_or_insert_with(|| {
+                                    let mut s = HashSet::with_capacity(128);
+                                    s.extend(&visited_stack);
+                                    s
+                                });
+                                if !set.insert(t) {
+                                    continue;
+                                }
+                            }
+
                             let i0 = mesh.indices[t * 3] as usize;
                             let i1 = mesh.indices[t * 3 + 1] as usize;
                             let i2 = mesh.indices[t * 3 + 2] as usize;
@@ -937,53 +961,64 @@ impl Baker {
         };
 
         // Raycast
-        for y in 0..height {
-            for x in 0..width {
-                let idx = (y * width + x) as usize;
-                if let (Some(pos), Some(norm)) = (pos_buf[idx], norm_buf[idx]) {
-                    if let Some(hp) = high_poly {
-                        if let Some(hash) = &spatial_hash {
-                            // When cage buffer is present, ray originates from cage envelope down to low-poly
-                            let (ray_orig, ray_dir, max_ray_dist) = if let Some(cage_pos) = cage_buf.as_ref().and_then(|cb| cb[idx]) {
-                                let to_mesh = pos - cage_pos;
-                                let dist_to_surface = to_mesh.length();
-                                if dist_to_surface > 1e-6 {
-                                    let dir = to_mesh / dist_to_surface;
-                                    (cage_pos, dir, dist_to_surface + rear_dist)
+        let cage_ref = cage_buf.as_ref();
+        let submesh_allowed = &submesh_allowed_hp_tris;
+        let p_buf = &pos_buf;
+        let n_buf = &norm_buf;
+        let t_buf = &tan_buf;
+        let tr_buf = &tri_buf;
+
+        buffer.data
+            .par_chunks_exact_mut(width as usize)
+            .enumerate()
+            .for_each(|(y_idx, row)| {
+                let y = y_idx as u32;
+                for x in 0..width {
+                    let idx = (y * width + x) as usize;
+                    if let (Some(pos), Some(norm)) = (p_buf[idx], n_buf[idx]) {
+                        if let Some(hp) = high_poly {
+                            if let Some(hash) = &spatial_hash {
+                                // When cage buffer is present, ray originates from cage envelope down to low-poly
+                                let (ray_orig, ray_dir, max_ray_dist) = if let Some(cage_pos) = cage_ref.and_then(|cb| cb[idx]) {
+                                    let to_mesh = pos - cage_pos;
+                                    let dist_to_surface = to_mesh.length();
+                                    if dist_to_surface > 1e-6 {
+                                        let dir = to_mesh / dist_to_surface;
+                                        (cage_pos, dir, dist_to_surface + rear_dist)
+                                    } else {
+                                        (pos + norm * frontal_dist, -norm, frontal_dist + rear_dist)
+                                    }
                                 } else {
                                     (pos + norm * frontal_dist, -norm, frontal_dist + rear_dist)
-                                }
-                            } else {
-                                (pos + norm * frontal_dist, -norm, frontal_dist + rear_dist)
-                            };
+                                };
 
-                            let allowed = if match_config.mode == BakeMatchMode::ByMeshName {
-                                tri_buf[idx].and_then(|t| mesh.submesh_index_for_triangle(t))
-                                    .and_then(|sm_idx| submesh_allowed_hp_tris.get(sm_idx))
-                                    .and_then(|opt| opt.as_ref())
-                            } else {
-                                None
-                            };
+                                let allowed = if match_config.mode == BakeMatchMode::ByMeshName {
+                                    tr_buf[idx].and_then(|t| mesh.submesh_index_for_triangle(t))
+                                        .and_then(|sm_idx| submesh_allowed.get(sm_idx))
+                                        .and_then(|opt| opt.as_ref())
+                                } else {
+                                    None
+                                };
 
-                            if let Some((_, hp_norm)) = hash.query_ray_closest_filtered(ray_orig, ray_dir, max_ray_dist, hp, allowed) {
-                                if let Some(tan) = tan_buf[idx] {
-                                    let n = norm.normalize_or_zero();
-                                    let t = (tan.truncate() - n * n.dot(tan.truncate())).normalize_or_zero();
-                                    let tw = if tan.w < 0.0 { -1.0 } else { 1.0 };
-                                    let b = n.cross(t) * tw;
-                                    let ts_norm = Vec3::new(hp_norm.dot(t), hp_norm.dot(b), hp_norm.dot(n)).normalize_or_zero();
-                                    let ny = if invert_green { -ts_norm.y } else { ts_norm.y };
-                                    buffer.set_pixel(x, y, Vec4::new(ts_norm.x * 0.5 + 0.5, ny * 0.5 + 0.5, ts_norm.z * 0.5 + 0.5, 1.0));
-                                    continue;
+                                if let Some((_, hp_norm)) = hash.query_ray_closest_filtered(ray_orig, ray_dir, max_ray_dist, hp, allowed) {
+                                    if let Some(tan) = t_buf[idx] {
+                                        let n = norm.normalize_or_zero();
+                                        let t = (tan.truncate() - n * n.dot(tan.truncate())).normalize_or_zero();
+                                        let tw = if tan.w < 0.0 { -1.0 } else { 1.0 };
+                                        let b = n.cross(t) * tw;
+                                        let ts_norm = Vec3::new(hp_norm.dot(t), hp_norm.dot(b), hp_norm.dot(n)).normalize_or_zero();
+                                        let ny = if invert_green { -ts_norm.y } else { ts_norm.y };
+                                        row[x as usize] = Vec4::new(ts_norm.x * 0.5 + 0.5, ny * 0.5 + 0.5, ts_norm.z * 0.5 + 0.5, 1.0);
+                                        continue;
+                                    }
                                 }
                             }
                         }
+                        // Low poly fallback: flat tangent normal (0, 0, 1) encoded to (0.5, 0.5, 1.0, 1.0)
+                        row[x as usize] = Vec4::new(0.5, 0.5, 1.0, 1.0);
                     }
-                    // Low poly fallback: flat tangent normal (0, 0, 1) encoded to (0.5, 0.5, 1.0, 1.0)
-                    buffer.set_pixel(x, y, Vec4::new(0.5, 0.5, 1.0, 1.0));
                 }
-            }
-        }
+            });
 
         // Edge dilation
         Self::dilate_rgba(&mut buffer, &pos_buf);
@@ -1044,22 +1079,26 @@ impl Baker {
             );
         }
 
-        for y in 0..height {
-            for x in 0..width {
-                let idx = (y * width + x) as usize;
-                if let Some(pos) = pos_buf[idx] {
-                    let norm_pos = match config.mode {
-                        PositionNormalizationMode::BoundingBox => {
-                            ((pos - min_bound) / extents).clamp(Vec3::ZERO, Vec3::ONE)
-                        }
-                        PositionNormalizationMode::WorldUnits => {
-                            (pos * 0.5 + Vec3::splat(0.5)).clamp(Vec3::ZERO, Vec3::ONE)
-                        }
-                    };
-                    buffer.set_pixel(x, y, Vec4::new(norm_pos.x, norm_pos.y, norm_pos.z, 1.0));
+        buffer.data
+            .par_chunks_exact_mut(width as usize)
+            .enumerate()
+            .for_each(|(y_idx, row)| {
+                let y = y_idx as u32;
+                for x in 0..width {
+                    let idx = (y * width + x) as usize;
+                    if let Some(pos) = pos_buf[idx] {
+                        let norm_pos = match config.mode {
+                            PositionNormalizationMode::BoundingBox => {
+                                ((pos - min_bound) / extents).clamp(Vec3::ZERO, Vec3::ONE)
+                            }
+                            PositionNormalizationMode::WorldUnits => {
+                                (pos * 0.5 + Vec3::splat(0.5)).clamp(Vec3::ZERO, Vec3::ONE)
+                            }
+                        };
+                        row[x as usize] = Vec4::new(norm_pos.x, norm_pos.y, norm_pos.z, 1.0);
+                    }
                 }
-            }
-        }
+            });
 
         Self::dilate_rgba(&mut buffer, &pos_buf);
         buffer
@@ -1100,15 +1139,19 @@ impl Baker {
             );
         }
 
-        for y in 0..height {
-            for x in 0..width {
-                let idx = (y * width + x) as usize;
-                if let Some(norm) = norm_buf[idx] {
-                    let n = norm.normalize_or_zero();
-                    buffer.set_pixel(x, y, Vec4::new(n.x * 0.5 + 0.5, n.y * 0.5 + 0.5, n.z * 0.5 + 0.5, 1.0));
+        buffer.data
+            .par_chunks_exact_mut(width as usize)
+            .enumerate()
+            .for_each(|(y_idx, row)| {
+                let y = y_idx as u32;
+                for x in 0..width {
+                    let idx = (y * width + x) as usize;
+                    if let Some(norm) = norm_buf[idx] {
+                        let n = norm.normalize_or_zero();
+                        row[x as usize] = Vec4::new(n.x * 0.5 + 0.5, n.y * 0.5 + 0.5, n.z * 0.5 + 0.5, 1.0);
+                    }
                 }
-            }
-        }
+            });
 
         Self::dilate_rgba(&mut buffer, &pos_buf);
         buffer
@@ -1420,34 +1463,43 @@ impl Baker {
     
     fn dilate_rgba(buffer: &mut RgbaBuffer, pos_buf: &[Option<Vec3>]) {
         let original = buffer.data.clone();
-        for y in 0..buffer.height {
-            for x in 0..buffer.width {
-                let idx = (y * buffer.width + x) as usize;
-                if pos_buf[idx].is_none() {
-                    let mut nearest_val = Vec4::new(0.5, 0.5, 1.0, 1.0);
-                    let mut min_dist = 99999;
-                    let r = 16isize;
-                    let min_dy = (y as isize - r).max(0) as usize;
-                    let max_dy = (y as isize + r).min(buffer.height as isize - 1) as usize;
-                    let min_dx = (x as isize - r).max(0) as usize;
-                    let max_dx = (x as isize + r).min(buffer.width as i32 as isize - 1) as usize;
-                    
-                    for sy in min_dy..=max_dy {
-                        for sx in min_dx..=max_dx {
-                            let sidx = sy * buffer.width as usize + sx;
-                            if pos_buf[sidx].is_some() {
-                                let dist = (x as isize - sx as isize).pow(2) + (y as isize - sy as isize).pow(2);
-                                if dist < min_dist {
-                                    min_dist = dist;
-                                    nearest_val = original[sidx];
+        let width = buffer.width as usize;
+        let height = buffer.height as usize;
+        let r = 16isize;
+
+        buffer.data
+            .par_chunks_exact_mut(width)
+            .enumerate()
+            .for_each(|(y_idx, row)| {
+                let y = y_idx;
+                let min_dy = (y as isize - r).max(0) as usize;
+                let max_dy = (y as isize + r).min(height as isize - 1) as usize;
+
+                for x in 0..width {
+                    let idx = y * width + x;
+                    if pos_buf[idx].is_none() {
+                        let mut nearest_val = Vec4::new(0.5, 0.5, 1.0, 1.0);
+                        let mut min_dist = 99999isize;
+                        let min_dx = (x as isize - r).max(0) as usize;
+                        let max_dx = (x as isize + r).min(width as isize - 1) as usize;
+
+                        for sy in min_dy..=max_dy {
+                            let row_offset = sy * width;
+                            for sx in min_dx..=max_dx {
+                                let sidx = row_offset + sx;
+                                if pos_buf[sidx].is_some() {
+                                    let dist = (x as isize - sx as isize).pow(2) + (y as isize - sy as isize).pow(2);
+                                    if dist < min_dist {
+                                        min_dist = dist;
+                                        nearest_val = original[sidx];
+                                    }
                                 }
                             }
                         }
+                        row[x] = nearest_val;
                     }
-                    buffer.data[idx] = nearest_val;
                 }
-            }
-        }
+            });
     }
 
 

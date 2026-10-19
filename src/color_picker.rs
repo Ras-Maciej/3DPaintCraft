@@ -136,6 +136,7 @@ pub struct ColorPickerState {
     pub initial_rgb: [f32; 3],
     pub dragging_hue: bool,
     pub dragging_sv: bool,
+    pub popup_pos: Option<Pos2>,
 }
 
 impl Default for ColorPickerState {
@@ -149,6 +150,7 @@ impl Default for ColorPickerState {
             initial_rgb: [1.0, 1.0, 1.0],
             dragging_hue: false,
             dragging_sv: false,
+            popup_pos: None,
         }
     }
 }
@@ -194,30 +196,33 @@ pub fn show_color_wheel_content(
     }
 
     ui.vertical(|ui| {
-        // --- 1. COLOR COMPARISON & QUICK CLOSE ---
+        // --- 1. HEADER: COLOR COMPARISON & QUICK CONTROLS ---
         ui.horizontal(|ui| {
-            // Previous vs Current color swatch
-            let (preview_rect, _) = ui.allocate_exact_size(Vec2::new(72.0, 22.0), egui::Sense::hover());
+            ui.label(egui::RichText::new("COLOR").small().strong().color(Color32::from_rgb(155, 160, 175)));
+            ui.add_space(2.0);
+
+            // Previous vs Current color split preview swatch
+            let (preview_rect, _) = ui.allocate_exact_size(Vec2::new(56.0, 18.0), egui::Sense::hover());
             let half_w = preview_rect.width() * 0.5;
             let left_rect = Rect::from_min_max(preview_rect.min, Pos2::new(preview_rect.min.x + half_w, preview_rect.max.y));
             let right_rect = Rect::from_min_max(Pos2::new(preview_rect.min.x + half_w, preview_rect.min.y), preview_rect.max);
 
             let init_c = Color32::from_rgb(
-                (state.initial_rgb[0] * 255.0) as u8,
-                (state.initial_rgb[1] * 255.0) as u8,
-                (state.initial_rgb[2] * 255.0) as u8,
+                (state.initial_rgb[0].clamp(0.0, 1.0) * 255.0).round() as u8,
+                (state.initial_rgb[1].clamp(0.0, 1.0) * 255.0).round() as u8,
+                (state.initial_rgb[2].clamp(0.0, 1.0) * 255.0).round() as u8,
             );
             let cur_c = Color32::from_rgb(
-                (rgb[0] * 255.0) as u8,
-                (rgb[1] * 255.0) as u8,
-                (rgb[2] * 255.0) as u8,
+                (rgb[0].clamp(0.0, 1.0) * 255.0).round() as u8,
+                (rgb[1].clamp(0.0, 1.0) * 255.0).round() as u8,
+                (rgb[2].clamp(0.0, 1.0) * 255.0).round() as u8,
             );
 
-            ui.painter().rect_filled(left_rect, egui::Rounding { nw: 4.0, sw: 4.0, ne: 0.0, se: 0.0 }, init_c);
-            ui.painter().rect_filled(right_rect, egui::Rounding { nw: 0.0, sw: 0.0, ne: 4.0, se: 4.0 }, cur_c);
-            ui.painter().rect_stroke(preview_rect, egui::Rounding::same(4.0), Stroke::new(1.0_f32, Color32::from_rgb(70, 75, 85)));
+            ui.painter().rect_filled(left_rect, egui::Rounding { nw: 3.0, sw: 3.0, ne: 0.0, se: 0.0 }, init_c);
+            ui.painter().rect_filled(right_rect, egui::Rounding { nw: 0.0, sw: 0.0, ne: 3.0, se: 3.0 }, cur_c);
+            ui.painter().rect_stroke(preview_rect, egui::Rounding::same(3.0), Stroke::new(1.0_f32, Color32::from_rgb(60, 65, 75)));
 
-            if ui.button("Revert").on_hover_text("Revert to initial color").clicked() {
+            if ui.small_button("↺ Revert").on_hover_text("Revert to initial color").clicked() {
                 *rgb = state.initial_rgb;
                 let (h, s, v) = rgb_to_hsv(rgb[0], rgb[1], rgb[2]);
                 state.hue = h;
@@ -228,7 +233,7 @@ pub fn show_color_wheel_content(
             }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("✕").on_hover_text("Close color picker").clicked() {
+                if ui.small_button("✕").on_hover_text("Close color picker (Esc)").clicked() {
                     state.is_open = false;
                 }
             });
@@ -236,14 +241,27 @@ pub fn show_color_wheel_content(
 
         ui.add_space(6.0);
 
-        // --- 2. HUE RING & SATURATION-VALUE SQUARE ---
-        let wheel_size = 180.0;
-        let (rect, response) = ui.allocate_exact_size(Vec2::splat(wheel_size), egui::Sense::click_and_drag());
-        let center = rect.center();
-        let r_outer = wheel_size * 0.48;
-        let r_inner = wheel_size * 0.37;
-        let sq_half = wheel_size * 0.24;
-        let sq_rect = Rect::from_center_size(center, Vec2::splat(sq_half * 2.0));
+        // --- 2. PERFECTLY CENTERED HUE RING & SATURATION-VALUE SQUARE ---
+        let wheel_size = 176.0f32;
+        let avail_w = ui.available_width();
+        let offset_x = ((avail_w - wheel_size) * 0.5).max(0.0);
+
+        let mut center = Pos2::ZERO;
+        let r_outer = wheel_size * 0.48; // 84.48
+        let r_inner = wheel_size * 0.36; // 63.36
+        let sq_half = 43.0f32;           // 86x86 px box, corners at 43 * 1.414 = 60.8 < 63.36
+        let mut sq_rect = Rect::NOTHING;
+        let mut wheel_resp = None;
+
+        ui.horizontal(|ui| {
+            ui.add_space(offset_x);
+            let (rect, resp) = ui.allocate_exact_size(Vec2::splat(wheel_size), egui::Sense::click_and_drag());
+            center = rect.center();
+            sq_rect = Rect::from_center_size(center, Vec2::splat(sq_half * 2.0));
+            wheel_resp = Some(resp);
+        });
+
+        let response = wheel_resp.unwrap();
 
         // Interactive pointer handling
         let pointer_pos = response.interact_pointer_pos();
@@ -286,7 +304,7 @@ pub fn show_color_wheel_content(
             }
         }
 
-        // --- Render Hue Ring (64 Segment Smooth Mesh) ---
+        // --- Render Hue Ring (64 Segment Smooth Gradient Mesh) ---
         let mut mesh = egui::epaint::Mesh::default();
         let segments = 64;
         for i in 0..segments {
@@ -364,9 +382,9 @@ pub fn show_color_wheel_content(
 
         // --- 3. DIRECT HEX EDITING & CLIPBOARD INTEGRATION ---
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("Hex:").strong());
+            ui.label(egui::RichText::new("Hex:").small().strong().color(Color32::from_rgb(160, 165, 175)));
             let hex_resp = ui.add_sized(
-                [80.0, 20.0],
+                [76.0, 20.0],
                 egui::TextEdit::singleline(&mut state.hex_input)
                     .hint_text("#RRGGBB")
                     .font(egui::TextStyle::Monospace),
@@ -383,7 +401,7 @@ pub fn show_color_wheel_content(
                 }
             }
 
-            if ui.button("Copy").on_hover_text("Copy #RRGGBB to clipboard").clicked() {
+            if ui.button("Copy").on_hover_text("Copy hex code to clipboard").clicked() {
                 let hex_str = rgb_to_hex(rgb[0], rgb[1], rgb[2]);
                 copy_to_clipboard(ui.ctx(), &hex_str);
             }
@@ -405,14 +423,14 @@ pub fn show_color_wheel_content(
 
         ui.add_space(4.0);
 
-        // --- 4. PRECISE RGB & HSV SLIDERS ---
+        // --- 4. PRECISE RGB CHANNEL VALUES ---
         let mut r_int = (rgb[0] * 255.0).round() as u8;
         let mut g_int = (rgb[1] * 255.0).round() as u8;
         let mut b_int = (rgb[2] * 255.0).round() as u8;
 
         ui.horizontal(|ui| {
-            ui.label("R:");
-            if ui.add_sized([44.0, 18.0], egui::DragValue::new(&mut r_int).range(0..=255)).changed() {
+            ui.colored_label(Color32::from_rgb(255, 110, 110), "R");
+            if ui.add_sized([42.0, 18.0], egui::DragValue::new(&mut r_int).range(0..=255)).changed() {
                 rgb[0] = r_int as f32 / 255.0;
                 let (h, s, v) = rgb_to_hsv(rgb[0], rgb[1], rgb[2]);
                 state.hue = h;
@@ -421,8 +439,8 @@ pub fn show_color_wheel_content(
                 state.hex_input = rgb_to_hex(rgb[0], rgb[1], rgb[2]);
                 changed = true;
             }
-            ui.label("G:");
-            if ui.add_sized([44.0, 18.0], egui::DragValue::new(&mut g_int).range(0..=255)).changed() {
+            ui.colored_label(Color32::from_rgb(110, 230, 110), "G");
+            if ui.add_sized([42.0, 18.0], egui::DragValue::new(&mut g_int).range(0..=255)).changed() {
                 rgb[1] = g_int as f32 / 255.0;
                 let (h, s, v) = rgb_to_hsv(rgb[0], rgb[1], rgb[2]);
                 state.hue = h;
@@ -431,8 +449,8 @@ pub fn show_color_wheel_content(
                 state.hex_input = rgb_to_hex(rgb[0], rgb[1], rgb[2]);
                 changed = true;
             }
-            ui.label("B:");
-            if ui.add_sized([44.0, 18.0], egui::DragValue::new(&mut b_int).range(0..=255)).changed() {
+            ui.colored_label(Color32::from_rgb(110, 170, 255), "B");
+            if ui.add_sized([42.0, 18.0], egui::DragValue::new(&mut b_int).range(0..=255)).changed() {
                 rgb[2] = b_int as f32 / 255.0;
                 let (h, s, v) = rgb_to_hsv(rgb[0], rgb[1], rgb[2]);
                 state.hue = h;
@@ -443,34 +461,50 @@ pub fn show_color_wheel_content(
             }
         });
 
-        ui.add_space(4.0);
+        ui.add_space(5.0);
 
-        // --- 5. SWATCHES PALETTE ---
-        ui.horizontal_wrapped(|ui| {
-            for &(name, hex) in PALETTE_SWATCHES {
-                if let Some(swatch_rgb) = parse_hex_color(hex) {
-                    let c = Color32::from_rgb(
-                        (swatch_rgb[0] * 255.0) as u8,
-                        (swatch_rgb[1] * 255.0) as u8,
-                        (swatch_rgb[2] * 255.0) as u8,
-                    );
-                    let (swatch_rect, resp) = ui.allocate_exact_size(Vec2::new(17.0, 17.0), egui::Sense::click());
-                    ui.painter().rect_filled(swatch_rect, 2.0, c);
-                    let border_col = if resp.hovered() { Color32::WHITE } else { Color32::from_rgb(55, 60, 70) };
-                    ui.painter().rect_stroke(swatch_rect, 2.0, Stroke::new(1.0_f32, border_col));
+        // --- 5. CENTERED 2x8 PALETTE SWATCHES GRID ---
+        let swatch_w = 20.0f32;
+        let swatch_h = 16.0f32;
+        let swatch_spacing = 4.0f32;
+        let total_swatches_w = 8.0 * swatch_w + 7.0 * swatch_spacing; // 188px
+        let swatches_offset = ((avail_w - total_swatches_w) * 0.5).max(0.0);
 
-                    if resp.on_hover_text(format!("{} ({})", name, hex)).clicked() {
-                        *rgb = swatch_rgb;
-                        let (h, s, v) = rgb_to_hsv(rgb[0], rgb[1], rgb[2]);
-                        state.hue = h;
-                        state.saturation = s;
-                        state.value = v;
-                        state.hex_input = hex.to_string();
-                        changed = true;
+        for row in 0..2 {
+            ui.horizontal(|ui| {
+                ui.add_space(swatches_offset);
+                ui.spacing_mut().item_spacing = Vec2::new(swatch_spacing, 0.0);
+                for col in 0..8 {
+                    let idx = row * 8 + col;
+                    if let Some(&(name, hex)) = PALETTE_SWATCHES.get(idx) {
+                        if let Some(swatch_rgb) = parse_hex_color(hex) {
+                            let c = Color32::from_rgb(
+                                (swatch_rgb[0] * 255.0) as u8,
+                                (swatch_rgb[1] * 255.0) as u8,
+                                (swatch_rgb[2] * 255.0) as u8,
+                            );
+                            let (swatch_rect, resp) = ui.allocate_exact_size(Vec2::new(swatch_w, swatch_h), egui::Sense::click());
+                            ui.painter().rect_filled(swatch_rect, 2.0, c);
+                            let border_col = if resp.hovered() { Color32::WHITE } else { Color32::from_rgb(55, 60, 70) };
+                            ui.painter().rect_stroke(swatch_rect, 2.0, Stroke::new(1.0_f32, border_col));
+
+                            if resp.on_hover_text(format!("{} ({})", name, hex)).clicked() {
+                                *rgb = swatch_rgb;
+                                let (h, s, v) = rgb_to_hsv(rgb[0], rgb[1], rgb[2]);
+                                state.hue = h;
+                                state.saturation = s;
+                                state.value = v;
+                                state.hex_input = hex.to_string();
+                                changed = true;
+                            }
+                        }
                     }
                 }
+            });
+            if row == 0 {
+                ui.add_space(swatch_spacing);
             }
-        });
+        }
     });
 
     changed
@@ -490,6 +524,7 @@ pub fn color_picker_button_rgb(ui: &mut egui::Ui, id: egui::Id, rgb: &mut [f32; 
             initial_rgb: *rgb,
             dragging_hue: false,
             dragging_sv: false,
+            popup_pos: None,
         }
     });
 
@@ -520,6 +555,30 @@ pub fn color_picker_button_rgb(ui: &mut egui::Ui, id: egui::Id, rgb: &mut [f32; 
             state.saturation = s;
             state.value = v;
             state.hex_input = rgb_to_hex(rgb[0], rgb[1], rgb[2]);
+
+            // Calculate anchored flyout spawn position adjacent to the button
+            let screen_rect = ui.ctx().screen_rect();
+            let popup_w = 236.0f32;
+            let popup_h = 430.0f32;
+
+            let pos = if btn_rect.min.x > screen_rect.center().x {
+                // Button is on the right half of the screen (e.g. Inspector/Properties panel) -> spawn to the left
+                Pos2::new(btn_rect.min.x - popup_w - 8.0, btn_rect.min.y)
+            } else if btn_rect.max.y < screen_rect.min.y + 140.0 {
+                // Button is in top toolbar -> spawn below
+                Pos2::new(btn_rect.min.x, btn_rect.max.y + 6.0)
+            } else {
+                // Default: spawn to the right of the button
+                Pos2::new(btn_rect.max.x + 8.0, btn_rect.min.y)
+            };
+
+            let min_x = screen_rect.min.x + 10.0;
+            let max_x = (screen_rect.max.x - popup_w - 10.0).max(min_x);
+            let min_y = screen_rect.min.y + 10.0;
+            let max_y = (screen_rect.max.y - popup_h - 10.0).max(min_y);
+
+            let clamped_pos = Pos2::new(pos.x.clamp(min_x, max_x), pos.y.clamp(min_y, max_y));
+            state.popup_pos = Some(clamped_pos);
         }
     }
 
@@ -527,21 +586,60 @@ pub fn color_picker_button_rgb(ui: &mut egui::Ui, id: egui::Id, rgb: &mut [f32; 
 
     if state.is_open {
         let popup_title = format!("Color Wheel ###{}", id.value());
-        let mut window_open = true;
-        egui::Window::new(popup_title)
-            .title_bar(true)
+        let spawn_pos = state.popup_pos.unwrap_or_else(|| {
+            let screen_rect = ui.ctx().screen_rect();
+            let popup_w = 236.0f32;
+            let popup_h = 430.0f32;
+            let pos = if btn_rect.min.x > screen_rect.center().x {
+                Pos2::new(btn_rect.min.x - popup_w - 8.0, btn_rect.min.y)
+            } else if btn_rect.max.y < screen_rect.min.y + 140.0 {
+                Pos2::new(btn_rect.min.x, btn_rect.max.y + 6.0)
+            } else {
+                Pos2::new(btn_rect.max.x + 8.0, btn_rect.min.y)
+            };
+            let min_x = screen_rect.min.x + 10.0;
+            let max_x = (screen_rect.max.x - popup_w - 10.0).max(min_x);
+            let min_y = screen_rect.min.y + 10.0;
+            let max_y = (screen_rect.max.y - popup_h - 10.0).max(min_y);
+            Pos2::new(pos.x.clamp(min_x, max_x), pos.y.clamp(min_y, max_y))
+        });
+
+        let win_resp = egui::Window::new(popup_title)
+            .title_bar(false)
             .collapsible(false)
             .resizable(false)
-            .default_width(210.0)
-            .open(&mut window_open)
+            .fixed_size(Vec2::new(236.0, 430.0))
+            .current_pos(spawn_pos)
+            .order(egui::Order::Foreground)
+            .frame(
+                egui::Frame::window(ui.style())
+                    .fill(Color32::from_rgb(26, 28, 33))
+                    .stroke(Stroke::new(1.0_f32, Color32::from_rgb(60, 64, 74)))
+                    .rounding(egui::Rounding::same(6.0))
+                    .inner_margin(egui::Margin::same(10.0)),
+            )
             .show(ui.ctx(), |ui| {
                 if show_color_wheel_content(ui, &mut state, rgb) {
                     changed = true;
                 }
             });
 
-        if !window_open {
-            state.is_open = false;
+        if let Some(win_resp) = win_resp {
+            let win_rect = win_resp.response.rect;
+
+            // Auto-close on Escape key
+            if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                state.is_open = false;
+            }
+
+            // Auto-close on click outside window and button
+            if !state.dragging_hue && !state.dragging_sv && ui.input(|i| i.pointer.any_pressed()) {
+                if let Some(ptr) = ui.input(|i| i.pointer.interact_pos()) {
+                    if !win_rect.contains(ptr) && !btn_rect.contains(ptr) {
+                        state.is_open = false;
+                    }
+                }
+            }
         }
     }
 

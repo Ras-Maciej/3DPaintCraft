@@ -84,6 +84,14 @@ fn unpack_normal_oct(e: vec2<f32>) -> vec3<f32> {
     return normalize(vec3<f32>(nx, ny, pz));
 }
 
+fn reconstruct_world_pos(uv: vec2<f32>, raw_depth: f32) -> vec3<f32> {
+    let ndc_x = uv.x * 2.0 - 1.0;
+    let ndc_y = 1.0 - uv.y * 2.0;
+    let clip_pos = vec4<f32>(ndc_x, ndc_y, raw_depth, 1.0);
+    let world_h = params.inv_view_proj * clip_pos;
+    return world_h.xyz / max(world_h.w, 1e-4);
+}
+
 // Screen-Space Ray Traced Reflections (SSR)
 fn raytrace_ssr(uv: vec2<f32>, base_col: vec3<f32>) -> vec3<f32> {
     if params.ssr_enabled == 0u || params.view_mode != 0u {
@@ -109,11 +117,7 @@ fn raytrace_ssr(uv: vec2<f32>, base_col: vec3<f32>) -> vec3<f32> {
     }
 
     // Reconstruct 3D world position
-    let ndc_x = uv.x * 2.0 - 1.0;
-    let ndc_y = 1.0 - uv.y * 2.0;
-    let clip_pos = vec4<f32>(ndc_x, ndc_y, raw_depth, 1.0);
-    let world_h = params.inv_view_proj * clip_pos;
-    let world_pos = world_h.xyz / max(world_h.w, 1e-4);
+    let world_pos = reconstruct_world_pos(uv, raw_depth);
 
     let view_dir = normalize(world_pos - params.eye_pos.xyz);
     let reflect_dir = normalize(reflect(view_dir, normal));
@@ -387,11 +391,8 @@ fn denoise_joint_bilateral(uv: vec2<f32>, center_col: vec3<f32>) -> vec3<f32> {
     return total_col / total_weight;
 }
 
-// Screen-Space Ambient Occlusion (SSAO) with 16 Fermat Spiral Poisson samples & Interleaved Gradient Noise
-fn interleaved_gradient_noise(p: vec2<f32>) -> f32 {
-    return fract(52.9829189 * fract(dot(p, vec2<f32>(0.06711056, 0.00583715))));
-}
-
+// Scalable Ambient Obscurance (SAO / Alchemy) with 3D Tangent Plane Obscurance
+// Eliminates false occlusion on flat/curved surfaces and provides buttery smooth contact shadows.
 fn compute_ssao(uv: vec2<f32>) -> f32 {
     if params.ssao_enabled == 0u || params.view_mode != 0u {
         return 1.0;
@@ -403,130 +404,99 @@ fn compute_ssao(uv: vec2<f32>) -> f32 {
         return 1.0;
     }
 
-    let lin_depth = linearize_depth(raw_depth);
     let norm_rough = textureLoad(tex_scene_normal, pixel_coord, 0);
     let normal = unpack_normal_oct(norm_rough.xy);
+    if dot(normal, normal) < 0.1 {
+        return 1.0;
+    }
 
-    let inv_screen = 1.0 / params.screen_size;
-    let radius = clamp(params.ssao_radius / max(lin_depth, 0.35), 0.002, 0.08);
+    // Reconstruct 3D world position
+    let world_pos = reconstruct_world_pos(uv, raw_depth);
+    let cam_dist = max(distance(world_pos, params.eye_pos.xyz), 0.1);
 
-    // Jimenez Interleaved Gradient Noise rotation angle
-    let noise = interleaved_gradient_noise(vec2<f32>(pixel_coord));
-    let rot_angle = noise * 6.2831853;
+    // World search radius
+    let world_radius = max(params.ssao_radius, 0.05);
+    let r2 = world_radius * world_radius;
+
+    // Projected screen-space radius with aspect ratio correction
+    let aspect = params.screen_size.x / max(params.screen_size.y, 1.0);
+    let uv_radius = clamp((world_radius / cam_dist) * 0.45, 0.003, 0.07);
+
+    // Subtle 4x4 spatial dither to break any concentric rings without high-frequency grain
+    let dither_x = pixel_coord.x % 4;
+    let dither_y = pixel_coord.y % 4;
+    let dither_idx = (dither_x * 3 + dither_y * 7) % 16;
+    let rot_angle = (f32(dither_idx) / 16.0 - 0.5) * 0.35; // +/- 10 degrees subtle rotation
     let rot_cos = cos(rot_angle);
     let rot_sin = sin(rot_angle);
 
-    var occlusion = 0.0;
-    let sample_count = 16.0;
+    var occlusion_sum = 0.0;
+    let sample_count = 20.0;
 
-    for (var i = 0u; i < 16u; i = i + 1u) {
-        // Golden ratio Fermat spiral
+    // Bias in world space prevents self-shadowing on flat planes and curved surfaces
+    let bias = 0.015 * world_radius;
+
+    for (var i = 0u; i < 20u; i = i + 1u) {
+        // Uniform Fermat spiral with golden ratio spacing
         let alpha = (f32(i) + 0.5) / sample_count;
         let theta = f32(i) * 2.3999632;
-        let r = sqrt(alpha);
+        let r_disk = pow(alpha, 0.7);
 
-        let unrotated = vec2<f32>(cos(theta), sin(theta)) * r;
+        let unrot = vec2<f32>(cos(theta), sin(theta)) * r_disk;
         let dir = vec2<f32>(
-            unrotated.x * rot_cos - unrotated.y * rot_sin,
-            unrotated.x * rot_sin + unrotated.y * rot_cos
+            unrot.x * rot_cos - unrot.y * rot_sin,
+            unrot.x * rot_sin + unrot.y * rot_cos
         );
 
-        let s_uv = clamp(uv + dir * inv_screen * radius * params.screen_size.y * 0.4, vec2<f32>(0.0), vec2<f32>(1.0));
+        // Aspect-ratio corrected circular sampling in view space
+        let screen_dir = vec2<f32>(dir.x / aspect, dir.y);
+        let s_uv = clamp(uv + screen_dir * uv_radius, vec2<f32>(0.0), vec2<f32>(1.0));
         let s_coord = vec2<i32>(clamp(s_uv * params.screen_size, vec2<f32>(0.0), params.screen_size - vec2<f32>(1.0)));
+
         let s_raw_depth = textureLoad(tex_scene_depth, s_coord, 0);
-        let s_depth = linearize_depth(s_raw_depth);
-
-        let depth_diff = lin_depth - s_depth;
-        if depth_diff > 0.002 && depth_diff < 0.35 {
-            let s_norm = unpack_normal_oct(textureLoad(tex_scene_normal, s_coord, 0).xy);
-            let angle_factor = max(dot(normal, s_norm), 0.0);
-            // Smoothly curved convex surfaces (like spheres) must not self-occlude
-            let is_smooth_neighbor = angle_factor > 0.75 && depth_diff < 0.08;
-            if !is_smooth_neighbor {
-                let dist_falloff = 1.0 - smoothstep(0.002, 0.35, depth_diff);
-                let crevice_factor = clamp(1.0 - angle_factor, 0.0, 1.0);
-                occlusion = occlusion + dist_falloff * crevice_factor;
-            }
+        if s_raw_depth >= 0.9999 {
+            // Background / skybox does not occlude foreground surfaces
+            continue;
         }
+
+        let s_world_pos = reconstruct_world_pos(s_uv, s_raw_depth);
+        let v = s_world_pos - world_pos;
+        let d2 = dot(v, v);
+
+        // Max distance rejection: points beyond the search sphere cannot occlude
+        if d2 >= r2 || d2 < 1e-6 {
+            continue;
+        }
+
+        // Obscurance test against tangent plane:
+        // h is the height of sample S above the tangent plane at world_pos.
+        let h = dot(v, normal);
+
+        // If sample is on or behind tangent plane (flat surface or convex curve), it CANNOT occlude
+        if h <= bias {
+            continue;
+        }
+
+        // McGuire SAO / Alchemy formulation:
+        // Solid angle of obscurance with smooth quadratic/cubic distance falloff
+        let dist_falloff = max(0.0, 1.0 - d2 / r2);
+        let smooth_falloff = dist_falloff * dist_falloff;
+        let solid_angle = (h - bias) / (d2 + 0.002);
+
+        // Verify sample normal orientation: opposing crevice faces occlude maximally,
+        // while surfaces facing away from the center pixel are discounted
+        let s_norm_data = textureLoad(tex_scene_normal, s_coord, 0);
+        let s_normal = unpack_normal_oct(s_norm_data.xy);
+        let facing_weight = clamp(dot(-normal, s_normal) + 0.6, 0.2, 1.0);
+
+        let sample_occ = solid_angle * world_radius * smooth_falloff * facing_weight;
+        occlusion_sum = occlusion_sum + sample_occ;
     }
 
-    let raw_ao = clamp(1.0 - (occlusion / sample_count) * params.ssao_intensity * 2.0, 0.0, 1.0);
-
-    // Cross-Bilateral depth & normal aware edge-preserving filter (smooths dither while preserving crevice silhouettes)
-    var total_ao = raw_ao;
-    var total_weight = 1.0;
-    let blur_radius = inv_screen * 1.5;
-
-    // Cross tap: +X
-    {
-        let b_uv = clamp(uv + vec2<f32>(1.0, 0.0) * blur_radius, vec2<f32>(0.0), vec2<f32>(1.0));
-        let b_coord = vec2<i32>(clamp(b_uv * params.screen_size, vec2<f32>(0.0), params.screen_size - vec2<f32>(1.0)));
-        let b_raw_depth = textureLoad(tex_scene_depth, b_coord, 0);
-        if b_raw_depth < 0.9999 {
-            let b_depth = linearize_depth(b_raw_depth);
-            let b_norm = unpack_normal_oct(textureLoad(tex_scene_normal, b_coord, 0).xy);
-            let depth_diff = abs(lin_depth - b_depth);
-            let norm_dot = max(dot(normal, b_norm), 0.0);
-            if depth_diff < 0.05 && norm_dot > 0.6 {
-                let weight = norm_dot * (1.0 - depth_diff * 20.0);
-                total_ao = total_ao + raw_ao * weight;
-                total_weight = total_weight + weight;
-            }
-        }
-    }
-    // Cross tap: -X
-    {
-        let b_uv = clamp(uv + vec2<f32>(-1.0, 0.0) * blur_radius, vec2<f32>(0.0), vec2<f32>(1.0));
-        let b_coord = vec2<i32>(clamp(b_uv * params.screen_size, vec2<f32>(0.0), params.screen_size - vec2<f32>(1.0)));
-        let b_raw_depth = textureLoad(tex_scene_depth, b_coord, 0);
-        if b_raw_depth < 0.9999 {
-            let b_depth = linearize_depth(b_raw_depth);
-            let b_norm = unpack_normal_oct(textureLoad(tex_scene_normal, b_coord, 0).xy);
-            let depth_diff = abs(lin_depth - b_depth);
-            let norm_dot = max(dot(normal, b_norm), 0.0);
-            if depth_diff < 0.05 && norm_dot > 0.6 {
-                let weight = norm_dot * (1.0 - depth_diff * 20.0);
-                total_ao = total_ao + raw_ao * weight;
-                total_weight = total_weight + weight;
-            }
-        }
-    }
-    // Cross tap: +Y
-    {
-        let b_uv = clamp(uv + vec2<f32>(0.0, 1.0) * blur_radius, vec2<f32>(0.0), vec2<f32>(1.0));
-        let b_coord = vec2<i32>(clamp(b_uv * params.screen_size, vec2<f32>(0.0), params.screen_size - vec2<f32>(1.0)));
-        let b_raw_depth = textureLoad(tex_scene_depth, b_coord, 0);
-        if b_raw_depth < 0.9999 {
-            let b_depth = linearize_depth(b_raw_depth);
-            let b_norm = unpack_normal_oct(textureLoad(tex_scene_normal, b_coord, 0).xy);
-            let depth_diff = abs(lin_depth - b_depth);
-            let norm_dot = max(dot(normal, b_norm), 0.0);
-            if depth_diff < 0.05 && norm_dot > 0.6 {
-                let weight = norm_dot * (1.0 - depth_diff * 20.0);
-                total_ao = total_ao + raw_ao * weight;
-                total_weight = total_weight + weight;
-            }
-        }
-    }
-    // Cross tap: -Y
-    {
-        let b_uv = clamp(uv + vec2<f32>(0.0, -1.0) * blur_radius, vec2<f32>(0.0), vec2<f32>(1.0));
-        let b_coord = vec2<i32>(clamp(b_uv * params.screen_size, vec2<f32>(0.0), params.screen_size - vec2<f32>(1.0)));
-        let b_raw_depth = textureLoad(tex_scene_depth, b_coord, 0);
-        if b_raw_depth < 0.9999 {
-            let b_depth = linearize_depth(b_raw_depth);
-            let b_norm = unpack_normal_oct(textureLoad(tex_scene_normal, b_coord, 0).xy);
-            let depth_diff = abs(lin_depth - b_depth);
-            let norm_dot = max(dot(normal, b_norm), 0.0);
-            if depth_diff < 0.05 && norm_dot > 0.6 {
-                let weight = norm_dot * (1.0 - depth_diff * 20.0);
-                total_ao = total_ao + raw_ao * weight;
-                total_weight = total_weight + weight;
-            }
-        }
-    }
-
-    return total_ao / max(total_weight, 0.01);
+    let norm_occ = (occlusion_sum / sample_count) * 0.75 * params.ssao_intensity;
+    // Soft exponential contrast curve for natural, photorealistic contact shadows
+    let ao_val = clamp(1.0 - norm_occ, 0.15, 1.0);
+    return ao_val;
 }
 
 @fragment
@@ -546,7 +516,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // 2. High-Quality Screen-Space Ambient Occlusion (Smooth crevice contact shadows)
     let ssao_val = compute_ssao(uv);
-    base_color = base_color * ssao_val;
+    let pixel_coord = vec2<i32>(clamp(uv * params.screen_size, vec2<f32>(0.0), params.screen_size - vec2<f32>(1.0)));
+    let norm_data = textureLoad(tex_scene_normal, pixel_coord, 0);
+    let metallic = norm_data.z;
+    // Dielectrics receive full ambient crevice shadow, metals receive subtle specular occlusion
+    let effective_ao = mix(ssao_val, 1.0, metallic * 0.7);
+    base_color = base_color * effective_ao;
 
     // 3. Screen-Space Reflections (SSR)
     if params.ssr_enabled == 1u {

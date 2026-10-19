@@ -335,6 +335,54 @@ pub enum MaskEffectType {
         blur: f32,
         invert: bool,
     },
+    GeneratorCurvatureWear {
+        wear_level: f32,
+        edge_width: f32,
+        edge_contrast: f32,
+        grunge_amount: f32,
+        grunge_scale: f32,
+        ao_inhibit: f32,
+        invert: bool,
+    },
+    GeneratorCavityDirt {
+        dirt_level: f32,
+        dirt_contrast: f32,
+        dirt_reach: f32,
+        grunge_clumping: f32,
+        grunge_scale: f32,
+        invert: bool,
+    },
+    GeneratorDirectionalDust {
+        dust_direction: [f32; 3],
+        dust_level: f32,
+        angle_tolerance: f32,
+        cavity_trap: f32,
+        grunge_breakup: f32,
+        grunge_scale: f32,
+    },
+    GeneratorGroundDirt {
+        bottom_level: f32,
+        gradient_softness: f32,
+        splash_amount: f32,
+        splash_scale: f32,
+    },
+    GeneratorMaskEditor {
+        curv_weight: f32,
+        curv_width: f32,
+        curv_contrast: f32,
+        curv_invert: bool,
+        ao_weight: f32,
+        ao_contrast: f32,
+        world_normal_weight: f32,
+        world_normal_dir: [f32; 3],
+        pos_weight: f32,
+        pos_height: f32,
+        grunge_weight: f32,
+        grunge_scale: f32,
+        global_balance: f32,
+        global_contrast: f32,
+        invert: bool,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1035,14 +1083,18 @@ impl Layer {
     pub fn add_black_mask(&mut self) {
         self.has_mask = true;
         self.mask_inverted = false;
+        self.base_mask_value = 0.0;
         self.mask_buf.data.fill(0.0);
+        self.mask_effects.clear();
         self.mark_dirty_full();
     }
 
     pub fn add_white_mask(&mut self) {
         self.has_mask = true;
         self.mask_inverted = false;
+        self.base_mask_value = 1.0;
         self.mask_buf.data.fill(1.0);
+        self.mask_effects.clear();
         self.mark_dirty_full();
     }
 
@@ -1387,6 +1439,323 @@ impl Layer {
         buf
     }
 
+    /// High-performance Rayon parallelized Curvature Edge Wear Generator
+    pub fn generate_mask_curvature_wear(
+        wear_level: f32,
+        edge_width: f32,
+        edge_contrast: f32,
+        grunge_amount: f32,
+        grunge_scale: f32,
+        ao_inhibit: f32,
+        invert: bool,
+        width: u32,
+        height: u32,
+        curvature_map: Option<&ScalarBuffer>,
+        ao_map: Option<&ScalarBuffer>,
+    ) -> ScalarBuffer {
+        let mut buf = ScalarBuffer::new(width, height, 0.0);
+        let g_sc = grunge_scale.max(0.5);
+        let width_factor = edge_width.max(0.1);
+        let wear = wear_level.clamp(0.0, 1.0);
+        let threshold = 1.0 - wear * 0.95;
+
+        buf.data.par_chunks_mut(width as usize).enumerate().for_each(|(y, row)| {
+            let v = y as f32 / height as f32;
+            for (x, pixel) in row.iter_mut().enumerate() {
+                let u = x as f32 / width as f32;
+                let uv = glam::Vec2::new(u, v);
+
+                let mut curv = if let Some(cm) = curvature_map {
+                    cm.sample_bilinear(uv)
+                } else {
+                    let r = NoiseGenerator::ridged_fbm_2d(u * 6.0, v * 6.0, 3, 2.0, 0.5);
+                    0.5 + (r - 0.5) * 0.4
+                };
+
+                if invert {
+                    curv = 1.0 - curv;
+                }
+
+                // Curvature distance above flat baseline (0.5)
+                let delta = (curv - 0.5).max(0.0) * 2.0;
+                let expanded = ((delta * width_factor - (threshold - 0.5)) / (1.05 - threshold)).clamp(0.0, 1.0);
+                let edge = ((expanded - 0.5) * edge_contrast + 0.5).clamp(0.0, 1.0);
+
+                // Flake & chipped perimeter noise
+                let (w1, w2) = NoiseGenerator::voronoi_2d(u * g_sc, v * g_sc);
+                let chip = (w2 - w1).clamp(0.0, 1.0);
+                let ridge = NoiseGenerator::ridged_fbm_2d(u * g_sc * 1.5, v * g_sc * 1.5, 3, 2.0, 0.5);
+                let perlin = NoiseGenerator::fbm_perlin_2d(u * g_sc * 0.5, v * g_sc * 0.5, 3, 2.0, 0.5);
+                let grunge = 0.45 * chip + 0.35 * ridge + 0.20 * perlin;
+
+                // Modulate edge with grunge chipping
+                let mut wear_val = edge * (1.0 - grunge_amount * (1.0 - grunge));
+
+                // AO cavity inhibit (suppress wear in protected crevices)
+                if ao_inhibit > 0.001 {
+                    if let Some(am) = ao_map {
+                        let ao = am.sample_bilinear(uv);
+                        let ao_gate = ((ao - 0.25) / 0.75).clamp(1.0 - ao_inhibit, 1.0);
+                        wear_val *= ao_gate;
+                    }
+                }
+
+                *pixel = wear_val.clamp(0.0, 1.0);
+            }
+        });
+
+        buf
+    }
+
+    /// High-performance Rayon parallelized Cavity Dirt & Crevice Grime (AO) Generator
+    pub fn generate_mask_cavity_dirt(
+        dirt_level: f32,
+        dirt_contrast: f32,
+        dirt_reach: f32,
+        grunge_clumping: f32,
+        grunge_scale: f32,
+        invert: bool,
+        width: u32,
+        height: u32,
+        ao_map: Option<&ScalarBuffer>,
+        curvature_map: Option<&ScalarBuffer>,
+    ) -> ScalarBuffer {
+        let mut buf = ScalarBuffer::new(width, height, 0.0);
+        let g_sc = grunge_scale.max(0.5);
+        let reach_exp = 1.0 / dirt_reach.max(0.1);
+        let level = dirt_level.clamp(0.0, 1.0) * 1.8;
+
+        buf.data.par_chunks_mut(width as usize).enumerate().for_each(|(y, row)| {
+            let v = y as f32 / height as f32;
+            for (x, pixel) in row.iter_mut().enumerate() {
+                let u = x as f32 / width as f32;
+                let uv = glam::Vec2::new(u, v);
+
+                let ao = ao_map.map(|am| am.sample_bilinear(uv)).unwrap_or(0.85);
+                let curv = curvature_map.map(|cm| cm.sample_bilinear(uv)).unwrap_or(0.5);
+
+                let ao_crevice = (1.0 - ao).clamp(0.0, 1.0);
+                let curv_crevice = ((0.5 - curv) * 2.0).clamp(0.0, 1.0);
+                let mut cavity = (ao_crevice * 1.35 + curv_crevice * 0.65).clamp(0.0, 1.0);
+
+                if invert {
+                    cavity = 1.0 - cavity;
+                }
+
+                let expanded = cavity.powf(reach_exp);
+                let dirt_base = (expanded * level).clamp(0.0, 1.0);
+
+                let warp = NoiseGenerator::domain_warp_2d(u * g_sc * 0.6, v * g_sc * 0.6);
+                let splatter = NoiseGenerator::splatter_spots_2d(u * g_sc * 2.0, v * g_sc * 2.0);
+                let billow = NoiseGenerator::billow_2d(u * g_sc, v * g_sc, 3, 2.0, 0.5);
+                let grunge = 0.45 * warp + 0.30 * splatter + 0.25 * billow;
+
+                let grunged = dirt_base * (1.0 - grunge_clumping * (1.0 - grunge));
+                let contrasted = ((grunged - 0.5) * dirt_contrast + 0.5).clamp(0.0, 1.0);
+
+                *pixel = contrasted;
+            }
+        });
+
+        buf
+    }
+
+    /// High-performance Rayon parallelized Directional Dust & Weathering (Normal) Generator
+    pub fn generate_mask_directional_dust(
+        dust_direction: [f32; 3],
+        dust_level: f32,
+        angle_tolerance: f32,
+        cavity_trap: f32,
+        grunge_breakup: f32,
+        grunge_scale: f32,
+        width: u32,
+        height: u32,
+        world_normal_map: Option<&RgbaBuffer>,
+        ao_map: Option<&ScalarBuffer>,
+    ) -> ScalarBuffer {
+        let mut buf = ScalarBuffer::new(width, height, 0.0);
+        let g_sc = grunge_scale.max(0.5);
+        let dir = glam::Vec3::new(dust_direction[0], dust_direction[1], dust_direction[2]).normalize_or_zero();
+        let tol = angle_tolerance.max(0.05);
+        let threshold = (1.0 - tol * 0.5).clamp(-1.0, 0.99);
+
+        buf.data.par_chunks_mut(width as usize).enumerate().for_each(|(y, row)| {
+            let v = y as f32 / height as f32;
+            for (x, pixel) in row.iter_mut().enumerate() {
+                let u = x as f32 / width as f32;
+                let uv = glam::Vec2::new(u, v);
+
+                let norm = if let Some(wn) = world_normal_map {
+                    let col = wn.sample_bilinear(uv);
+                    glam::Vec3::new(col.x * 2.0 - 1.0, col.y * 2.0 - 1.0, col.z * 2.0 - 1.0).normalize_or_zero()
+                } else {
+                    glam::Vec3::new(0.0, 1.0, 0.0)
+                };
+
+                let dot_align = norm.dot(dir);
+                let angle_factor = ((dot_align - threshold) / (1.01 - threshold)).clamp(0.0, 1.0).powf(0.7);
+                let mut dust = (angle_factor * dust_level * 1.8).clamp(0.0, 1.0);
+
+                if cavity_trap > 0.001 {
+                    if let Some(am) = ao_map {
+                        let ao = am.sample_bilinear(uv);
+                        let trap = 1.0 + (1.0 - ao) * cavity_trap * 1.5;
+                        dust = (dust * trap).clamp(0.0, 1.0);
+                    }
+                }
+
+                let billow = NoiseGenerator::billow_2d(u * g_sc, v * g_sc, 3, 2.0, 0.5);
+                let splatter = NoiseGenerator::splatter_spots_2d(u * g_sc * 2.5, v * g_sc * 2.5);
+                let grunge = 0.65 * billow + 0.35 * splatter;
+
+                let final_dust = (dust * (1.0 - grunge_breakup * (1.0 - grunge))).clamp(0.0, 1.0);
+                *pixel = final_dust;
+            }
+        });
+
+        buf
+    }
+
+    /// High-performance Rayon parallelized Ground Dirt & Mud Splash (Position) Generator
+    pub fn generate_mask_ground_dirt(
+        bottom_level: f32,
+        gradient_softness: f32,
+        splash_amount: f32,
+        splash_scale: f32,
+        width: u32,
+        height: u32,
+        position_map: Option<&RgbaBuffer>,
+    ) -> ScalarBuffer {
+        let mut buf = ScalarBuffer::new(width, height, 0.0);
+        let g_sc = splash_scale.max(0.5);
+        let softness = gradient_softness.max(0.02);
+
+        buf.data.par_chunks_mut(width as usize).enumerate().for_each(|(y, row)| {
+            let v = y as f32 / height as f32;
+            for (x, pixel) in row.iter_mut().enumerate() {
+                let u = x as f32 / width as f32;
+                let uv = glam::Vec2::new(u, v);
+
+                let height_val = if let Some(pm) = position_map {
+                    pm.sample_bilinear(uv).y.clamp(0.0, 1.0)
+                } else {
+                    1.0 - v
+                };
+
+                let base_grad = (1.0 - (height_val - (bottom_level - softness)) / softness).clamp(0.0, 1.0);
+
+                let splatter = NoiseGenerator::splatter_spots_2d(u * g_sc, v * g_sc);
+                let warp = NoiseGenerator::domain_warp_2d(u * g_sc * 0.4, v * g_sc * 0.4);
+                let splash_reach = (1.0 - (height_val - bottom_level).max(0.0) / 0.35).clamp(0.0, 1.0);
+                let splash = splatter * warp * splash_reach * splash_amount * 1.5;
+
+                *pixel = (base_grad + splash).clamp(0.0, 1.0);
+            }
+        });
+
+        buf
+    }
+
+    /// High-performance Rayon parallelized Substance-style Compound Mask Editor
+    pub fn generate_mask_mask_editor(
+        curv_weight: f32,
+        curv_width: f32,
+        curv_contrast: f32,
+        curv_invert: bool,
+        ao_weight: f32,
+        ao_contrast: f32,
+        world_normal_weight: f32,
+        world_normal_dir: [f32; 3],
+        pos_weight: f32,
+        pos_height: f32,
+        grunge_weight: f32,
+        grunge_scale: f32,
+        global_balance: f32,
+        global_contrast: f32,
+        invert: bool,
+        width: u32,
+        height: u32,
+        curvature_map: Option<&ScalarBuffer>,
+        ao_map: Option<&ScalarBuffer>,
+        position_map: Option<&RgbaBuffer>,
+        world_normal_map: Option<&RgbaBuffer>,
+    ) -> ScalarBuffer {
+        let mut buf = ScalarBuffer::new(width, height, 0.0);
+        let g_sc = grunge_scale.max(0.5);
+        let dir = glam::Vec3::new(world_normal_dir[0], world_normal_dir[1], world_normal_dir[2]).normalize_or_zero();
+
+        buf.data.par_chunks_mut(width as usize).enumerate().for_each(|(y, row)| {
+            let v = y as f32 / height as f32;
+            for (x, pixel) in row.iter_mut().enumerate() {
+                let u = x as f32 / width as f32;
+                let uv = glam::Vec2::new(u, v);
+
+                let mut comp = 0.0f32;
+                let mut total_w = 0.0f32;
+
+                // 1. Curvature
+                if curv_weight > 0.001 {
+                    let mut c = curvature_map.map(|cm| cm.sample_bilinear(uv)).unwrap_or(0.5);
+                    if curv_invert { c = 1.0 - c; }
+                    let delta = (c - 0.5).max(0.0) * 2.0;
+                    let expanded = (delta * curv_width).clamp(0.0, 1.0);
+                    let contrasted = ((expanded - 0.5) * curv_contrast + 0.5).clamp(0.0, 1.0);
+                    comp += contrasted * curv_weight;
+                    total_w += curv_weight;
+                }
+
+                // 2. Ambient Occlusion
+                if ao_weight > 0.001 {
+                    let ao = ao_map.map(|am| am.sample_bilinear(uv)).unwrap_or(0.85);
+                    let cavity = (1.0 - ao).clamp(0.0, 1.0);
+                    let contrasted = ((cavity - 0.5) * ao_contrast + 0.5).clamp(0.0, 1.0);
+                    comp += contrasted * ao_weight;
+                    total_w += ao_weight;
+                }
+
+                // 3. World Normal (Direction)
+                if world_normal_weight > 0.001 {
+                    let norm = if let Some(wn) = world_normal_map {
+                        let col = wn.sample_bilinear(uv);
+                        glam::Vec3::new(col.x * 2.0 - 1.0, col.y * 2.0 - 1.0, col.z * 2.0 - 1.0).normalize_or_zero()
+                    } else {
+                        glam::Vec3::new(0.0, 1.0, 0.0)
+                    };
+                    let align = (norm.dot(dir) * 0.5 + 0.5).clamp(0.0, 1.0);
+                    comp += align * world_normal_weight;
+                    total_w += world_normal_weight;
+                }
+
+                // 4. Position Height
+                if pos_weight > 0.001 {
+                    let h_val = position_map.map(|pm| pm.sample_bilinear(uv).y).unwrap_or(v);
+                    let pos_factor = (1.0 - (h_val - pos_height).abs() * 2.0).clamp(0.0, 1.0);
+                    comp += pos_factor * pos_weight;
+                    total_w += pos_weight;
+                }
+
+                let base_val = if total_w > 0.001 { comp / total_w } else { 0.5 };
+
+                // 5. Grunge Noise Modulation
+                let grunge = if grunge_weight > 0.001 {
+                    let (w1, w2) = NoiseGenerator::voronoi_2d(u * g_sc, v * g_sc);
+                    let fbm = NoiseGenerator::fbm_perlin_2d(u * g_sc * 1.5, v * g_sc * 1.5, 3, 2.0, 0.5);
+                    0.5 * (w2 - w1).clamp(0.0, 1.0) + 0.5 * fbm
+                } else {
+                    1.0
+                };
+
+                let grunged = base_val * (1.0 - grunge_weight * (1.0 - grunge));
+                let balanced = (grunged + (global_balance - 0.5) * 1.5).clamp(0.0, 1.0);
+                let final_val = ((balanced - 0.5) * global_contrast + 0.5).clamp(0.0, 1.0);
+
+                *pixel = if invert { 1.0 - final_val } else { final_val };
+            }
+        });
+
+        buf
+    }
+
     /// Preserves existing hand-painted mask strokes by moving them into a base Paint effect
     pub fn preserve_base_paint_if_needed(&mut self) {
         if self.mask_effects.is_empty() && self.has_mask {
@@ -1614,6 +1983,173 @@ impl Layer {
                         }
                     }
                 }
+                MaskEffectType::GeneratorCurvatureWear {
+                    wear_level,
+                    edge_width,
+                    edge_contrast,
+                    grunge_amount,
+                    grunge_scale,
+                    ao_inhibit,
+                    invert,
+                } => {
+                    let gen_buf = Self::generate_mask_curvature_wear(
+                        *wear_level,
+                        *edge_width,
+                        *edge_contrast,
+                        *grunge_amount,
+                        *grunge_scale,
+                        *ao_inhibit,
+                        *invert,
+                        w,
+                        h,
+                        curvature_map,
+                        ao_map,
+                    );
+                    if first && effect.blend_mode == BlendMode::Normal {
+                        accum = gen_buf;
+                        first = false;
+                    } else {
+                        first = false;
+                        for i in 0..(w * h) as usize {
+                            accum.data[i] = effect.blend_mode.blend_scalar(accum.data[i], gen_buf.data[i], effect.opacity);
+                        }
+                    }
+                }
+                MaskEffectType::GeneratorCavityDirt {
+                    dirt_level,
+                    dirt_contrast,
+                    dirt_reach,
+                    grunge_clumping,
+                    grunge_scale,
+                    invert,
+                } => {
+                    let gen_buf = Self::generate_mask_cavity_dirt(
+                        *dirt_level,
+                        *dirt_contrast,
+                        *dirt_reach,
+                        *grunge_clumping,
+                        *grunge_scale,
+                        *invert,
+                        w,
+                        h,
+                        ao_map,
+                        curvature_map,
+                    );
+                    if first && effect.blend_mode == BlendMode::Normal {
+                        accum = gen_buf;
+                        first = false;
+                    } else {
+                        first = false;
+                        for i in 0..(w * h) as usize {
+                            accum.data[i] = effect.blend_mode.blend_scalar(accum.data[i], gen_buf.data[i], effect.opacity);
+                        }
+                    }
+                }
+                MaskEffectType::GeneratorDirectionalDust {
+                    dust_direction,
+                    dust_level,
+                    angle_tolerance,
+                    cavity_trap,
+                    grunge_breakup,
+                    grunge_scale,
+                } => {
+                    let gen_buf = Self::generate_mask_directional_dust(
+                        *dust_direction,
+                        *dust_level,
+                        *angle_tolerance,
+                        *cavity_trap,
+                        *grunge_breakup,
+                        *grunge_scale,
+                        w,
+                        h,
+                        world_normal_map,
+                        ao_map,
+                    );
+                    if first && effect.blend_mode == BlendMode::Normal {
+                        accum = gen_buf;
+                        first = false;
+                    } else {
+                        first = false;
+                        for i in 0..(w * h) as usize {
+                            accum.data[i] = effect.blend_mode.blend_scalar(accum.data[i], gen_buf.data[i], effect.opacity);
+                        }
+                    }
+                }
+                MaskEffectType::GeneratorGroundDirt {
+                    bottom_level,
+                    gradient_softness,
+                    splash_amount,
+                    splash_scale,
+                } => {
+                    let gen_buf = Self::generate_mask_ground_dirt(
+                        *bottom_level,
+                        *gradient_softness,
+                        *splash_amount,
+                        *splash_scale,
+                        w,
+                        h,
+                        position_map,
+                    );
+                    if first && effect.blend_mode == BlendMode::Normal {
+                        accum = gen_buf;
+                        first = false;
+                    } else {
+                        first = false;
+                        for i in 0..(w * h) as usize {
+                            accum.data[i] = effect.blend_mode.blend_scalar(accum.data[i], gen_buf.data[i], effect.opacity);
+                        }
+                    }
+                }
+                MaskEffectType::GeneratorMaskEditor {
+                    curv_weight,
+                    curv_width,
+                    curv_contrast,
+                    curv_invert,
+                    ao_weight,
+                    ao_contrast,
+                    world_normal_weight,
+                    world_normal_dir,
+                    pos_weight,
+                    pos_height,
+                    grunge_weight,
+                    grunge_scale,
+                    global_balance,
+                    global_contrast,
+                    invert,
+                } => {
+                    let gen_buf = Self::generate_mask_mask_editor(
+                        *curv_weight,
+                        *curv_width,
+                        *curv_contrast,
+                        *curv_invert,
+                        *ao_weight,
+                        *ao_contrast,
+                        *world_normal_weight,
+                        *world_normal_dir,
+                        *pos_weight,
+                        *pos_height,
+                        *grunge_weight,
+                        *grunge_scale,
+                        *global_balance,
+                        *global_contrast,
+                        *invert,
+                        w,
+                        h,
+                        curvature_map,
+                        ao_map,
+                        position_map,
+                        world_normal_map,
+                    );
+                    if first && effect.blend_mode == BlendMode::Normal {
+                        accum = gen_buf;
+                        first = false;
+                    } else {
+                        first = false;
+                        for i in 0..(w * h) as usize {
+                            accum.data[i] = effect.blend_mode.blend_scalar(accum.data[i], gen_buf.data[i], effect.opacity);
+                        }
+                    }
+                }
             }
         }
 
@@ -1657,6 +2193,174 @@ impl Layer {
             blend_mode,
         });
         self.active_mask_effect_id = Some(id);
+        id
+    }
+
+    pub fn add_mask_generator_curvature_wear(
+        &mut self,
+        curvature_map: Option<&ScalarBuffer>,
+        ao_map: Option<&ScalarBuffer>,
+        position_map: Option<&RgbaBuffer>,
+        world_normal_map: Option<&RgbaBuffer>,
+    ) -> u64 {
+        self.preserve_base_paint_if_needed();
+        self.next_mask_effect_id += 1;
+        let id = self.next_mask_effect_id;
+        let blend_mode = if self.mask_effects.is_empty() { BlendMode::Normal } else { BlendMode::Add };
+        self.mask_effects.push(MaskEffect {
+            id,
+            name: "Generator - Metal Edge Wear".to_string(),
+            effect_type: MaskEffectType::GeneratorCurvatureWear {
+                wear_level: 0.50,
+                edge_width: 1.0,
+                edge_contrast: 2.0,
+                grunge_amount: 0.65,
+                grunge_scale: 14.0,
+                ao_inhibit: 0.50,
+                invert: false,
+            },
+            visible: true,
+            opacity: 1.0,
+            blend_mode,
+        });
+        self.has_mask = true;
+        self.active_mask_effect_id = Some(id);
+        self.evaluate_mask_advanced(curvature_map, ao_map, position_map, world_normal_map);
+        id
+    }
+
+    pub fn add_mask_generator_cavity_dirt(
+        &mut self,
+        curvature_map: Option<&ScalarBuffer>,
+        ao_map: Option<&ScalarBuffer>,
+        position_map: Option<&RgbaBuffer>,
+        world_normal_map: Option<&RgbaBuffer>,
+    ) -> u64 {
+        self.preserve_base_paint_if_needed();
+        self.next_mask_effect_id += 1;
+        let id = self.next_mask_effect_id;
+        let blend_mode = if self.mask_effects.is_empty() { BlendMode::Normal } else { BlendMode::Add };
+        self.mask_effects.push(MaskEffect {
+            id,
+            name: "Generator - Cavity Dirt (AO)".to_string(),
+            effect_type: MaskEffectType::GeneratorCavityDirt {
+                dirt_level: 0.55,
+                dirt_contrast: 1.8,
+                dirt_reach: 1.2,
+                grunge_clumping: 0.60,
+                grunge_scale: 10.0,
+                invert: false,
+            },
+            visible: true,
+            opacity: 1.0,
+            blend_mode,
+        });
+        self.has_mask = true;
+        self.active_mask_effect_id = Some(id);
+        self.evaluate_mask_advanced(curvature_map, ao_map, position_map, world_normal_map);
+        id
+    }
+
+    pub fn add_mask_generator_directional_dust(
+        &mut self,
+        curvature_map: Option<&ScalarBuffer>,
+        ao_map: Option<&ScalarBuffer>,
+        position_map: Option<&RgbaBuffer>,
+        world_normal_map: Option<&RgbaBuffer>,
+    ) -> u64 {
+        self.preserve_base_paint_if_needed();
+        self.next_mask_effect_id += 1;
+        let id = self.next_mask_effect_id;
+        let blend_mode = if self.mask_effects.is_empty() { BlendMode::Normal } else { BlendMode::Add };
+        self.mask_effects.push(MaskEffect {
+            id,
+            name: "Generator - Directional Dust (+Y)".to_string(),
+            effect_type: MaskEffectType::GeneratorDirectionalDust {
+                dust_direction: [0.0, 1.0, 0.0],
+                dust_level: 0.50,
+                angle_tolerance: 1.0,
+                cavity_trap: 0.50,
+                grunge_breakup: 0.40,
+                grunge_scale: 8.0,
+            },
+            visible: true,
+            opacity: 1.0,
+            blend_mode,
+        });
+        self.has_mask = true;
+        self.active_mask_effect_id = Some(id);
+        self.evaluate_mask_advanced(curvature_map, ao_map, position_map, world_normal_map);
+        id
+    }
+
+    pub fn add_mask_generator_ground_dirt(
+        &mut self,
+        curvature_map: Option<&ScalarBuffer>,
+        ao_map: Option<&ScalarBuffer>,
+        position_map: Option<&RgbaBuffer>,
+        world_normal_map: Option<&RgbaBuffer>,
+    ) -> u64 {
+        self.preserve_base_paint_if_needed();
+        self.next_mask_effect_id += 1;
+        let id = self.next_mask_effect_id;
+        let blend_mode = if self.mask_effects.is_empty() { BlendMode::Normal } else { BlendMode::Add };
+        self.mask_effects.push(MaskEffect {
+            id,
+            name: "Generator - Ground Mud & Splash".to_string(),
+            effect_type: MaskEffectType::GeneratorGroundDirt {
+                bottom_level: 0.35,
+                gradient_softness: 0.25,
+                splash_amount: 0.50,
+                splash_scale: 16.0,
+            },
+            visible: true,
+            opacity: 1.0,
+            blend_mode,
+        });
+        self.has_mask = true;
+        self.active_mask_effect_id = Some(id);
+        self.evaluate_mask_advanced(curvature_map, ao_map, position_map, world_normal_map);
+        id
+    }
+
+    pub fn add_mask_generator_mask_editor(
+        &mut self,
+        curvature_map: Option<&ScalarBuffer>,
+        ao_map: Option<&ScalarBuffer>,
+        position_map: Option<&RgbaBuffer>,
+        world_normal_map: Option<&RgbaBuffer>,
+    ) -> u64 {
+        self.preserve_base_paint_if_needed();
+        self.next_mask_effect_id += 1;
+        let id = self.next_mask_effect_id;
+        let blend_mode = if self.mask_effects.is_empty() { BlendMode::Normal } else { BlendMode::Add };
+        self.mask_effects.push(MaskEffect {
+            id,
+            name: "Generator - Mask Editor".to_string(),
+            effect_type: MaskEffectType::GeneratorMaskEditor {
+                curv_weight: 0.70,
+                curv_width: 1.2,
+                curv_contrast: 2.0,
+                curv_invert: false,
+                ao_weight: 0.50,
+                ao_contrast: 1.5,
+                world_normal_weight: 0.30,
+                world_normal_dir: [0.0, 1.0, 0.0],
+                pos_weight: 0.0,
+                pos_height: 0.5,
+                grunge_weight: 0.50,
+                grunge_scale: 12.0,
+                global_balance: 0.50,
+                global_contrast: 1.0,
+                invert: false,
+            },
+            visible: true,
+            opacity: 1.0,
+            blend_mode,
+        });
+        self.has_mask = true;
+        self.active_mask_effect_id = Some(id);
+        self.evaluate_mask_advanced(curvature_map, ao_map, position_map, world_normal_map);
         id
     }
 
@@ -3489,6 +4193,75 @@ mod tests {
         assert!(!layer.dirty_flags.color);
         assert!(!layer.dirty_flags.metallic);
         assert!(layer.dirty_rect.is_some());
+    }
+
+    #[test]
+    fn test_procedural_mask_generators_evaluation() {
+        let w = 32;
+        let h = 32;
+
+        // Create synthetic mesh maps
+        let mut curv_map = ScalarBuffer::new(w, h, 0.5);
+        let mut ao_map = ScalarBuffer::new(w, h, 1.0);
+        let mut wn_map = RgbaBuffer::new(w, h, Vec4::new(0.5, 1.0, 0.5, 1.0)); // normal pointing up (+Y)
+        let mut pos_map = RgbaBuffer::new(w, h, Vec4::ZERO);
+
+        // Put an edge in curvature map (convex peak at x < 16)
+        for y in 0..h {
+            for x in 0..w {
+                if x < 16 {
+                    curv_map.set_pixel(x, y, 0.95);
+                    ao_map.set_pixel(x, y, 0.2); // deep cavity
+                } else {
+                    curv_map.set_pixel(x, y, 0.5);
+                    ao_map.set_pixel(x, y, 0.9);
+                }
+                let norm_y = if y < 16 { 1.0 } else { 0.0 }; // top half faces up (+Y)
+                wn_map.set_pixel(x, y, Vec4::new(0.5, norm_y * 0.5 + 0.5, 0.5, 1.0));
+                let height = y as f32 / h as f32;
+                pos_map.set_pixel(x, y, Vec4::new(0.0, height, 0.0, 1.0));
+            }
+        }
+
+        let mut layer = Layer::new_fill_layer(1, "TestGen".to_string(), w, h, Vec4::ONE, 0.5, 0.0);
+
+        // 1. Curvature Wear Generator
+        layer.add_black_mask();
+        layer.add_mask_generator_curvature_wear(Some(&curv_map), Some(&ao_map), Some(&pos_map), Some(&wn_map));
+        assert_eq!(layer.mask_effects.len(), 1);
+        let wear_edge = layer.mask_buf.get_pixel(4, 16);
+        let wear_flat = layer.mask_buf.get_pixel(24, 16);
+        assert!(wear_edge > wear_flat, "Curvature wear at edge ({}) must be greater than on flat ({})", wear_edge, wear_flat);
+
+        // 2. Cavity Dirt Generator
+        let mut layer2 = Layer::new_fill_layer(2, "TestCavity".to_string(), w, h, Vec4::ONE, 0.5, 0.0);
+        layer2.add_black_mask();
+        layer2.add_mask_generator_cavity_dirt(Some(&curv_map), Some(&ao_map), Some(&pos_map), Some(&wn_map));
+        let dirt_cavity = layer2.mask_buf.get_pixel(4, 16);
+        let dirt_exposed = layer2.mask_buf.get_pixel(24, 16);
+        assert!(dirt_cavity > dirt_exposed, "Cavity dirt in crevice ({}) must be greater than on open surface ({})", dirt_cavity, dirt_exposed);
+
+        // 3. Directional Dust Generator
+        let mut layer3 = Layer::new_fill_layer(3, "TestDust".to_string(), w, h, Vec4::ONE, 0.5, 0.0);
+        layer3.add_black_mask();
+        layer3.add_mask_generator_directional_dust(Some(&curv_map), Some(&ao_map), Some(&pos_map), Some(&wn_map));
+        let dust_top = layer3.mask_buf.get_pixel(16, 4);
+        let dust_side = layer3.mask_buf.get_pixel(16, 24);
+        assert!(dust_top > dust_side, "Directional dust on upward normal ({}) must exceed side normal ({})", dust_top, dust_side);
+
+        // 4. Ground Dirt Generator
+        let mut layer4 = Layer::new_fill_layer(4, "TestGround".to_string(), w, h, Vec4::ONE, 0.5, 0.0);
+        layer4.add_black_mask();
+        layer4.add_mask_generator_ground_dirt(Some(&curv_map), Some(&ao_map), Some(&pos_map), Some(&wn_map));
+        let mud_bottom = layer4.mask_buf.get_pixel(16, 2);
+        let mud_top = layer4.mask_buf.get_pixel(16, 30);
+        assert!(mud_bottom > mud_top, "Ground dirt at bottom ({}) must exceed high position ({})", mud_bottom, mud_top);
+
+        // 5. Mask Editor Compound Generator
+        let mut layer5 = Layer::new_fill_layer(5, "TestMaskEditor".to_string(), w, h, Vec4::ONE, 0.5, 0.0);
+        layer5.add_black_mask();
+        layer5.add_mask_generator_mask_editor(Some(&curv_map), Some(&ao_map), Some(&pos_map), Some(&wn_map));
+        assert!(layer5.mask_buf.data.iter().all(|&v| v >= 0.0 && v <= 1.0), "All mask editor values must be clamped within [0, 1]");
     }
 }
 

@@ -343,7 +343,6 @@ impl Project {
     pub fn set_mesh(&mut self, mesh: Mesh) {
         self.mesh = mesh;
         self.rebuild_texture_sets_from_mesh();
-        self.bake_mesh_maps(self.texture_width, 0.1, 0.1);
         for layer in &mut self.layers {
             layer.evaluate_fill(self.curvature_map.as_ref());
         }

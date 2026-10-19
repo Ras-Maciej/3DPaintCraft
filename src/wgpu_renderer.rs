@@ -104,6 +104,15 @@ pub struct ShaderSettings {
     pub ssao_radius: f32,
     pub ssao_intensity: f32,
 
+    // Real-Time Directional Shadows
+    pub shadows_enabled: bool,
+    pub shadow_bias: f32,
+    pub shadow_softness: f32,
+
+    // Wireframe Overlay
+    pub wireframe_color: [f32; 4],
+    pub wireframe_opacity: f32,
+
     // Interactive Viewport Performance / Adaptive Resolution
     pub adaptive_resolution: bool,
     pub adaptive_scale: f32,
@@ -115,8 +124,11 @@ impl ShaderSettings {
             ShaderPerformancePreset::UltraQuality => {
                 self.ssr_enabled = false;
                 self.ssao_enabled = true;
-                self.ssao_intensity = 0.85;
-                self.ssao_radius = 0.55;
+                self.ssao_intensity = 0.60;
+                self.ssao_radius = 0.40;
+                self.shadows_enabled = true;
+                self.shadow_bias = 0.012;
+                self.shadow_softness = 1.2;
                 self.aa_mode = crate::nvidia_dlaa::AntiAliasingMode::NvidiaDlaa;
                 self.fxaa_enabled = false;
                 self.denoiser_enabled = false;
@@ -129,8 +141,11 @@ impl ShaderSettings {
             ShaderPerformancePreset::DynamicInteraction => {
                 self.ssr_enabled = false;
                 self.ssao_enabled = true;
-                self.ssao_intensity = 0.75;
-                self.ssao_radius = 0.45;
+                self.ssao_intensity = 0.50;
+                self.ssao_radius = 0.35;
+                self.shadows_enabled = true;
+                self.shadow_bias = 0.015;
+                self.shadow_softness = 1.0;
                 self.aa_mode = crate::nvidia_dlaa::AntiAliasingMode::NvidiaDlaa;
                 self.fxaa_enabled = false;
                 self.denoiser_enabled = false;
@@ -144,8 +159,11 @@ impl ShaderSettings {
             ShaderPerformancePreset::BalancedPbr => {
                 self.ssr_enabled = false;
                 self.ssao_enabled = true;
-                self.ssao_intensity = 0.55;
-                self.ssao_radius = 0.35;
+                self.ssao_intensity = 0.45;
+                self.ssao_radius = 0.30;
+                self.shadows_enabled = true;
+                self.shadow_bias = 0.015;
+                self.shadow_softness = 1.0;
                 self.aa_mode = crate::nvidia_dlaa::AntiAliasingMode::NvidiaDlaa;
                 self.fxaa_enabled = false;
                 self.denoiser_enabled = false;
@@ -161,6 +179,7 @@ impl ShaderSettings {
             ShaderPerformancePreset::MaximumPerformance => {
                 self.ssr_enabled = false;
                 self.ssao_enabled = false;
+                self.shadows_enabled = false;
                 self.aa_mode = crate::nvidia_dlaa::AntiAliasingMode::Off;
                 self.fxaa_enabled = false;
                 self.denoiser_enabled = false;
@@ -212,14 +231,35 @@ impl Default for ShaderSettings {
             ssr_step_size: 0.06,
             ssr_max_steps: 24,
             ssao_enabled: true,
-            ssao_radius: 0.45,
-            ssao_intensity: 0.75,
+            ssao_radius: 0.35,
+            ssao_intensity: 0.50,
+            shadows_enabled: true,
+            shadow_bias: 0.015,
+            shadow_softness: 1.0,
+            wireframe_color: [0.2, 0.75, 1.0, 1.0],
+            wireframe_opacity: 0.85,
             adaptive_resolution: true,
             adaptive_scale: 0.5,
         };
         settings.apply_preset(ShaderPerformancePreset::DynamicInteraction);
         settings
     }
+}
+
+fn calculate_mesh_bounds(vertices: &[crate::mesh::Vertex]) -> (glam::Vec3, f32) {
+    if vertices.is_empty() {
+        return (glam::Vec3::ZERO, 1.0);
+    }
+    let mut min = glam::Vec3::splat(f32::INFINITY);
+    let mut max = glam::Vec3::splat(f32::NEG_INFINITY);
+    for v in vertices {
+        let p = glam::Vec3::from(v.position);
+        min = min.min(p);
+        max = max.max(p);
+    }
+    let center = (min + max) * 0.5;
+    let radius = ((max - min) * 0.5).length().max(0.5);
+    (center, radius)
 }
 
 pub struct WgpuViewport {
@@ -252,12 +292,21 @@ pub struct WgpuViewport {
     pipeline_double_sided: wgpu::RenderPipeline,
     skybox_pipeline: wgpu::RenderPipeline,
     wireframe_pipeline: wgpu::RenderPipeline,
+    shadow_pipeline: wgpu::RenderPipeline,
+    #[allow(dead_code)]
+    shadow_texture: wgpu::Texture,
+    shadow_view: wgpu::TextureView,
+    #[allow(dead_code)]
+    shadow_sampler: wgpu::Sampler,
+    mesh_center: glam::Vec3,
+    mesh_radius: f32,
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
     wire_index_buffer: wgpu::Buffer,
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
     material_bind_group: wgpu::BindGroup,
+    shadow_bind_group: wgpu::BindGroup,
     
     tex_base_color: wgpu::Texture,
     tex_normal: wgpu::Texture,
@@ -316,6 +365,38 @@ impl WgpuViewport {
         let (tex_history, tex_history_view) = Self::create_history_target(&device, width, height);
         let dlaa_manager = crate::nvidia_dlaa::NvidiaDlaaManager::new(Some(&render_state.adapter.get_info().name));
 
+        let (mesh_center, mesh_radius) = calculate_mesh_bounds(&mesh.vertices);
+
+        let shadow_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Directional Shadow Map Texture"),
+            size: wgpu::Extent3d {
+                width: 2048,
+                height: 2048,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let shadow_view = shadow_texture.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("Directional Shadow Map View"),
+            ..Default::default()
+        });
+        let shadow_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Shadow Comparison Sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            compare: Some(wgpu::CompareFunction::LessEqual),
+            ..Default::default()
+        });
+
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Viewport Shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("viewport.wgsl").into()),
@@ -323,32 +404,74 @@ impl WgpuViewport {
 
         let camera_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Camera Buffer"),
-            size: 224,
+            size: 320,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
         let camera_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Camera Bind Group Layout"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
                 },
-                count: None,
-            }],
+            ],
         });
 
         let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Camera Bind Group"),
             layout: &camera_bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: camera_buffer.as_entire_binding(),
-            }],
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: camera_buffer.as_entire_binding(),
+                },
+            ],
+        });
+
+        // Directional Shadow Bind Group Layout (Group 2 for Main PBR Shading)
+        let shadow_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Shadow Bind Group Layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        let shadow_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Shadow Bind Group"),
+            layout: &shadow_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::Sampler(&shadow_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&shadow_view),
+                },
+            ],
         });
 
         // Material Bind Group Layout
@@ -472,7 +595,19 @@ impl WgpuViewport {
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Viewport Pipeline Layout"),
+            bind_group_layouts: &[&camera_bind_group_layout, &material_bind_group_layout, &shadow_bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        let skybox_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Skybox Pipeline Layout"),
             bind_group_layouts: &[&camera_bind_group_layout, &material_bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        let wireframe_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Wireframe Pipeline Layout"),
+            bind_group_layouts: &[&camera_bind_group_layout],
             push_constant_ranges: &[],
         });
 
@@ -573,7 +708,7 @@ impl WgpuViewport {
 
         let wireframe_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Wireframe Pipeline"),
-            layout: Some(&pipeline_layout),
+            layout: Some(&wireframe_pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: "vs_wire",
@@ -617,6 +752,45 @@ impl WgpuViewport {
             multiview: None,
         });
 
+        let shadow_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Shadow Pipeline Layout"),
+            bind_group_layouts: &[&camera_bind_group_layout],
+            push_constant_ranges: &[],
+        });
+        let shadow_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Directional Shadow Pipeline"),
+            layout: Some(&shadow_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: "vs_shadow",
+                buffers: &vertex_layouts,
+                compilation_options: Default::default(),
+            },
+            fragment: None,
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: Some(wgpu::Face::Back),
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::LessEqual,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState {
+                    constant: 2,
+                    slope_scale: 2.0,
+                    clamp: 0.0,
+                },
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+        });
+
         let skybox_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Skybox Shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("skybox.wgsl").into()),
@@ -624,7 +798,7 @@ impl WgpuViewport {
 
         let skybox_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Skybox Pipeline"),
-            layout: Some(&pipeline_layout),
+            layout: Some(&skybox_pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &skybox_shader,
                 entry_point: "vs_main",
@@ -835,12 +1009,19 @@ impl WgpuViewport {
             pipeline_double_sided,
             skybox_pipeline,
             wireframe_pipeline,
+            shadow_pipeline,
+            shadow_texture,
+            shadow_view,
+            shadow_sampler,
+            mesh_center,
+            mesh_radius,
             vertex_buffer,
             index_buffer,
             wire_index_buffer,
             camera_buffer,
             camera_bind_group,
             material_bind_group,
+            shadow_bind_group,
             tex_base_color,
             tex_normal,
             tex_roughness,
@@ -1061,6 +1242,95 @@ impl WgpuViewport {
                 );
             }
             project.gpu_extended_channels_dirty = false;
+        }
+    }
+
+    /// Fast sub-region upload of extended PBR channels (emission, opacity, clearcoat, anisotropy)
+    /// streaming only the bounding-box rectangle over PCIe to avoid full-screen texture re-uploads.
+    pub fn sync_extended_dirty_rect(
+        &mut self,
+        layer: &crate::layer::Layer,
+        rect: (u32, u32, u32, u32),
+        channels: crate::channel::ChannelFlags,
+    ) {
+        let w = self.pbr_tex_width;
+        let h = self.pbr_tex_height;
+        if w == 0 || h == 0 {
+            return;
+        }
+
+        let x0 = rect.0.min(w.saturating_sub(1));
+        let y0 = rect.1.min(h.saturating_sub(1));
+        let x1 = rect.2.min(w.saturating_sub(1)).max(x0);
+        let y1 = rect.3.min(h.saturating_sub(1)).max(y0);
+
+        let rect_w = x1 - x0 + 1;
+        let rect_h = y1 - y0 + 1;
+        if rect_w == 0 || rect_h == 0 {
+            return;
+        }
+
+        let size = wgpu::Extent3d { width: rect_w, height: rect_h, depth_or_array_layers: 1 };
+        let origin = wgpu::Origin3d { x: x0, y: y0, z: 0 };
+        let byte_offset_16 = ((y0 * w + x0) as u64) * 16;
+        let bytes_per_row_16 = w * 16;
+        let byte_offset_4 = ((y0 * w + x0) as u64) * 4;
+        let bytes_per_row_4 = w * 4;
+
+        if channels.emission && layer.emissive_buf.width == w as u32 && layer.emissive_buf.height == h as u32 {
+            self.queue.write_texture(
+                wgpu::ImageCopyTexture { texture: &self.tex_emissive, mip_level: 0, origin, aspect: wgpu::TextureAspect::All },
+                bytemuck::cast_slice(&layer.emissive_buf.data),
+                wgpu::ImageDataLayout { offset: byte_offset_16, bytes_per_row: Some(bytes_per_row_16), rows_per_image: None },
+                size,
+            );
+        }
+
+        if channels.opacity && layer.opacity_buf.width == w as u32 && layer.opacity_buf.height == h as u32 {
+            self.queue.write_texture(
+                wgpu::ImageCopyTexture { texture: &self.tex_opacity, mip_level: 0, origin, aspect: wgpu::TextureAspect::All },
+                bytemuck::cast_slice(&layer.opacity_buf.data),
+                wgpu::ImageDataLayout { offset: byte_offset_4, bytes_per_row: Some(bytes_per_row_4), rows_per_image: None },
+                size,
+            );
+        }
+
+        if channels.clearcoat && layer.clearcoat_buf.width == w as u32 && layer.clearcoat_buf.height == h as u32 {
+            self.queue.write_texture(
+                wgpu::ImageCopyTexture { texture: &self.tex_clearcoat, mip_level: 0, origin, aspect: wgpu::TextureAspect::All },
+                bytemuck::cast_slice(&layer.clearcoat_buf.data),
+                wgpu::ImageDataLayout { offset: byte_offset_4, bytes_per_row: Some(bytes_per_row_4), rows_per_image: None },
+                size,
+            );
+        }
+
+        if channels.anisotropy && layer.anisotropy_buf.width == w as u32 && layer.anisotropy_buf.height == h as u32 {
+            let total = (rect_w * rect_h) as usize;
+            let mut sub_aniso = vec![0.0f32; total * 4];
+            let aniso_data = &layer.anisotropy_buf.data;
+            let angle_data = &layer.anisotropy_angle_buf.data;
+
+            for dy in 0..rect_h {
+                let sy = y0 as u32 + dy;
+                for dx in 0..rect_w {
+                    let sx = x0 as u32 + dx;
+                    let src_idx = (sy * w as u32 + sx) as usize;
+                    let dst_idx = (dy * rect_w + dx) as usize;
+                    let a = if src_idx < aniso_data.len() { aniso_data[src_idx] } else { 0.0 };
+                    let ang = if src_idx < angle_data.len() { angle_data[src_idx] } else { 0.0 };
+                    sub_aniso[dst_idx * 4 + 0] = a;
+                    sub_aniso[dst_idx * 4 + 1] = ang;
+                    sub_aniso[dst_idx * 4 + 2] = 0.0;
+                    sub_aniso[dst_idx * 4 + 3] = 1.0;
+                }
+            }
+
+            self.queue.write_texture(
+                wgpu::ImageCopyTexture { texture: &self.tex_anisotropy, mip_level: 0, origin, aspect: wgpu::TextureAspect::All },
+                bytemuck::cast_slice(&sub_aniso),
+                wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(rect_w * 16), rows_per_image: None },
+                size,
+            );
         }
     }
 
@@ -1534,8 +1804,29 @@ fn blur_equirectangular(
         let jitter = self.dlaa_manager.next_jitter(self.width, self.height, is_dlaa);
         let view_proj_jittered = self.dlaa_manager.jitter_projection(view_proj, is_dlaa);
 
+        // Directional Sun Light Matrix & Frustum (synchronized with HDRI azimuth)
+        let cos_r = env_rot.cos();
+        let sin_r = env_rot.sin();
+        let sun_local = glam::Vec3::new(0.6, 0.7, 0.4).normalize();
+        let light_dir = glam::Vec3::new(
+            cos_r * sun_local.x + sin_r * sun_local.z,
+            sun_local.y,
+            -sin_r * sun_local.x + cos_r * sun_local.z,
+        ).normalize();
+        let light_dist = self.mesh_radius * 2.5;
+        let light_pos = self.mesh_center + light_dir * light_dist;
+        let up_vec = if light_dir.y.abs() > 0.95 { glam::Vec3::Z } else { glam::Vec3::Y };
+        let light_view = glam::Mat4::look_at_rh(light_pos, self.mesh_center, up_vec);
+        let box_size = self.mesh_radius * 1.35;
+        let light_proj = glam::Mat4::orthographic_rh(
+            -box_size, box_size,
+            -box_size, box_size,
+            0.1, light_dist * 2.0,
+        );
+        let light_view_proj = light_proj * light_view;
+
         let t_enc = std::time::Instant::now();
-        let mut data = [0u8; 224];
+        let mut data = [0u8; 320];
         data[0..64].copy_from_slice(bytemuck::cast_slice(&[view_proj_jittered]));
         data[64..80].copy_from_slice(bytemuck::cast_slice(&[eye_pos]));
         data[80..84].copy_from_slice(bytemuck::cast_slice(&[env_rot]));
@@ -1562,11 +1853,52 @@ fn blur_equirectangular(
         data[212..216].copy_from_slice(bytemuck::cast_slice(&[shader.translucency_depth]));
         data[216..220].copy_from_slice(bytemuck::cast_slice(&[0.0f32]));
         data[220..224].copy_from_slice(bytemuck::cast_slice(&[0.0f32]));
+        data[224..288].copy_from_slice(bytemuck::cast_slice(&[light_view_proj]));
+        let shadows_u32 = if shader.shadows_enabled { 1u32 } else { 0u32 };
+        data[288..292].copy_from_slice(bytemuck::cast_slice(&[shadows_u32]));
+        data[292..296].copy_from_slice(bytemuck::cast_slice(&[shader.shadow_bias]));
+        data[296..300].copy_from_slice(bytemuck::cast_slice(&[shader.shadow_softness]));
+        data[300..304].copy_from_slice(bytemuck::cast_slice(&[shader.wireframe_opacity]));
+        data[304..320].copy_from_slice(bytemuck::cast_slice(&shader.wireframe_color));
         self.queue.write_buffer(&self.camera_buffer, 0, &data);
 
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Viewport Encoder"),
         });
+
+        // --- PASS 0: DIRECTIONAL SUN SHADOW DEPTH PASS ---
+        if shader.shadows_enabled {
+            let mut shadow_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Directional Shadow Render Pass"),
+                color_attachments: &[],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.shadow_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+
+            shadow_pass.set_pipeline(&self.shadow_pipeline);
+            shadow_pass.set_bind_group(0, &self.camera_bind_group, &[]);
+            shadow_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+            shadow_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            if self.submeshes.is_empty() {
+                shadow_pass.draw_indexed(0..self.index_count, 0, 0..1);
+            } else {
+                for sm in &self.submeshes {
+                    if sm.visible && sm.index_count > 0 {
+                        let start = sm.start_index as u32;
+                        let count = sm.index_count as u32;
+                        shadow_pass.draw_indexed(start..(start + count), 0, 0..1);
+                    }
+                }
+            }
+        }
 
         // --- PASS 1: RENDER 3D SCENE (SKYBOX + MESH) INTO SCENE_VIEW ---
         {
@@ -1623,6 +1955,7 @@ fn blur_equirectangular(
             pass.set_pipeline(active_pipeline);
             pass.set_bind_group(0, &self.camera_bind_group, &[]);
             pass.set_bind_group(1, &self.material_bind_group, &[]);
+            pass.set_bind_group(2, &self.shadow_bind_group, &[]);
             pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
             pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
             if self.submeshes.is_empty() {
@@ -1758,6 +2091,10 @@ fn blur_equirectangular(
 
 impl WgpuViewport {
     pub fn update_mesh(&mut self, mesh: &crate::mesh::Mesh) {
+        let (center, radius) = calculate_mesh_bounds(&mesh.vertices);
+        self.mesh_center = center;
+        self.mesh_radius = radius;
+
         let gpu_vertices: Vec<crate::mesh::GpuVertex> = mesh.vertices.iter().map(|v| v.into()).collect();
         self.vertex_buffer = self.device.create_buffer_init(&eframe::wgpu::util::BufferInitDescriptor {
             label: Some("Vertex Buffer Replaced"),
@@ -1815,6 +2152,14 @@ mod tests {
         assert!((settings.ior - 1.52).abs() < 1e-4);
         assert!((settings.refraction_dispersion - 0.015).abs() < 1e-4);
         assert!((settings.translucency_depth - 1.0).abs() < 1e-4);
+        assert!(settings.ssao_enabled);
+        assert!((settings.ssao_intensity - 0.50).abs() < 1e-4);
+        assert!((settings.ssao_radius - 0.35).abs() < 1e-4);
+        assert!(settings.shadows_enabled);
+        assert!((settings.shadow_bias - 0.015).abs() < 1e-5);
+        assert!((settings.shadow_softness - 1.0).abs() < 1e-4);
+        assert_eq!(settings.wireframe_color, [0.2, 0.75, 1.0, 1.0]);
+        assert!((settings.wireframe_opacity - 0.85).abs() < 1e-4);
 
         assert_eq!(TransparencyMode::Dithered.name(), "Dithered Transparency (Screen-Door)");
         assert_eq!(TransparencyMode::AlphaCutout.name(), "Alpha Cutout (Alpha Test)");
@@ -1896,4 +2241,76 @@ mod tests {
         let comp_elapsed = t2.elapsed();
         println!("100 composite_all calls took {:?}, avg {:.3} ms/call", comp_elapsed, comp_elapsed.as_secs_f64() * 1000.0 / iters as f64);
     }
+
+    #[test]
+    fn test_wgpu_viewport_render_headless() {
+        let instance = eframe::wgpu::Instance::default();
+        let adapter = match pollster::block_on(instance.request_adapter(&eframe::wgpu::RequestAdapterOptions {
+            power_preference: eframe::wgpu::PowerPreference::HighPerformance,
+            compatible_surface: None,
+            force_fallback_adapter: false,
+        })) {
+            Some(a) => a,
+            None => {
+                println!("No GPU adapter available for test");
+                return;
+            }
+        };
+        println!("TEST ADAPTER: {:?}", adapter.get_info());
+
+        let (device, queue) = match pollster::block_on(adapter.request_device(
+            &eframe::wgpu::DeviceDescriptor {
+                label: Some("Test Device"),
+                required_features: eframe::wgpu::Features::FLOAT32_FILTERABLE,
+                required_limits: eframe::wgpu::Limits::default(),
+            },
+            None,
+        )) {
+            Ok(dq) => dq,
+            Err(e) => {
+                println!("Failed to create device: {:?}", e);
+                return;
+            }
+        };
+
+        let device = std::sync::Arc::new(device);
+        let queue = std::sync::Arc::new(queue);
+        let renderer = std::sync::Arc::new(eframe::epaint::mutex::RwLock::new(
+            eframe::egui_wgpu::Renderer::new(&device, wgpu::TextureFormat::Rgba8UnormSrgb, None, 1)
+        ));
+        let adapter_arc = std::sync::Arc::new(adapter);
+        let render_state = eframe::egui_wgpu::RenderState {
+            device: device.clone(),
+            queue: queue.clone(),
+            target_format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            renderer,
+            available_adapters: std::sync::Arc::new([]),
+            adapter: adapter_arc,
+        };
+
+        let mesh = crate::mesh::Mesh::create_shader_ball();
+        let mut viewport = WgpuViewport::new(&render_state, &mesh);
+
+        let mut project = crate::project::Project::new_default(512, 512);
+        project.mesh = mesh;
+        viewport.sync_textures(&mut project);
+        viewport.sync_mesh_maps(&project);
+
+        let vp = glam::Mat4::IDENTITY;
+        let eye = glam::Vec4::new(0.0, 0.0, 3.0, 1.0);
+        let shader = ShaderSettings::default();
+        
+        // Resize before Frame 1
+        viewport.resize(1280, 720);
+
+        // Frame 1
+        viewport.render(vp, eye, 0.0, 0, 0.0, 1.0, &shader, false);
+
+        // Resize between frames
+        viewport.resize(1920, 1080);
+
+        // Frame 2
+        viewport.render(vp, eye, 0.0, 0, 0.0, 1.0, &shader, true);
+    }
 }
+

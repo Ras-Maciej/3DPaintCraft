@@ -39,6 +39,12 @@ struct CameraUniform {
     translucency_depth: f32,
     pad0: f32,
     pad1: f32,
+    light_view_proj: mat4x4<f32>,
+    shadows_enabled: u32,
+    shadow_bias: f32,
+    shadow_softness: f32,
+    wireframe_opacity: f32,
+    wireframe_color: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> camera: CameraUniform;
 
@@ -55,6 +61,10 @@ struct CameraUniform {
 @group(1) @binding(9) var tex_opacity: texture_2d<f32>;
 @group(1) @binding(10) var tex_clearcoat: texture_2d<f32>;
 @group(1) @binding(11) var tex_anisotropy: texture_2d<f32>;
+
+// Directional Shadow Map (Separated from camera buffer to prevent depth-stencil write hazard)
+@group(2) @binding(0) var samp_shadow: sampler_comparison;
+@group(2) @binding(1) var tex_shadow_map: texture_depth_2d;
 
 @vertex
 fn vs_main(model: VertexInput) -> VertexOutput {
@@ -121,6 +131,80 @@ fn bayer_8x8(coord: vec2<u32>) -> f32 {
           | (((xor_xy >> 2u) & 1u) << 1u)
           | (((y >> 2u) & 1u) << 0u);
     return f32(v) / 64.0;
+}
+
+struct ShadowVertexOutput {
+    @builtin(position) clip_position: vec4<f32>,
+};
+
+@vertex
+fn vs_shadow(model: VertexInput) -> ShadowVertexOutput {
+    var out: ShadowVertexOutput;
+    out.clip_position = camera.light_view_proj * vec4<f32>(model.position, 1.0);
+    return out;
+}
+
+// Directional Shadow Mapping with 16-tap Poisson Disk PCF & Slope-Scaled Normal Offset Bias
+fn calculate_directional_shadow(world_pos: vec3<f32>, world_normal: vec3<f32>, light_dir: vec3<f32>) -> f32 {
+    if camera.shadows_enabled == 0u {
+        return 1.0;
+    }
+
+    let n_dot_l = dot(world_normal, light_dir);
+    if n_dot_l <= -0.05 {
+        return 0.0;
+    }
+
+    // Normal offset bias scales with slope to eliminate shadow acne on curved geometry
+    let slope_factor = clamp(1.0 - max(n_dot_l, 0.0), 0.0, 1.0);
+    let normal_offset = world_normal * (camera.shadow_bias * 0.4 + slope_factor * camera.shadow_bias);
+    let biased_world_pos = world_pos + normal_offset;
+
+    let light_clip = camera.light_view_proj * vec4<f32>(biased_world_pos, 1.0);
+    if light_clip.w <= 0.0 {
+        return 1.0;
+    }
+
+    // Transform from NDC [-1, 1] to UV texture coordinates [0, 1]
+    let proj_coords = light_clip.xyz / light_clip.w;
+    let shadow_uv = vec2<f32>(proj_coords.x * 0.5 + 0.5, 0.5 - proj_coords.y * 0.5);
+    let current_depth = proj_coords.z - 0.0005;
+
+    // Out of bounds check: points outside the shadow frustum are unshadowed
+    if shadow_uv.x < 0.001 || shadow_uv.x > 0.999 || shadow_uv.y < 0.001 || shadow_uv.y > 0.999 || current_depth > 1.0 || current_depth < 0.0 {
+        return 1.0;
+    }
+
+    // 16-tap Poisson disk PCF kernel with hardware comparison filtering
+    let softness = max(camera.shadow_softness, 0.5);
+    let texel = (1.0 / 2048.0) * softness;
+
+    var pcf_samples = array<vec2<f32>, 16>(
+        vec2<f32>(-0.942, -0.399),
+        vec2<f32>( 0.945, -0.198),
+        vec2<f32>(-0.094, -0.929),
+        vec2<f32>( 0.344,  0.293),
+        vec2<f32>(-0.915,  0.457),
+        vec2<f32>(-0.382,  0.276),
+        vec2<f32>( 0.974,  0.756),
+        vec2<f32>( 0.443, -0.975),
+        vec2<f32>( 0.537, -0.473),
+        vec2<f32>(-0.264, -0.418),
+        vec2<f32>( 0.791,  0.190),
+        vec2<f32>(-0.241,  0.997),
+        vec2<f32>(-0.814, -0.638),
+        vec2<f32>(-0.570, -0.002),
+        vec2<f32>( 0.315, -0.014),
+        vec2<f32>( 0.199,  0.786),
+    );
+
+    var shadow_accum = 0.0;
+    for (var i = 0u; i < 16u; i = i + 1u) {
+        let sample_uv = shadow_uv + pcf_samples[i] * texel;
+        shadow_accum = shadow_accum + textureSampleCompare(tex_shadow_map, samp_shadow, sample_uv, current_depth);
+    }
+
+    return shadow_accum / 16.0;
 }
 
 // Substance 3D Painter Standard Metallic/Roughness PBR Pipeline
@@ -343,9 +427,10 @@ fn fs_main(@builtin(front_facing) is_front: bool, in: VertexOutput) -> FragmentO
     let f_dir = f0 + (f90 - f0) * pow(clamp(1.0 - v_dot_h, 0.0, 1.0), 5.0);
     let specular_brdf = (d * g * f_dir * specular_weight) / max(4.0 * n_dot_l * n_dot_v, 1e-4);
     
+    let shadow_factor = calculate_directional_shadow(in.world_pos, world_normal, light_dir);
     let sun_color = vec3<f32>(1.2, 1.18, 1.15);
-    let dir_specular = specular_brdf * sun_color * n_dot_l * camera.sun_intensity * matte_factor;
-    let dir_diffuse = diffuse_color * (sun_color * n_dot_l / PI) * camera.sun_intensity;
+    let dir_specular = specular_brdf * sun_color * n_dot_l * camera.sun_intensity * matte_factor * shadow_factor;
+    let dir_diffuse = diffuse_color * (sun_color * n_dot_l / PI) * camera.sun_intensity * shadow_factor;
 
     // Translucency & Physical Refraction (Snell's Law with Chromatic Dispersion & Beer-Lambert Absorption)
     var transmitted_color = vec3<f32>(0.0);
@@ -522,8 +607,8 @@ struct WireFragmentOutput {
 @fragment
 fn fs_wire(in: VertexOutput) -> WireFragmentOutput {
     var out: WireFragmentOutput;
-    // Technical overlay wireframe line color (crisp technical cyan)
-    out.color = vec4<f32>(0.2, 0.72, 1.0, 0.85);
+    // Technical overlay wireframe line color with configurable color and opacity
+    out.color = vec4<f32>(camera.wireframe_color.rgb, camera.wireframe_color.a * camera.wireframe_opacity);
     out.normal_roughness = vec4<f32>(0.0, 0.0, 0.0, 0.0);
     return out;
 }

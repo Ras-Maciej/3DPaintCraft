@@ -131,6 +131,11 @@ impl SmartMaterialLibrary {
                 description: "45-degree diamond crisscross wire fence mesh cutout",
             },
             SmartMaskPreset {
+                id: "mask_editor",
+                name: "Substance Mask Editor (Multi-Map)",
+                description: "Compound weathering fusing Curvature, AO, World Normal direction, Position height, and Grunge",
+            },
+            SmartMaskPreset {
                 id: "mask_torn_edge",
                 name: "Torn Fabric Ragged Cutout",
                 description: "Organic ragged cloth tear with fine boundary fiber fringe",
@@ -163,97 +168,16 @@ impl SmartMaterialLibrary {
 
         match mask_id {
             "curvature_edge_wear" | "mask_edge_wear" => {
-                let id1 = layer.add_mask_fill_effect_advanced(ProceduralGenerator::CurvatureWear, curvature_map, ao_map, position_map, world_normal_map);
-                if let Some(eff) = layer.mask_effects.iter_mut().find(|e| e.id == id1) {
-                    if let MaskEffectType::Fill { ref mut scale, ref mut contrast, ref mut balance, .. } = eff.effect_type {
-                        *scale = 10.0;
-                        *contrast = 1.8;
-                        *balance = 0.52;
-                    }
-                }
-                let id2 = layer.add_mask_fill_effect_advanced(ProceduralGenerator::WorleyGrunge, curvature_map, ao_map, position_map, world_normal_map);
-                if let Some(eff) = layer.mask_effects.iter_mut().find(|e| e.id == id2) {
-                    eff.blend_mode = BlendMode::Multiply;
-                    eff.opacity = 0.85;
-                    if let MaskEffectType::Fill { ref mut scale, ref mut contrast, .. } = eff.effect_type {
-                        *scale = 14.0;
-                        *contrast = 1.4;
-                    }
-                }
-                let id3 = layer.add_mask_fill_effect_advanced(ProceduralGenerator::Scratches, curvature_map, ao_map, position_map, world_normal_map);
-                if let Some(eff) = layer.mask_effects.iter_mut().find(|e| e.id == id3) {
-                    eff.blend_mode = BlendMode::Screen;
-                    eff.opacity = 0.35;
-                    if let MaskEffectType::Fill { ref mut scale, .. } = eff.effect_type {
-                        *scale = 22.0;
-                    }
-                }
-                layer.next_mask_effect_id += 1;
-                layer.mask_effects.push(MaskEffect {
-                    id: layer.next_mask_effect_id,
-                    name: "Edge Levels (Sharpen Boundary)".to_string(),
-                    effect_type: MaskEffectType::FilterLevels {
-                        in_black: 0.10,
-                        in_white: 0.80,
-                        gamma: 0.95,
-                        out_black: 0.0,
-                        out_white: 1.0,
-                    },
-                    visible: true,
-                    opacity: 1.0,
-                    blend_mode: BlendMode::Normal,
-                });
+                layer.add_mask_generator_curvature_wear(curvature_map, ao_map, position_map, world_normal_map);
             }
             "cavity_dirt" | "mask_crevice_dirt" => {
-                let id1 = layer.add_mask_fill_effect_advanced(ProceduralGenerator::AmbientOcclusion, curvature_map, ao_map, position_map, world_normal_map);
-                if let Some(eff) = layer.mask_effects.iter_mut().find(|e| e.id == id1) {
-                    if let MaskEffectType::Fill { ref mut scale, ref mut contrast, ref mut balance, .. } = eff.effect_type {
-                        *scale = 8.0;
-                        *contrast = 1.4;
-                        *balance = 0.54;
-                    }
-                }
-                let id2 = layer.add_mask_fill_effect_advanced(ProceduralGenerator::DomainWarpGrunge, curvature_map, ao_map, position_map, world_normal_map);
-                if let Some(eff) = layer.mask_effects.iter_mut().find(|e| e.id == id2) {
-                    eff.blend_mode = BlendMode::Multiply;
-                    eff.opacity = 0.80;
-                    if let MaskEffectType::Fill { ref mut scale, .. } = eff.effect_type {
-                        *scale = 12.0;
-                    }
-                }
-                let id3 = layer.add_mask_fill_effect_advanced(ProceduralGenerator::SplatterDirt, curvature_map, ao_map, position_map, world_normal_map);
-                if let Some(eff) = layer.mask_effects.iter_mut().find(|e| e.id == id3) {
-                    eff.blend_mode = BlendMode::Add;
-                    eff.opacity = 0.40;
-                    if let MaskEffectType::Fill { ref mut scale, .. } = eff.effect_type {
-                        *scale = 18.0;
-                    }
-                }
+                layer.add_mask_generator_cavity_dirt(curvature_map, ao_map, position_map, world_normal_map);
             }
             "directional_dust" | "mask_directional_dust" => {
-                let id1 = layer.add_mask_fill_effect_advanced(ProceduralGenerator::DirectionalDust, curvature_map, ao_map, position_map, world_normal_map);
-                if let Some(eff) = layer.mask_effects.iter_mut().find(|e| e.id == id1) {
-                    if let MaskEffectType::Fill { ref mut scale, ref mut contrast, .. } = eff.effect_type {
-                        *scale = 6.0;
-                        *contrast = 1.2;
-                    }
-                }
-                let id2 = layer.add_mask_fill_effect_advanced(ProceduralGenerator::BillowNoise, curvature_map, ao_map, position_map, world_normal_map);
-                if let Some(eff) = layer.mask_effects.iter_mut().find(|e| e.id == id2) {
-                    eff.blend_mode = BlendMode::Multiply;
-                    eff.opacity = 0.65;
-                    if let MaskEffectType::Fill { ref mut scale, .. } = eff.effect_type {
-                        *scale = 8.0;
-                    }
-                }
-                let id3 = layer.add_mask_fill_effect_advanced(ProceduralGenerator::SplatterDirt, curvature_map, ao_map, position_map, world_normal_map);
-                if let Some(eff) = layer.mask_effects.iter_mut().find(|e| e.id == id3) {
-                    eff.blend_mode = BlendMode::Add;
-                    eff.opacity = 0.25;
-                    if let MaskEffectType::Fill { ref mut scale, .. } = eff.effect_type {
-                        *scale = 24.0;
-                    }
-                }
+                layer.add_mask_generator_directional_dust(curvature_map, ao_map, position_map, world_normal_map);
+            }
+            "mask_editor" | "mask_editor_compound" => {
+                layer.add_mask_generator_mask_editor(curvature_map, ao_map, position_map, world_normal_map);
             }
             "dripping_rust_leaks" | "mask_rust_leaks" => {
                 let id1 = layer.add_mask_fill_effect_advanced(ProceduralGenerator::DrippingLeaks, curvature_map, ao_map, position_map, world_normal_map);
@@ -352,30 +276,7 @@ impl SmartMaterialLibrary {
                 }
             }
             "ground_dirt_mud" | "mask_ground_dirt" => {
-                let id1 = layer.add_mask_fill_effect_advanced(ProceduralGenerator::GroundSplash, curvature_map, ao_map, position_map, world_normal_map);
-                if let Some(eff) = layer.mask_effects.iter_mut().find(|e| e.id == id1) {
-                    if let MaskEffectType::Fill { ref mut contrast, ref mut balance, .. } = eff.effect_type {
-                        *contrast = 1.6;
-                        *balance = 0.52;
-                    }
-                }
-                let id2 = layer.add_mask_fill_effect_advanced(ProceduralGenerator::SplatterDirt, curvature_map, ao_map, position_map, world_normal_map);
-                if let Some(eff) = layer.mask_effects.iter_mut().find(|e| e.id == id2) {
-                    eff.blend_mode = BlendMode::Screen;
-                    eff.opacity = 0.80;
-                    if let MaskEffectType::Fill { ref mut scale, ref mut contrast, .. } = eff.effect_type {
-                        *scale = 12.0;
-                        *contrast = 1.8;
-                    }
-                }
-                let id3 = layer.add_mask_fill_effect_advanced(ProceduralGenerator::DomainWarpGrunge, curvature_map, ao_map, position_map, world_normal_map);
-                if let Some(eff) = layer.mask_effects.iter_mut().find(|e| e.id == id3) {
-                    eff.blend_mode = BlendMode::Multiply;
-                    eff.opacity = 0.70;
-                    if let MaskEffectType::Fill { ref mut scale, .. } = eff.effect_type {
-                        *scale = 8.0;
-                    }
-                }
+                layer.add_mask_generator_ground_dirt(curvature_map, ao_map, position_map, world_normal_map);
             }
             "heavy_machinery_wear" | "mask_heavy_machinery" => {
                 layer.add_mask_fill_effect_advanced(ProceduralGenerator::CurvatureWear, curvature_map, ao_map, position_map, world_normal_map);

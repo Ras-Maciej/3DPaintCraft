@@ -187,10 +187,13 @@ impl Bvh {
             return result;
         }
 
-        let mut stack = Vec::with_capacity(32);
-        stack.push(0usize);
+        let mut stack = [0usize; 64];
+        stack[0] = 0;
+        let mut stack_len = 1;
 
-        while let Some(node_idx) = stack.pop() {
+        while stack_len > 0 {
+            stack_len -= 1;
+            let node_idx = stack[stack_len];
             let node = &self.nodes[node_idx];
 
             if sphere_intersects_aabb(center, radius, node.aabb_min, node.aabb_max) {
@@ -198,10 +201,16 @@ impl Bvh {
                     result.extend_from_slice(&node.triangle_indices);
                 }
                 if let Some(left) = node.left_child {
-                    stack.push(left);
+                    if stack_len < 64 {
+                        stack[stack_len] = left;
+                        stack_len += 1;
+                    }
                 }
                 if let Some(right) = node.right_child {
-                    stack.push(right);
+                    if stack_len < 64 {
+                        stack[stack_len] = right;
+                        stack_len += 1;
+                    }
                 }
             }
         }
@@ -217,11 +226,14 @@ impl Bvh {
         let mut closest_hit: Option<RayHit> = None;
         let mut min_t = f32::MAX;
 
-        // Traverse stack
-        let mut stack = Vec::with_capacity(32);
-        stack.push(0usize);
+        // Traverse stack on CPU stack rather than heap vector
+        let mut stack = [0usize; 64];
+        stack[0] = 0;
+        let mut stack_len = 1;
 
-        while let Some(node_idx) = stack.pop() {
+        while stack_len > 0 {
+            stack_len -= 1;
+            let node_idx = stack[stack_len];
             let node = &self.nodes[node_idx];
 
             if let Some(t_box) = ray_intersect_aabb(node.aabb_min, node.aabb_max, ray) {
@@ -287,10 +299,16 @@ impl Bvh {
                 } else {
                     // Internal node: push children
                     if let Some(r) = node.right_child {
-                        stack.push(r);
+                        if stack_len < 64 {
+                            stack[stack_len] = r;
+                            stack_len += 1;
+                        }
                     }
                     if let Some(l) = node.left_child {
-                        stack.push(l);
+                        if stack_len < 64 {
+                            stack[stack_len] = l;
+                            stack_len += 1;
+                        }
                     }
                 }
             }
@@ -411,6 +429,13 @@ impl Mesh {
 
         self.aabb_min = min_pos;
         self.aabb_max = max_pos;
+    }
+
+    /// Approximate bounding sphere radius of the mesh
+    pub fn bounds_radius(&self) -> f32 {
+        let extents = self.aabb_max - self.aabb_min;
+        let r = extents.length() * 0.5;
+        if r > 1e-4 { r } else { 1.0 }
     }
 
     /// Center and normalize mesh to fit nicely within a [-1.0, 1.0] bounding box

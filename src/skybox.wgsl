@@ -22,6 +22,12 @@ struct CameraUniform {
     translucency_depth: f32,
     pad0: f32,
     pad1: f32,
+    light_view_proj: mat4x4<f32>,
+    shadows_enabled: u32,
+    shadow_bias: f32,
+    shadow_softness: f32,
+    wireframe_opacity: f32,
+    wireframe_color: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> camera: CameraUniform;
 @group(1) @binding(5) var tex_environment: texture_2d<f32>;
