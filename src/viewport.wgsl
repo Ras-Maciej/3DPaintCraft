@@ -45,6 +45,11 @@ struct CameraUniform {
     shadow_softness: f32,
     wireframe_opacity: f32,
     wireframe_color: vec4<f32>,
+    cage_color: vec4<f32>,
+    cage_opacity: f32,
+    pad_cage0: f32,
+    pad_cage1: f32,
+    pad_cage2: f32,
 };
 @group(0) @binding(0) var<uniform> camera: CameraUniform;
 
@@ -609,6 +614,30 @@ fn fs_wire(in: VertexOutput) -> WireFragmentOutput {
     var out: WireFragmentOutput;
     // Technical overlay wireframe line color with configurable color and opacity
     out.color = vec4<f32>(camera.wireframe_color.rgb, camera.wireframe_color.a * camera.wireframe_opacity);
+    out.normal_roughness = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    return out;
+}
+
+@fragment
+fn fs_cage_wire(in: VertexOutput) -> WireFragmentOutput {
+    var out: WireFragmentOutput;
+    // Glowing Substance cyan/orange cage wireframe and displacement tethers
+    out.color = vec4<f32>(camera.cage_color.rgb, camera.cage_color.a * camera.cage_opacity);
+    out.normal_roughness = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    return out;
+}
+
+@fragment
+fn fs_cage_hull(in: VertexOutput) -> WireFragmentOutput {
+    var out: WireFragmentOutput;
+    let n = normalize(in.world_normal);
+    let v = normalize(camera.eye_pos.xyz - in.world_pos);
+    let ndotv = abs(dot(n, v));
+    // Subtle silhouette rim lighting on translucent cage shell
+    let rim = pow(1.0 - clamp(ndotv, 0.0, 1.0), 2.5);
+    let alpha = clamp(camera.cage_color.a * camera.cage_opacity * (0.16 + 0.38 * rim), 0.0, 1.0);
+    let rgb = camera.cage_color.rgb * (0.85 + 0.35 * rim);
+    out.color = vec4<f32>(rgb, alpha);
     out.normal_roughness = vec4<f32>(0.0, 0.0, 0.0, 0.0);
     return out;
 }

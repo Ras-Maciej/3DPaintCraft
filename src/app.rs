@@ -243,6 +243,12 @@ pub struct PaintcraftApp {
     pub bake_cage_mode: crate::baker::BakeCageMode,
     pub bake_cage_inflation: f32,
     pub bake_cage_path: String,
+    pub bake_preview_cage: bool,
+    pub bake_cage_show_hull: bool,
+    pub bake_cage_show_tethers: bool,
+    pub bake_cage_color_idx: usize,
+    pub bake_cage_opacity: f32,
+    pub bake_cage_cache_key: (crate::baker::BakeCageMode, u32, u32, String, bool, bool, usize, usize),
     pub bake_active_settings_tab: crate::baker::BakeSettingsTab,
     pub bake_ao_config: crate::baker::AoBakeConfig,
     pub bake_thickness_config: crate::baker::ThicknessBakeConfig,
@@ -563,6 +569,12 @@ impl PaintcraftApp {
             bake_cage_mode: crate::baker::BakeCageMode::None,
             bake_cage_inflation: 0.02,
             bake_cage_path: String::new(),
+            bake_preview_cage: true,
+            bake_cage_show_hull: true,
+            bake_cage_show_tethers: true,
+            bake_cage_color_idx: 0,
+            bake_cage_opacity: 0.85,
+            bake_cage_cache_key: (crate::baker::BakeCageMode::None, 0, 0, String::new(), false, false, 0, 0),
             bake_active_settings_tab: crate::baker::BakeSettingsTab::Common,
             bake_ao_config: crate::baker::AoBakeConfig::default(),
             bake_thickness_config: crate::baker::ThicknessBakeConfig::default(),
@@ -668,6 +680,17 @@ impl PaintcraftApp {
             self.recent_projects.truncate(8);
         }
         self.save_recent_projects();
+    }
+
+    /// Current color configured for baking cage visualization
+    pub fn current_bake_cage_color(&self) -> [f32; 4] {
+        match self.bake_cage_color_idx {
+            0 => [0.0, 0.88, 1.0, 1.0],   // Vibrant Substance Cyan
+            1 => [1.0, 0.45, 0.05, 1.0],  // Substance Orange
+            2 => [0.2, 1.0, 0.35, 1.0],   // High-Vis Lime
+            3 => [1.0, 0.15, 0.80, 1.0],  // Neon Magenta
+            _ => [0.0, 0.88, 1.0, 1.0],
+        }
     }
 
     /// Open a project file and synchronize GPU viewport
@@ -1847,13 +1870,21 @@ impl PaintcraftApp {
         let mut close_modal = false;
         let mut status_update = None;
 
+        let screen = ctx.screen_rect();
+        let def_w = 880.0f32.min(screen.width() * 0.85).max(520.0);
+        let def_h = 600.0f32.min(screen.height() * 0.82).max(380.0);
+        let min_w = 580.0f32.min(screen.width() * 0.9);
+        let min_h = 360.0f32.min(screen.height() * 0.85);
+        let max_w = (screen.width() - 32.0).max(400.0);
+        let max_h = (screen.height() - 32.0).max(350.0);
+
         egui::Window::new("Export Textures")
             .collapsible(false)
             .resizable(true)
-            .default_width(960.0)
-            .default_height(660.0)
-            .min_width(820.0)
-            .min_height(500.0)
+            .default_size([def_w, def_h])
+            .min_width(min_w)
+            .min_height(min_h)
+            .max_size([max_w, max_h])
             .show(ctx, |ui| {
                 // Top Tab Navigation Bar (Substance 3D Painter Standard)
                 ui.horizontal(|ui| {
@@ -2192,7 +2223,7 @@ impl PaintcraftApp {
                                 ui.separator();
 
                                 ui.horizontal(|ui| {
-                                    ui.label("🔍");
+                                    ui.label(egui::RichText::new("Filter:").small().strong());
                                     ui.add(egui::TextEdit::singleline(&mut self.export_template_search).hint_text("Search templates..."));
                                 });
                                 ui.add_space(4.0);
@@ -7411,6 +7442,73 @@ impl PaintcraftApp {
             self.project.gpu_sync_needed = false;
         }
 
+        // --- SYNCHRONIZE VIEWPORT BAKING CAGE PREVIEW ---
+        if self.show_bake_modal && self.bake_preview_cage {
+            let current_key = (
+                self.bake_cage_mode,
+                self.bake_cage_inflation.to_bits(),
+                self.bake_frontal.to_bits(),
+                self.bake_cage_path.clone(),
+                self.bake_cage_show_hull,
+                self.bake_cage_show_tethers,
+                self.bake_cage_color_idx,
+                self.project.mesh.vertices.len(),
+            );
+            if self.bake_cage_cache_key != current_key {
+                self.bake_cage_cache_key = current_key;
+                let cage_verts = match self.bake_cage_mode {
+                    crate::baker::BakeCageMode::None => {
+                        let cfg = crate::baker::BakeCageConfig {
+                            mode: crate::baker::BakeCageMode::ParametricInflation,
+                            inflation_offset: self.bake_frontal,
+                            external_cage_path: None,
+                        };
+                        crate::baker::Baker::compute_cage_vertices(&self.project.mesh, &cfg).ok().flatten()
+                    }
+                    crate::baker::BakeCageMode::ParametricInflation => {
+                        let cfg = crate::baker::BakeCageConfig {
+                            mode: crate::baker::BakeCageMode::ParametricInflation,
+                            inflation_offset: self.bake_cage_inflation,
+                            external_cage_path: None,
+                        };
+                        crate::baker::Baker::compute_cage_vertices(&self.project.mesh, &cfg).ok().flatten()
+                    }
+                    crate::baker::BakeCageMode::ExternalCage => {
+                        let path = if !self.bake_cage_path.trim().is_empty() {
+                            Some(std::path::PathBuf::from(&self.bake_cage_path))
+                        } else {
+                            None
+                        };
+                        let cfg = crate::baker::BakeCageConfig {
+                            mode: crate::baker::BakeCageMode::ExternalCage,
+                            inflation_offset: 0.0,
+                            external_cage_path: path,
+                        };
+                        crate::baker::Baker::compute_cage_vertices(&self.project.mesh, &cfg).ok().flatten()
+                    }
+                };
+
+                let cage_color = self.current_bake_cage_color();
+                if let Some(wgpu) = &mut self.wgpu_viewport {
+                    wgpu.update_cage(
+                        &self.project.mesh,
+                        cage_verts.as_deref(),
+                        self.bake_cage_show_hull,
+                        self.bake_cage_show_tethers,
+                        cage_color,
+                        self.bake_cage_opacity,
+                    );
+                }
+            }
+        } else if !self.show_bake_modal || !self.bake_preview_cage {
+            if self.bake_cage_cache_key.7 != 0 {
+                self.bake_cage_cache_key.7 = 0;
+                if let Some(wgpu) = &mut self.wgpu_viewport {
+                    wgpu.clear_cage();
+                }
+            }
+        }
+
         let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
         let vp_w = rect.width().max(64.0);
         let vp_h = rect.height().max(64.0);
@@ -7601,6 +7699,21 @@ impl PaintcraftApp {
                 hud_text,
                 eframe::egui::FontId::proportional(12.0),
                 eframe::egui::Color32::from_rgba_unmultiplied(220, 220, 220, 180),
+            );
+        }
+
+        if self.show_bake_modal && self.bake_preview_cage {
+            let cage_mode_desc = match self.bake_cage_mode {
+                crate::baker::BakeCageMode::None => format!("Frontal Ray Envelope: {:.3}", self.bake_frontal),
+                crate::baker::BakeCageMode::ParametricInflation => format!("Parametric Inflation Offset: {:.3}", self.bake_cage_inflation),
+                crate::baker::BakeCageMode::ExternalCage => format!("External Cage: {}", if self.bake_cage_path.is_empty() { "None selected" } else { &self.bake_cage_path }),
+            };
+            ui.painter().text(
+                rect.min + egui::vec2(12.0, rect.height() - 24.0),
+                egui::Align2::LEFT_BOTTOM,
+                format!("[BAKE CAGE PREVIEW] {}  |  Orbit: LMB / RMB  |  Pan: MMB  |  Zoom: Scroll", cage_mode_desc),
+                egui::FontId::proportional(11.5),
+                egui::Color32::from_rgb(0, 225, 255),
             );
         }
 
@@ -7809,16 +7922,17 @@ impl PaintcraftApp {
             let delta = input.pointer.delta();
             self.camera.pan(delta.x * self.camera_pan_speed, delta.y * self.camera_pan_speed);
         }
-        // 6. Alt + LMB (or RMB without modifiers): Substance Camera Orbit
+        // 6. Alt + LMB (or RMB without modifiers): Substance Camera Orbit (or Left-drag when Bake modal is open)
         else if (response.dragged_by(eframe::egui::PointerButton::Primary) && input.modifiers.alt)
             || (response.dragged_by(eframe::egui::PointerButton::Secondary) && !input.modifiers.command && !input.modifiers.shift && !input.modifiers.alt)
+            || (self.show_bake_modal && response.dragged_by(eframe::egui::PointerButton::Primary))
         {
             let delta = input.pointer.delta();
             self.camera.orbit(delta.x * self.camera_orbit_speed, delta.y * self.camera_orbit_speed);
         }
-        // 7. Left-drag WITHOUT Alt and WITHOUT Ctrl: 3D PROJECTION PAINTING!
+        // 7. Left-drag WITHOUT Alt and WITHOUT Ctrl: 3D PROJECTION PAINTING! (Disabled when Bake modal is open)
         else if (response.dragged_by(egui::PointerButton::Primary) || response.clicked())
-            && !input.modifiers.alt && !input.modifiers.command
+            && !input.modifiers.alt && !input.modifiers.command && !self.show_bake_modal
         {
                 if !self.is_stroke_active {
                     if let Some(wgpu) = &mut self.wgpu_viewport {
@@ -10689,11 +10803,22 @@ impl PaintcraftApp {
         let is_baking = self.bake_worker_state.as_ref().map(|s| !s.lock().unwrap().is_done).unwrap_or(false);
         let mut close_modal = false;
 
+        let screen = ctx.screen_rect();
+        let def_w = 780.0f32.min(screen.width() * 0.60).max(520.0);
+        let def_h = 580.0f32.min(screen.height() * 0.85).max(380.0);
+        let min_w = 520.0f32.min(screen.width() * 0.9);
+        let min_h = 360.0f32.min(screen.height() * 0.85);
+        let max_w = (screen.width() - 32.0).max(400.0);
+        let max_h = (screen.height() - 32.0).max(350.0);
+
         egui::Window::new("Bake Mesh Maps")
             .collapsible(false)
             .resizable(true)
-            .default_width(960.0)
-            .default_height(620.0)
+            .default_pos(egui::pos2(20.0, 50.0))
+            .default_size([def_w, def_h])
+            .min_width(min_w)
+            .min_height(min_h)
+            .max_size([max_w, max_h])
             .show(ctx, |ui| {
                 // Header Banner
                 ui.horizontal(|ui| {
@@ -10715,8 +10840,9 @@ impl PaintcraftApp {
                 let avail_h = (ui.available_height() - 110.0).max(280.0);
                 ui.horizontal(|ui| {
                     // Column 1: Texture Sets
+                    let col1_w = (ui.available_width() * 0.22).clamp(160.0, 190.0);
                     ui.allocate_ui_with_layout(
-                        egui::vec2(210.0, avail_h),
+                        egui::vec2(col1_w, avail_h),
                         egui::Layout::top_down(egui::Align::Min),
                         |ui| {
                             ui.strong(egui::RichText::new("Texture Sets").color(Color32::from_rgb(220, 225, 235)));
@@ -10757,15 +10883,16 @@ impl PaintcraftApp {
                     ui.separator();
 
                     // Column 2: Mesh Maps Selection & Navigation
+                    let col2_w = (ui.available_width() * 0.28).clamp(170.0, 210.0);
                     ui.allocate_ui_with_layout(
-                        egui::vec2(230.0, avail_h),
+                        egui::vec2(col2_w, avail_h),
                         egui::Layout::top_down(egui::Align::Min),
                         |ui| {
                             ui.strong(egui::RichText::new("Bake Settings").color(Color32::from_rgb(220, 225, 235)));
                             ui.add_space(4.0);
 
                             let is_common = self.bake_active_settings_tab == crate::baker::BakeSettingsTab::Common;
-                            if ui.selectable_label(is_common, "⚙ Common Parameters").clicked() {
+                            if ui.selectable_label(is_common, "Common Parameters").clicked() {
                                 self.bake_active_settings_tab = crate::baker::BakeSettingsTab::Common;
                             }
                             ui.add_space(4.0);
@@ -10813,14 +10940,15 @@ impl PaintcraftApp {
                     ui.separator();
 
                     // Column 3: Active Map & Common Parameters Panel
+                    let col3_w = (ui.available_width() - 12.0).max(280.0);
                     ui.allocate_ui_with_layout(
-                        egui::vec2(ui.available_width().max(380.0), avail_h),
+                        egui::vec2(col3_w, avail_h),
                         egui::Layout::top_down(egui::Align::Min),
                         |ui| {
                             // Top Tab Strip
                             ui.horizontal_wrapped(|ui| {
                                 let tabs = [
-                                    (crate::baker::BakeSettingsTab::Common, "⚙ Common"),
+                                    (crate::baker::BakeSettingsTab::Common, "Common"),
                                     (crate::baker::BakeSettingsTab::TangentNormal, "Normal"),
                                     (crate::baker::BakeSettingsTab::WorldNormal, "World Normal"),
                                     (crate::baker::BakeSettingsTab::AmbientOcclusion, "AO"),
@@ -10937,6 +11065,42 @@ impl PaintcraftApp {
                                                     });
                                                     ui.label(egui::RichText::new("Cage OBJ must have matching topology (identical vertex count and faces) as the low-poly mesh.").small().color(Color32::from_rgb(150, 155, 165)));
                                                 }
+                                            }
+
+                                            ui.add_space(4.0);
+                                            ui.checkbox(&mut self.bake_preview_cage, egui::RichText::new("Preview Cage in 3D Viewport").strong().color(Color32::from_rgb(0, 225, 255)));
+                                            if self.bake_preview_cage {
+                                                ui.indent("bake_cage_preview_indent", |ui| {
+                                                    ui.horizontal(|ui| {
+                                                        ui.checkbox(&mut self.bake_cage_show_hull, "Translucent Shell");
+                                                        ui.checkbox(&mut self.bake_cage_show_tethers, "Displacement Vectors");
+                                                    });
+                                                    ui.horizontal(|ui| {
+                                                        ui.label("Color:");
+                                                        let colors = ["Cyan (Substance)", "Orange", "Lime Green", "Magenta"];
+                                                        egui::ComboBox::from_id_source("bake_cage_color_sel")
+                                                            .selected_text(colors.get(self.bake_cage_color_idx).copied().unwrap_or("Cyan"))
+                                                            .show_ui(ui, |ui| {
+                                                                for (c_idx, &c_name) in colors.iter().enumerate() {
+                                                                    ui.selectable_value(&mut self.bake_cage_color_idx, c_idx, c_name);
+                                                                }
+                                                            });
+                                                        ui.label("Opacity:");
+                                                        ui.add(egui::Slider::new(&mut self.bake_cage_opacity, 0.1..=1.0));
+                                                    });
+                                                    let status_text = match self.bake_cage_mode {
+                                                        crate::baker::BakeCageMode::None => format!("Previewing frontal ray envelope at distance {:.3}", self.bake_frontal),
+                                                        crate::baker::BakeCageMode::ParametricInflation => format!("Previewing parametric smoothed cage at offset {:.3}", self.bake_cage_inflation),
+                                                        crate::baker::BakeCageMode::ExternalCage => {
+                                                            if self.bake_cage_path.is_empty() {
+                                                                "No external cage OBJ loaded".to_string()
+                                                            } else {
+                                                                format!("Previewing external cage: {}", self.bake_cage_path)
+                                                            }
+                                                        }
+                                                    };
+                                                    ui.label(egui::RichText::new(status_text).small().color(Color32::from_rgb(120, 210, 255)));
+                                                });
                                             }
 
                                             ui.add_space(6.0);
@@ -11282,6 +11446,10 @@ impl PaintcraftApp {
 
         if close_modal {
             self.show_bake_modal = false;
+            self.bake_cage_cache_key = (crate::baker::BakeCageMode::None, 0, 0, String::new(), false, false, 0, 0);
+            if let Some(wgpu) = &mut self.wgpu_viewport {
+                wgpu.clear_cage();
+            }
         }
     }
 }
@@ -11417,6 +11585,16 @@ mod tests {
         assert_eq!(parametric_cfg.mode.name(), "Parametric Cage (Inflation)");
         assert_eq!(crate::baker::BakeCageMode::ExternalCage.name(), "External Cage Mesh");
         assert_eq!(crate::baker::BakeCageMode::None.name(), "None (Ray Distances)");
+
+        // Verify cage color palette mapping
+        let colors = [
+            [0.0, 0.88, 1.0, 1.0],   // Cyan (Substance standard)
+            [1.0, 0.45, 0.05, 1.0],  // Orange
+            [0.2, 1.0, 0.35, 1.0],   // High-Vis Lime
+            [1.0, 0.15, 0.80, 1.0],  // Neon Magenta
+        ];
+        assert_eq!(colors[0], [0.0, 0.88, 1.0, 1.0], "Substance Cyan color matches specification");
+        assert_eq!(colors[1], [1.0, 0.45, 0.05, 1.0], "Substance Orange color matches specification");
     }
 
     #[test]

@@ -262,6 +262,18 @@ fn calculate_mesh_bounds(vertices: &[crate::mesh::Vertex]) -> (glam::Vec3, f32) 
     (center, radius)
 }
 
+#[derive(Debug)]
+pub struct WgpuCageMesh {
+    pub vertex_buffer: wgpu::Buffer,
+    pub wire_index_buffer: wgpu::Buffer,
+    pub wire_index_count: u32,
+    pub hull_index_buffer: wgpu::Buffer,
+    pub hull_index_count: u32,
+    pub show_hull: bool,
+    pub color: [f32; 4],
+    pub opacity: f32,
+}
+
 pub struct WgpuViewport {
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
@@ -292,6 +304,9 @@ pub struct WgpuViewport {
     pipeline_double_sided: wgpu::RenderPipeline,
     skybox_pipeline: wgpu::RenderPipeline,
     wireframe_pipeline: wgpu::RenderPipeline,
+    cage_wire_pipeline: wgpu::RenderPipeline,
+    cage_hull_pipeline: wgpu::RenderPipeline,
+    cage_mesh: Option<WgpuCageMesh>,
     shadow_pipeline: wgpu::RenderPipeline,
     #[allow(dead_code)]
     shadow_texture: wgpu::Texture,
@@ -404,7 +419,7 @@ impl WgpuViewport {
 
         let camera_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Camera Buffer"),
-            size: 320,
+            size: 352,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -752,6 +767,98 @@ impl WgpuViewport {
             multiview: None,
         });
 
+        let cage_wire_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Cage Wire Pipeline"),
+            layout: Some(&wireframe_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: "vs_wire",
+                buffers: &vertex_layouts,
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: "fs_cage_wire",
+                targets: &[
+                    Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                    Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba16Float,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::empty(),
+                    }),
+                ],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::LineList,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::LessEqual,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState {
+                    constant: -3,
+                    slope_scale: -1.5,
+                    clamp: 0.0,
+                },
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+        });
+
+        let cage_hull_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Cage Hull Pipeline"),
+            layout: Some(&wireframe_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: "vs_wire",
+                buffers: &vertex_layouts,
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: "fs_cage_hull",
+                targets: &[
+                    Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                    Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba16Float,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::empty(),
+                    }),
+                ],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::LessEqual,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState {
+                    constant: -1,
+                    slope_scale: -0.5,
+                    clamp: 0.0,
+                },
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+        });
+
         let shadow_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Shadow Pipeline Layout"),
             bind_group_layouts: &[&camera_bind_group_layout],
@@ -1009,6 +1116,9 @@ impl WgpuViewport {
             pipeline_double_sided,
             skybox_pipeline,
             wireframe_pipeline,
+            cage_wire_pipeline,
+            cage_hull_pipeline,
+            cage_mesh: None,
             shadow_pipeline,
             shadow_texture,
             shadow_view,
@@ -1827,7 +1937,7 @@ fn blur_equirectangular(
         let light_view_proj = light_proj * light_view;
 
         let t_enc = std::time::Instant::now();
-        let mut data = [0u8; 320];
+        let mut data = [0u8; 352];
         data[0..64].copy_from_slice(bytemuck::cast_slice(&[view_proj_jittered]));
         data[64..80].copy_from_slice(bytemuck::cast_slice(&[eye_pos]));
         data[80..84].copy_from_slice(bytemuck::cast_slice(&[env_rot]));
@@ -1861,6 +1971,13 @@ fn blur_equirectangular(
         data[296..300].copy_from_slice(bytemuck::cast_slice(&[shader.shadow_softness]));
         data[300..304].copy_from_slice(bytemuck::cast_slice(&[shader.wireframe_opacity]));
         data[304..320].copy_from_slice(bytemuck::cast_slice(&shader.wireframe_color));
+        let (cage_color, cage_opacity) = if let Some(ref c) = self.cage_mesh {
+            (c.color, c.opacity)
+        } else {
+            ([0.0, 0.88, 1.0, 1.0], 0.0)
+        };
+        data[320..336].copy_from_slice(bytemuck::cast_slice(&cage_color));
+        data[336..340].copy_from_slice(bytemuck::cast_slice(&[cage_opacity]));
         self.queue.write_buffer(&self.camera_buffer, 0, &data);
 
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -1978,6 +2095,26 @@ fn blur_equirectangular(
                 pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
                 pass.set_index_buffer(self.wire_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..self.wire_index_count, 0, 0..1);
+            }
+
+            // Draw Baking Cage Preview Overlay (Translucent Shaded Hull and Glowing Wireframe)
+            if let Some(ref cage) = self.cage_mesh {
+                // 1. Shaded translucent cage hull
+                if cage.show_hull && cage.hull_index_count > 0 {
+                    pass.set_pipeline(&self.cage_hull_pipeline);
+                    pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                    pass.set_vertex_buffer(0, cage.vertex_buffer.slice(..));
+                    pass.set_index_buffer(cage.hull_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..cage.hull_index_count, 0, 0..1);
+                }
+                // 2. Glowing cage wireframe & displacement tethers
+                if cage.wire_index_count > 0 {
+                    pass.set_pipeline(&self.cage_wire_pipeline);
+                    pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                    pass.set_vertex_buffer(0, cage.vertex_buffer.slice(..));
+                    pass.set_index_buffer(cage.wire_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..cage.wire_index_count, 0, 0..1);
+                }
             }
         }
 
@@ -2138,6 +2275,114 @@ impl WgpuViewport {
     #[allow(dead_code)]
     pub fn queue(&self) -> Arc<wgpu::Queue> {
         Arc::clone(&self.queue)
+    }
+
+    /// Update or construct cage geometry buffers for real-time 3D viewport preview
+    pub fn update_cage(
+        &mut self,
+        mesh: &crate::mesh::Mesh,
+        cage_positions: Option<&[glam::Vec3]>,
+        show_hull: bool,
+        show_tethers: bool,
+        color: [f32; 4],
+        opacity: f32,
+    ) {
+        let cage_positions = match cage_positions {
+            Some(pos) if !pos.is_empty() && pos.len() == mesh.vertices.len() => pos,
+            _ => {
+                self.cage_mesh = None;
+                return;
+            }
+        };
+
+        let n = mesh.vertices.len();
+        let mut gpu_vertices = Vec::with_capacity(n * 2);
+
+        // 0..N: base mesh vertices (tether origin anchors)
+        for v in &mesh.vertices {
+            gpu_vertices.push(v.into());
+        }
+
+        // N..2N: cage vertices (displaced outward along smoothed normals)
+        for (v, &c_pos) in mesh.vertices.iter().zip(cage_positions.iter()) {
+            gpu_vertices.push(crate::mesh::GpuVertex {
+                position: [c_pos.x, c_pos.y, c_pos.z],
+                normal: [v.normal.x, v.normal.y, v.normal.z],
+                tangent: [v.tangent.x, v.tangent.y, v.tangent.z, v.tangent.w],
+                uv: [v.uv.x, v.uv.y],
+            });
+        }
+
+        let mut wire_indices = Vec::new();
+        let tri_count = mesh.indices.len() / 3;
+
+        // 1. Cage wireframe lines (at N..2N)
+        for t in 0..tri_count {
+            let i0 = (mesh.indices[t * 3] as usize + n) as u32;
+            let i1 = (mesh.indices[t * 3 + 1] as usize + n) as u32;
+            let i2 = (mesh.indices[t * 3 + 2] as usize + n) as u32;
+            wire_indices.push(i0);
+            wire_indices.push(i1);
+            wire_indices.push(i1);
+            wire_indices.push(i2);
+            wire_indices.push(i2);
+            wire_indices.push(i0);
+        }
+
+        // 2. Displacement tethers connecting base vertex i to cage vertex N + i
+        if show_tethers {
+            let step = if n > 4000 { (n / 2000).max(1) } else { 1 };
+            for i in (0..n).step_by(step) {
+                wire_indices.push(i as u32);
+                wire_indices.push((i + n) as u32);
+            }
+        }
+
+        // 3. Cage hull triangle indices (at N..2N)
+        let mut hull_indices = Vec::with_capacity(mesh.indices.len());
+        for &idx in &mesh.indices {
+            hull_indices.push((idx as usize + n) as u32);
+        }
+
+        let vertex_buffer = self.device.create_buffer_init(&eframe::wgpu::util::BufferInitDescriptor {
+            label: Some("Cage Vertex Buffer"),
+            contents: bytemuck::cast_slice(&gpu_vertices),
+            usage: eframe::wgpu::BufferUsages::VERTEX,
+        });
+
+        let wire_index_buffer = self.device.create_buffer_init(&eframe::wgpu::util::BufferInitDescriptor {
+            label: Some("Cage Wire Index Buffer"),
+            contents: bytemuck::cast_slice(&wire_indices),
+            usage: eframe::wgpu::BufferUsages::INDEX,
+        });
+
+        let hull_index_buffer = self.device.create_buffer_init(&eframe::wgpu::util::BufferInitDescriptor {
+            label: Some("Cage Hull Index Buffer"),
+            contents: bytemuck::cast_slice(&hull_indices),
+            usage: eframe::wgpu::BufferUsages::INDEX,
+        });
+
+        self.cage_mesh = Some(WgpuCageMesh {
+            vertex_buffer,
+            wire_index_buffer,
+            wire_index_count: wire_indices.len() as u32,
+            hull_index_buffer,
+            hull_index_count: hull_indices.len() as u32,
+            show_hull,
+            color,
+            opacity,
+        });
+    }
+
+    /// Clear and disable cage preview overlay in viewport
+    pub fn clear_cage(&mut self) {
+        self.cage_mesh = None;
+    }
+
+    /// Check if cage overlay is currently active
+    #[allow(dead_code)]
+    pub fn has_cage(&self) -> bool {
+        self.cage_mesh.is_some()
     }
 }
 
@@ -2322,6 +2567,23 @@ mod tests {
 
         // Frame 2
         viewport.render(vp, eye, 0.0, 0, 0.0, 1.0, &shader, true);
+
+        // Frame 3: Baking Cage Preview
+        let cage_cfg = crate::baker::BakeCageConfig {
+            mode: crate::baker::BakeCageMode::ParametricInflation,
+            inflation_offset: 0.05,
+            external_cage_path: None,
+        };
+        let cage_verts = crate::baker::Baker::compute_cage_vertices(&project.mesh, &cage_cfg).unwrap().unwrap();
+        viewport.update_cage(&project.mesh, Some(&cage_verts), true, true, [0.0, 0.88, 1.0, 1.0], 0.85);
+        assert!(viewport.has_cage(), "WgpuViewport must report active cage");
+
+        viewport.render(vp, eye, 0.0, 0, 0.0, 1.0, &shader, true);
+
+        // Frame 4: Clear Cage
+        viewport.clear_cage();
+        assert!(!viewport.has_cage(), "WgpuViewport must report no active cage after clear");
+        viewport.render(vp, eye, 0.0, 0, 0.0, 1.0, &shader, false);
     }
 }
 
