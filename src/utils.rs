@@ -1,5 +1,5 @@
 // 3D Paintcraft - Math & Noise Utilities
-// Built with pure Rust for ArtCraft ecosystem
+// Built with pure, safe Rust for high-performance procedural texturing
 
 use glam::Vec4;
 

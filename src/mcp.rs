@@ -1,5 +1,5 @@
 // 3D Paintcraft - Model Context Protocol (MCP) Server & AI Agent Interface
-// Native ArtCraft-style tool exposure for agentic AI workflows
+// Native tool exposure for automated studio pipelines and agentic AI workflows
 
 use crate::export::{ExportPreset, TextureExporter};
 use crate::mesh::Mesh;

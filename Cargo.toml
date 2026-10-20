@@ -2,8 +2,8 @@
 name = "paintcraft-3d"
 version = "0.2.0"
 edition = "2021"
-authors = ["ArtCraft Team <contact@artcraft.dev>"]
-description = "A clean-room recreation of Substance 3D Painter written in pure Rust for Windows and Linux"
+authors = ["Ras-Maciej <maciejjakubras@gmail.com>"]
+description = "High-performance PBR texture painting and mesh map baking suite written in pure Rust for Windows and Linux"
 license = "MIT OR Apache-2.0"
 
 [dependencies]

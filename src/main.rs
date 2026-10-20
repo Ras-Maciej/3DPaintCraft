@@ -1,5 +1,5 @@
-// 3D Paintcraft - A Clean-Room Recreation of Substance 3D Painter in Pure Rust for Windows & Linux
-// Part of the ArtCraft Creative Suite
+// 3D Paintcraft - High-Performance PBR Texture Painting & Baking Suite
+// Written in pure, safe Rust for Windows and Linux
 
 mod app;
 mod baker;
@@ -41,7 +41,7 @@ fn main() -> Result<(), eframe::Error> {
 
     // Mode 1: AI Agent Model Context Protocol (MCP) Server
     if args.iter().any(|arg| arg == "--mcp") {
-        eprintln!("[3D Paintcraft] Starting ArtCraft Model Context Protocol (MCP) Server...");
+        eprintln!("[3D Paintcraft] Starting Model Context Protocol (MCP) Server...");
         let project = Project::new_default(512, 512);
         McpServer::run_stdio_server(project);
         return Ok(());
@@ -111,7 +111,7 @@ fn main() -> Result<(), eframe::Error> {
 
     let native_options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
-            .with_title("3D Paintcraft - ArtCraft Suite")
+            .with_title("3D Paintcraft")
             .with_inner_size([1280.0, 800.0])
             .with_min_inner_size([960.0, 600.0]),
         wgpu_options,

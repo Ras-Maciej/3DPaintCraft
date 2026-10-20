@@ -1,5 +1,5 @@
-// 3D Paintcraft - Substance 3D Painter Recreation GUI for Linux
-// Built with pure Rust for the ArtCraft Creative Suite
+// 3D Paintcraft - High-Performance PBR Texture Painting & Baking Suite
+// Built with pure, safe Rust for Windows and Linux
 
 use crate::brush::{AlphaType, BrushEngine, PaintTarget, ToolMode};
 use crate::export::{ExportPreset, TextureExporter};
@@ -6533,15 +6533,15 @@ impl eframe::App for PaintcraftApp {
                 .collapsible(false)
                 .show(ctx, |ui| {
                     ui.heading("3D Paintcraft");
-                    ui.label("A clean-room recreation of Substance 3D Painter written in pure Rust for Linux.");
-                    ui.label("Part of the ArtCraft open-source creative suite.");
+                    ui.label("High-performance PBR texture painting and mesh map baking suite written in pure Rust.");
+                    ui.label("Cross-platform support for Windows and Linux.");
                     ui.separator();
                     ui.label("Features:");
                     ui.label("• Real-time BVH-accelerated 3D Projection Painting");
                     ui.label("• Cook-Torrance GGX Shading with TBN Normal Mapping & HDRI IBL");
                     ui.label("• Selectable HDRI Environments (Studio Neutral, Tomoko, Sunset, Courtyard, Cyberpunk)");
                     ui.label("• Perspective-Correct Rasterization & Orthographic Camera Mode");
-                    ui.label("• Graphical Linux File Explorer for OBJ Models and Projects");
+                    ui.label("• Integrated Visual File Explorer for 3D Models and Projects");
                     ui.label("• Substance 3D Painter UI Layout with Left Toolbar and Bottom Shelf");
                     ui.label("• Grayscale Layer Masks (Black, White, Curvature Edge Wear)");
                     ui.label("• Non-Destructive Undo / Redo History (Ctrl+Z / Ctrl+Y)");
