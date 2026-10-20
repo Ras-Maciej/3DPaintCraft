@@ -121,6 +121,21 @@ impl McpServer {
                 }
             },
             {
+                "name": "paintcraft_export_custom_packed_textures",
+                "description": "Export textures using the Custom Texture Packing System with user-defined channel routing",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "preset_id": { "type": "string", "description": "Preset ID: unreal_orm, unity_hdrp, unity_urp, godot4, blender_gltf, cryengine_ddna, individual_channels, or custom_studio_default" },
+                        "preset_json": { "type": "string", "description": "Optional inline JSON string defining a CustomPackingPreset" },
+                        "output_dir": { "type": "string", "description": "Destination directory" },
+                        "flip_v": { "type": "boolean", "description": "Flip Y / V UV axis" },
+                        "export_mesh": { "type": "boolean", "description": "Export 3D mesh files (.obj, .mtl, .glb)" }
+                    },
+                    "required": ["output_dir"]
+                }
+            },
+            {
                 "name": "paintcraft_load_primitive",
                 "description": "Load a built-in 3D model primitive (shader_ball, rounded_cube, scifi_crate, robot_head, torus, cylinder)",
                 "inputSchema": {
@@ -333,6 +348,43 @@ impl McpServer {
                 let file_strings: Vec<String> = files.into_iter().map(|p| p.to_string_lossy().to_string()).collect();
 
                 Ok(json!({ "success": true, "exported_files": file_strings }))
+            }
+
+            "paintcraft_export_custom_packed_textures" => {
+                let out_dir_str = arguments.get("output_dir").and_then(|v| v.as_str()).ok_or("Missing output_dir")?;
+                let out_dir = PathBuf::from(out_dir_str);
+                let flip_v = arguments.get("flip_v").and_then(|v| v.as_bool()).unwrap_or(true);
+                let export_mesh = arguments.get("export_mesh").and_then(|v| v.as_bool()).unwrap_or(true);
+
+                let preset = if let Some(json_str) = arguments.get("preset_json").and_then(|v| v.as_str()) {
+                    crate::packing::CustomPackingPreset::from_json_string(json_str)?
+                } else {
+                    let preset_id = arguments.get("preset_id").and_then(|v| v.as_str()).unwrap_or("unreal_orm");
+                    match preset_id {
+                        "unity_hdrp" => crate::packing::CustomPackingPreset::unity_hdrp(),
+                        "unity_urp" => crate::packing::CustomPackingPreset::unity_urp(),
+                        "godot4" => crate::packing::CustomPackingPreset::godot4(),
+                        "blender_gltf" => crate::packing::CustomPackingPreset::blender_gltf(),
+                        "cryengine_ddna" => crate::packing::CustomPackingPreset::cryengine_ddna(),
+                        "individual_channels" => crate::packing::CustomPackingPreset::individual_channels(),
+                        "custom_studio_default" => crate::packing::CustomPackingPreset::custom_studio_default(),
+                        _ => crate::packing::CustomPackingPreset::unreal_orm(),
+                    }
+                };
+
+                let baked = project.baked_map_context();
+                let files = crate::packing::CustomTexturePacker::pack_and_export(
+                    &preset,
+                    &project.composite_textures,
+                    &project.mesh.name,
+                    &out_dir,
+                    flip_v,
+                    if export_mesh { Some(&project.mesh) } else { None },
+                    &baked,
+                )?;
+                let file_strings: Vec<String> = files.into_iter().map(|p| p.to_string_lossy().to_string()).collect();
+
+                Ok(json!({ "success": true, "preset": preset.name, "exported_files": file_strings }))
             }
 
             "paintcraft_load_primitive" => {

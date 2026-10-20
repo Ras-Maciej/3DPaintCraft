@@ -6,6 +6,12 @@ use image::{ImageBuffer, Rgba};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+#[allow(unused_imports)]
+pub use crate::packing::{
+    BakedMapContext, ChannelSlot, ChannelSource, CustomPackingPreset, CustomTexturePacker,
+    PackedColorMode, PackedImageFormat, PackedTextureMap,
+};
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ExportPreset {
     Godot4,           // Godot 4 StandardMaterial3D (Albedo, Normal, ORM, Height, AO)

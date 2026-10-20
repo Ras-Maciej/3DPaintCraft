@@ -57,11 +57,13 @@ High-Performance PBR Texture Painting, Mesh Map Baking, and Path Tracing Suite
 
 ### 5. Production Pipeline and Engine Interchange
 - **Mesh Asset Support**: Wavefront OBJ, glTF 2.0 (JSON and binary GLB) with automatic vertex normal and tangent-space orthogonalization.
-- **Export Presets**:
-  - Unreal Engine 5: Base Color, Normal, and Packed ORM (Occlusion, Roughness, Metallic).
-  - Unity URP and HDRP: Albedo, Normal, and MetallicGloss (Alpha smoothness).
-  - Blender and glTF Standard: Base Color, Normal, Packed MetallicRoughness, and Ambient Occlusion.
-  - Custom Channel Packing: User-configurable RGB/RGBA channel assignments and bit-depth options.
+- **Custom Texture Packing System**:
+  - Fully configurable interactive channel matrix routing arbitrary source channels (Base Color R/G/B/A/Luma, Roughness, Smoothness, Metallic, AO, Height, Tangent Normals with DirectX/OpenGL switch, Baked Curvature/Thickness/World Normal/Position/ID, Emissive, and constants) into target output channels.
+  - Per-channel inversion toggles (`1 - x`) for direct Smoothness/Roughness and DirectX/OpenGL normal conventions.
+  - Flexible color modes: RGB (3-channel 24bpp), RGBA (4-channel 32bpp), and Grayscale (single-channel 8bpp).
+  - Formats: Lossless PNG and JPEG outputs with configurable parallel UV seam dilation padding (0 to 32 pixels).
+  - JSON Preset Management: Save, load, duplicate, and share studio-specific output packing presets (`.json`).
+  - Pre-configured production templates: Unreal Engine 4/5 ORM, Unity HDRP MaskMap, Unity URP MetallicSmoothness, Godot 4 StandardMaterial3D, Blender/glTF 2.0, CryEngine DDNA, and Universal Isolated Channels.
 - **Headless CLI Batch Processing**: Full automation support for CI/CD pipelines, automated asset ingestion, and smart material application without graphical display requirements.
 - **Model Context Protocol (MCP)**: Native JSON-RPC 2.0 interface enabling external pipeline scripts and AI agents to query project state, apply materials, bake mesh maps, and trigger exports.
 
@@ -139,6 +141,19 @@ cargo build --release --target x86_64-pc-windows-gnu
 paintcraft --export UnrealEngine --out ./dist/textures --material worn_painted_steel
 ```
 
+### Headless Custom Texture Packing
+Pack textures using pre-configured engine templates or custom JSON preset configurations:
+```bash
+# Export using built-in Unreal Engine ORM packing
+paintcraft --pack unreal_orm --out ./dist/textures
+
+# Export using Unity HDRP MaskMap packing (Metallic, AO, Curvature, Smoothness)
+paintcraft --pack unity_hdrp --out ./dist/textures
+
+# Export using a studio-specific custom JSON packing definition
+paintcraft --pack ./my_studio_preset.json --out ./dist/textures
+```
+
 ### Model Context Protocol (MCP) Server
 Launch standard I/O JSON-RPC interface for automation tooling:
 ```bash
@@ -172,6 +187,7 @@ src/
 ├── smart_materials.rs      # Physics-based PBR smart material preset library
 ├── asset_manager.rs        # Asynchronous asset discovery and material library management
 ├── file_dialog.rs          # Integrated visual filesystem navigation and model importer
+├── packing.rs              # Custom texture packing matrix engine, preset management, and channel routing
 ├── export.rs               # Multi-engine texture export pipeline and channel packing
 ├── mcp.rs                  # Model Context Protocol (MCP) server implementation
 └── utils.rs                # Procedural noise generation (fBm, Worley) and math utilities

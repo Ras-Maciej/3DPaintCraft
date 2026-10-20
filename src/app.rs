@@ -3,6 +3,11 @@
 
 use crate::brush::{AlphaType, BrushEngine, PaintTarget, ToolMode};
 use crate::export::{ExportPreset, TextureExporter};
+#[allow(unused_imports)]
+use crate::packing::{
+    ChannelSlot, ChannelSource, CustomPackingPreset, CustomTexturePacker,
+    PackedColorMode, PackedImageFormat, PackedTextureMap,
+};
 use crate::file_dialog::FileExplorerDialog;
 use crate::history::{HistoryAction, HistoryManager};
 use crate::layer::{BlendMode, Layer, LayerType, ProceduralGenerator};
@@ -155,6 +160,11 @@ pub struct PaintcraftApp {
     pub export_dir: String,
     pub export_flip_v: bool,
     pub export_mesh: bool,
+    pub export_tab_idx: usize,
+    pub custom_packing_presets: Vec<crate::packing::CustomPackingPreset>,
+    pub active_custom_packing_idx: usize,
+    pub custom_packing_status: Option<String>,
+    pub custom_preset_io_filename: String,
     pub project_file_path: String,
 
     pub show_about_modal: bool,
@@ -471,6 +481,11 @@ impl PaintcraftApp {
             },
             export_flip_v: true,
             export_mesh: true,
+            export_tab_idx: 0,
+            custom_packing_presets: crate::packing::CustomPackingPreset::default_presets(),
+            active_custom_packing_idx: 0,
+            custom_packing_status: None,
+            custom_preset_io_filename: "my_custom_preset.json".to_string(),
             project_file_path: {
                 let mut p = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
                 p.push("project.paintcraft");
@@ -1815,6 +1830,378 @@ impl PaintcraftApp {
         }
     }
 
+    /// Render the Export Textures Modal Dialog (Quick Presets & Custom Channel Packing)
+    pub fn render_export_modal(&mut self, ctx: &egui::Context) {
+        let mut close_modal = false;
+        let mut status_update = None;
+
+        egui::Window::new("Export Textures & Custom Channel Packing")
+            .collapsible(false)
+            .resizable(true)
+            .default_width(740.0)
+            .default_height(580.0)
+            .show(ctx, |ui| {
+                // Header tab switcher
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut self.export_tab_idx, 0, "Quick Engine Presets");
+                    ui.selectable_value(&mut self.export_tab_idx, 1, "Custom Texture Packing Matrix");
+                });
+                ui.separator();
+
+                if self.export_tab_idx == 0 {
+                    // TAB 1: Quick Engine Presets
+                    ui.heading("Target Engine Preset:");
+                    egui::ComboBox::from_id_source("export_preset_combo")
+                        .selected_text(self.export_preset.name())
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut self.export_preset, ExportPreset::Godot4, "Godot 4 Engine (StandardMaterial3D / ORM)");
+                            ui.selectable_value(&mut self.export_preset, ExportPreset::UnrealEngine, "Unreal Engine (ORM Packed)");
+                            ui.selectable_value(&mut self.export_preset, ExportPreset::Unity, "Unity URP / Standard");
+                            ui.selectable_value(&mut self.export_preset, ExportPreset::BlenderGltf, "Blender / glTF Standard");
+                            ui.selectable_value(&mut self.export_preset, ExportPreset::GlbBinary, "glTF 2.0 Binary (.glb) with PBR Textures");
+                            ui.selectable_value(&mut self.export_preset, ExportPreset::IndividualMaps, "Individual Channel Maps");
+                        });
+
+                    ui.add_space(8.0);
+                    ui.label("Destination Directory:");
+                    ui.text_edit_singleline(&mut self.export_dir);
+
+                    ui.add_space(8.0);
+                    ui.label("Export Configuration:");
+                    ui.checkbox(&mut self.export_flip_v, "Flip Y / V-Axis (Recommended for Blender, Maya, Godot, OBJ)")
+                        .on_hover_text("Aligns texture coordinates with bottom-left UV origin convention used by Wavefront OBJ, Blender, and Godot.");
+                    ui.checkbox(&mut self.export_mesh, "Export 3D Model (.obj + .mtl, and .glb) alongside textures")
+                        .on_hover_text("Exports the active model in standard Wavefront OBJ and binary glTF 2.0 (.glb) format with matching UV coordinates ready for 1-click DCC import.");
+
+                    ui.add_space(12.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Export Now").clicked() {
+                            let out_path = PathBuf::from(&self.export_dir);
+                            self.project.composite_textures.composite_layers(&self.project.layers);
+                            match TextureExporter::export_preset(
+                                &self.project.composite_textures,
+                                &self.project.mesh.name,
+                                self.export_preset,
+                                &out_path,
+                                self.export_flip_v,
+                                if self.export_mesh { Some(&self.project.mesh) } else { None },
+                            ) {
+                                Ok(files) => {
+                                    status_update = Some(format!("Exported {} production assets to {}", files.len(), self.export_dir));
+                                    close_modal = true;
+                                }
+                                Err(err) => {
+                                    status_update = Some(format!("Export error: {}", err));
+                                }
+                            }
+                        }
+                        if ui.button("Cancel").clicked() {
+                            close_modal = true;
+                        }
+                    });
+                } else {
+                    // TAB 2: Custom Texture Packing Matrix
+                    let preset_count = self.custom_packing_presets.len();
+                    if self.active_custom_packing_idx >= preset_count && preset_count > 0 {
+                        self.active_custom_packing_idx = 0;
+                    }
+
+                    // Toolbar: Preset Selector & Preset Management
+                    ui.horizontal(|ui| {
+                        ui.label("Template:");
+                        let current_name = if let Some(p) = self.custom_packing_presets.get(self.active_custom_packing_idx) {
+                            p.name.clone()
+                        } else {
+                            "None".to_string()
+                        };
+
+                        egui::ComboBox::from_id_source("custom_packing_preset_select")
+                            .selected_text(&current_name)
+                            .show_ui(ui, |ui| {
+                                for (idx, p) in self.custom_packing_presets.iter().enumerate() {
+                                    ui.selectable_value(&mut self.active_custom_packing_idx, idx, &p.name);
+                                }
+                            });
+
+                        if ui.button("+ New").on_hover_text("Create a new blank custom preset").clicked() {
+                            let new_preset = crate::packing::CustomPackingPreset {
+                                id: format!("custom_{}", chrono::Utc::now().timestamp_millis()),
+                                name: "New Studio Preset".to_string(),
+                                description: "Custom user-defined texture packing matrix".to_string(),
+                                maps: vec![
+                                    crate::packing::PackedTextureMap::new_rgb("_Albedo", crate::packing::ChannelSource::BaseColorR, crate::packing::ChannelSource::BaseColorG, crate::packing::ChannelSource::BaseColorB),
+                                    crate::packing::PackedTextureMap::new_rgb("_Normal", crate::packing::ChannelSource::NormalX, crate::packing::ChannelSource::NormalY, crate::packing::ChannelSource::NormalZ),
+                                    crate::packing::PackedTextureMap::new_rgb("_Packed", crate::packing::ChannelSource::AmbientOcclusion, crate::packing::ChannelSource::Roughness, crate::packing::ChannelSource::Metallic),
+                                ],
+                            };
+                            self.custom_packing_presets.push(new_preset);
+                            self.active_custom_packing_idx = self.custom_packing_presets.len() - 1;
+                        }
+
+                        if ui.button("Duplicate").on_hover_text("Duplicate current preset").clicked() {
+                            if let Some(cur) = self.custom_packing_presets.get(self.active_custom_packing_idx) {
+                                let mut dup = cur.clone();
+                                dup.id = format!("{}_copy", dup.id);
+                                dup.name = format!("{} (Copy)", dup.name);
+                                self.custom_packing_presets.push(dup);
+                                self.active_custom_packing_idx = self.custom_packing_presets.len() - 1;
+                            }
+                        }
+
+                        if preset_count > 1 && ui.button("Delete").on_hover_text("Delete current preset").clicked() {
+                            self.custom_packing_presets.remove(self.active_custom_packing_idx);
+                            if self.active_custom_packing_idx >= self.custom_packing_presets.len() {
+                                self.active_custom_packing_idx = self.custom_packing_presets.len().saturating_sub(1);
+                            }
+                        }
+
+                        if ui.button("Reset Defaults").on_hover_text("Reset all presets to factory standards").clicked() {
+                            self.custom_packing_presets = crate::packing::CustomPackingPreset::default_presets();
+                            self.active_custom_packing_idx = 0;
+                            self.custom_packing_status = Some("Presets reset to factory defaults.".to_string());
+                        }
+                    });
+
+                    // Preset JSON Import / Export Bar
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.label("Preset File (.json):");
+                        ui.add(egui::TextEdit::singleline(&mut self.custom_preset_io_filename).desired_width(180.0));
+
+                        if ui.button("Save Preset").on_hover_text("Save active preset to JSON in destination directory").clicked() {
+                            if let Some(cur) = self.custom_packing_presets.get(self.active_custom_packing_idx) {
+                                let out_dir = PathBuf::from(&self.export_dir);
+                                let _ = std::fs::create_dir_all(&out_dir);
+                                let file_path = out_dir.join(&self.custom_preset_io_filename);
+                                match cur.save_to_json_file(&file_path) {
+                                    Ok(_) => {
+                                        self.custom_packing_status = Some(format!("Saved preset to {:?}", file_path));
+                                    }
+                                    Err(e) => {
+                                        self.custom_packing_status = Some(format!("Error saving preset: {}", e));
+                                    }
+                                }
+                            }
+                        }
+
+                        if ui.button("Load Preset").on_hover_text("Load preset from JSON in destination directory").clicked() {
+                            let out_dir = PathBuf::from(&self.export_dir);
+                            let file_path = out_dir.join(&self.custom_preset_io_filename);
+                            match crate::packing::CustomPackingPreset::load_from_json_file(&file_path) {
+                                Ok(loaded) => {
+                                    self.custom_packing_presets.push(loaded);
+                                    self.active_custom_packing_idx = self.custom_packing_presets.len() - 1;
+                                    self.custom_packing_status = Some(format!("Loaded preset from {:?}", file_path));
+                                }
+                                Err(e) => {
+                                    self.custom_packing_status = Some(format!("Error loading preset: {}", e));
+                                }
+                            }
+                        }
+                    });
+
+                    if let Some(ref status) = self.custom_packing_status {
+                        ui.add_space(2.0);
+                        ui.label(egui::RichText::new(status).color(egui::Color32::from_rgb(100, 200, 255)));
+                    }
+
+                    ui.separator();
+
+                    // Preset Details & Map Rules
+                    if let Some(cur) = self.custom_packing_presets.get_mut(self.active_custom_packing_idx) {
+                        ui.horizontal(|ui| {
+                            ui.label("Preset Name:");
+                            ui.text_edit_singleline(&mut cur.name);
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Description:");
+                            ui.text_edit_singleline(&mut cur.description);
+                        });
+
+                        ui.add_space(6.0);
+                        ui.heading("Channel Packing Matrix:");
+
+                        let mut map_to_delete: Option<usize> = None;
+                        let mut map_to_duplicate: Option<usize> = None;
+
+                        // Scrollable list of output texture maps
+                        egui::ScrollArea::vertical()
+                            .max_height(240.0)
+                            .id_source("custom_packing_maps_scroll")
+                            .show(ui, |ui| {
+                                for (m_idx, map) in cur.maps.iter_mut().enumerate() {
+                                    ui.group(|ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.checkbox(&mut map.enabled, "");
+                                            ui.label("Suffix:");
+                                            ui.add(egui::TextEdit::singleline(&mut map.name_suffix).desired_width(120.0));
+
+                                            ui.label("Mode:");
+                                            egui::ComboBox::from_id_source(format!("map_colormode_{}", m_idx))
+                                                .selected_text(map.color_mode.name())
+                                                .show_ui(ui, |ui| {
+                                                    ui.selectable_value(&mut map.color_mode, crate::packing::PackedColorMode::Rgb, "RGB (3 Channels)");
+                                                    ui.selectable_value(&mut map.color_mode, crate::packing::PackedColorMode::Rgba, "RGBA (4 Channels)");
+                                                    ui.selectable_value(&mut map.color_mode, crate::packing::PackedColorMode::Grayscale, "Grayscale (1 Channel)");
+                                                });
+
+                                            ui.label("Format:");
+                                            egui::ComboBox::from_id_source(format!("map_format_{}", m_idx))
+                                                .selected_text(map.format.name())
+                                                .show_ui(ui, |ui| {
+                                                    ui.selectable_value(&mut map.format, crate::packing::PackedImageFormat::Png, "PNG (.png)");
+                                                    ui.selectable_value(&mut map.format, crate::packing::PackedImageFormat::Jpeg, "JPEG (.jpg)");
+                                                });
+
+                                            ui.label("Padding:");
+                                            ui.add(egui::Slider::new(&mut map.dilation_iterations, 0..=32).text("px"));
+
+                                            if ui.button("Dup").on_hover_text("Duplicate this map").clicked() {
+                                                map_to_duplicate = Some(m_idx);
+                                            }
+                                            if ui.button("X").on_hover_text("Remove this map").clicked() {
+                                                map_to_delete = Some(m_idx);
+                                            }
+                                        });
+
+                                        ui.add_space(4.0);
+
+                                        // Channels Row: R, G, B, A slots
+                                        ui.horizontal(|ui| {
+                                            match map.color_mode {
+                                                crate::packing::PackedColorMode::Grayscale => {
+                                                    render_channel_picker(ui, "Gray (Luma):", &mut map.channel_r, m_idx, "gray");
+                                                }
+                                                crate::packing::PackedColorMode::Rgb => {
+                                                    render_channel_picker(ui, "Red (R):", &mut map.channel_r, m_idx, "r");
+                                                    ui.separator();
+                                                    render_channel_picker(ui, "Green (G):", &mut map.channel_g, m_idx, "g");
+                                                    ui.separator();
+                                                    render_channel_picker(ui, "Blue (B):", &mut map.channel_b, m_idx, "b");
+                                                }
+                                                crate::packing::PackedColorMode::Rgba => {
+                                                    render_channel_picker(ui, "Red (R):", &mut map.channel_r, m_idx, "r");
+                                                    ui.separator();
+                                                    render_channel_picker(ui, "Green (G):", &mut map.channel_g, m_idx, "g");
+                                                    ui.separator();
+                                                    render_channel_picker(ui, "Blue (B):", &mut map.channel_b, m_idx, "b");
+                                                    ui.separator();
+                                                    render_channel_picker(ui, "Alpha (A):", &mut map.channel_a, m_idx, "a");
+                                                }
+                                            }
+                                        });
+
+                                        // Summary
+                                        ui.add_space(2.0);
+                                        ui.label(egui::RichText::new(map.channel_summary()).small().color(egui::Color32::from_rgb(180, 180, 180)));
+                                    });
+                                    ui.add_space(3.0);
+                                }
+                            });
+
+                        if let Some(del_idx) = map_to_delete {
+                            if cur.maps.len() > 1 {
+                                cur.maps.remove(del_idx);
+                            }
+                        }
+
+                        if let Some(dup_idx) = map_to_duplicate {
+                            if let Some(src_map) = cur.maps.get(dup_idx) {
+                                let mut cloned_map = src_map.clone();
+                                cloned_map.name_suffix = format!("{}_copy", cloned_map.name_suffix);
+                                cur.maps.insert(dup_idx + 1, cloned_map);
+                            }
+                        }
+
+                        ui.add_space(4.0);
+                        if ui.button("+ Add Output Texture Map").clicked() {
+                            cur.maps.push(crate::packing::PackedTextureMap::new_rgb(
+                                "_CustomMap",
+                                crate::packing::ChannelSource::AmbientOcclusion,
+                                crate::packing::ChannelSource::Roughness,
+                                crate::packing::ChannelSource::Metallic,
+                            ));
+                        }
+                    }
+
+                    ui.separator();
+
+                    // Global Configuration
+                    ui.label("Destination Directory:");
+                    ui.text_edit_singleline(&mut self.export_dir);
+
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut self.export_flip_v, "Flip Y / V-Axis (DirectX / Wavefront OBJ UV convention)")
+                            .on_hover_text("Inverts the vertical axis of exported images to match bottom-left origin UVs.");
+                        ui.checkbox(&mut self.export_mesh, "Export 3D Model (.obj + .mtl, and .glb) alongside textures");
+                    });
+
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button(egui::RichText::new("Export Custom Packed Textures").strong()).clicked() {
+                            let out_path = PathBuf::from(&self.export_dir);
+                            self.project.composite_textures.composite_layers(&self.project.layers);
+                            let baked = self.project.baked_map_context();
+
+                            if let Some(cur_preset) = self.custom_packing_presets.get(self.active_custom_packing_idx) {
+                                match crate::packing::CustomTexturePacker::pack_and_export(
+                                    cur_preset,
+                                    &self.project.composite_textures,
+                                    &self.project.mesh.name,
+                                    &out_path,
+                                    self.export_flip_v,
+                                    if self.export_mesh { Some(&self.project.mesh) } else { None },
+                                    &baked,
+                                ) {
+                                    Ok(files) => {
+                                        status_update = Some(format!("Exported {} custom packed assets to {}", files.len(), self.export_dir));
+                                        close_modal = true;
+                                    }
+                                    Err(err) => {
+                                        self.custom_packing_status = Some(format!("Export error: {}", err));
+                                    }
+                                }
+                            }
+                        }
+
+                        if ui.button("Close").clicked() {
+                            close_modal = true;
+                        }
+                    });
+                }
+            });
+
+        if let Some(msg) = status_update {
+            self.status_message = msg;
+        }
+        if close_modal {
+            self.show_export_modal = false;
+        }
+    }
+}
+
+fn render_channel_picker(
+    ui: &mut egui::Ui,
+    label: &str,
+    slot: &mut crate::packing::ChannelSlot,
+    map_idx: usize,
+    channel_key: &str,
+) {
+    ui.vertical(|ui| {
+        ui.label(label);
+        egui::ComboBox::from_id_source(format!("chan_src_{}_{}", map_idx, channel_key))
+            .selected_text(slot.source.name())
+            .width(160.0)
+            .show_ui(ui, |ui| {
+                for src in crate::packing::ChannelSource::all() {
+                    ui.selectable_value(&mut slot.source, *src, src.name());
+                }
+            });
+        ui.checkbox(&mut slot.invert, "Invert (1 - x)");
+    });
+}
+
+impl PaintcraftApp {
     /// Cycle through material channels (Substance standard shortcut 'C' / 'Shift+C')
     pub fn cycle_material_channel(&mut self, forward: bool) {
         let order = [
@@ -5572,61 +5959,7 @@ impl eframe::App for PaintcraftApp {
 
         // --- EXPORT MODAL DIALOG ---
         if self.show_export_modal {
-            egui::Window::new("Export Textures (Production Presets)")
-                .collapsible(false)
-                .resizable(false)
-                .show(ctx, |ui| {
-                    ui.heading("Target Engine Preset:");
-                    egui::ComboBox::from_id_source("export_preset_combo")
-                        .selected_text(self.export_preset.name())
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut self.export_preset, ExportPreset::Godot4, "Godot 4 Engine (StandardMaterial3D / ORM)");
-                            ui.selectable_value(&mut self.export_preset, ExportPreset::UnrealEngine, "Unreal Engine (ORM Packed)");
-                            ui.selectable_value(&mut self.export_preset, ExportPreset::Unity, "Unity URP / Standard");
-                            ui.selectable_value(&mut self.export_preset, ExportPreset::BlenderGltf, "Blender / glTF Standard");
-                            ui.selectable_value(&mut self.export_preset, ExportPreset::GlbBinary, "glTF 2.0 Binary (.glb) with PBR Textures");
-                            ui.selectable_value(&mut self.export_preset, ExportPreset::IndividualMaps, "Individual Channel Maps");
-                        });
-
-                    ui.add_space(8.0);
-                    ui.label("Destination Directory:");
-                    ui.text_edit_singleline(&mut self.export_dir);
-
-                    ui.add_space(8.0);
-                    ui.label("Export Configuration:");
-                    ui.checkbox(&mut self.export_flip_v, "Flip Y / V-Axis (Recommended for Blender, Maya, Godot, OBJ)")
-                        .on_hover_text("Aligns texture coordinates with bottom-left UV origin convention used by Wavefront OBJ, Blender, and Godot.");
-                    ui.checkbox(&mut self.export_mesh, "Export 3D Model (.obj + .mtl, and .glb) alongside textures")
-                        .on_hover_text("Exports the active model in standard Wavefront OBJ and binary glTF 2.0 (.glb) format with matching UV coordinates ready for 1-click DCC import.");
-
-                    ui.add_space(10.0);
-                    ui.horizontal(|ui| {
-                        if ui.button("Export Now").clicked() {
-                            let out_path = PathBuf::from(&self.export_dir);
-                            // Run the CPU Rayon compositor one time to generate the export buffers!
-                            self.project.composite_textures.composite_layers(&self.project.layers);
-                            match TextureExporter::export_preset(
-                                &self.project.composite_textures,
-                                &self.project.mesh.name,
-                                self.export_preset,
-                                &out_path,
-                                self.export_flip_v,
-                                if self.export_mesh { Some(&self.project.mesh) } else { None },
-                            ) {
-                                Ok(files) => {
-                                    self.status_message = format!("Exported {} production assets to {}", files.len(), self.export_dir);
-                                    self.show_export_modal = false;
-                                }
-                                Err(err) => {
-                                    self.status_message = format!("Export error: {}", err);
-                                }
-                            }
-                        }
-                        if ui.button("Cancel").clicked() {
-                            self.show_export_modal = false;
-                        }
-                    });
-                });
+            self.render_export_modal(ctx);
         }
 
         // --- SAVE PROJECT MODAL ---

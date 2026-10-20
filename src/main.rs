@@ -6,6 +6,7 @@ mod baker;
 mod brush;
 mod channel;
 mod export;
+pub mod packing;
 mod file_dialog;
 mod hdri;
 mod hdri_generator;
@@ -34,7 +35,7 @@ use export::ExportPreset;
 use mcp::McpServer;
 use project::Project;
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 fn main() -> Result<(), eframe::Error> {
     let args: Vec<String> = env::args().collect();
@@ -47,7 +48,7 @@ fn main() -> Result<(), eframe::Error> {
         return Ok(());
     }
 
-    // Mode 2: Headless Command Line Exporter / Automation
+    // Mode 2a: Headless Command Line Exporter / Automation
     if let Some(export_idx) = args.iter().position(|arg| arg == "--export") {
         let preset_str = args.get(export_idx + 1).map(|s| s.as_str()).unwrap_or("UnrealEngine");
         let out_dir_str = args
@@ -82,6 +83,69 @@ fn main() -> Result<(), eframe::Error> {
             }
             Err(e) => {
                 eprintln!("[3D Paintcraft] Export error: {}", e);
+            }
+        }
+        return Ok(());
+    }
+
+    // Mode 2b: Headless Custom Texture Packing CLI
+    if let Some(pack_idx) = args.iter().position(|arg| arg == "--pack" || arg == "--custom-pack") {
+        let preset_str = args.get(pack_idx + 1).map(|s| s.as_str()).unwrap_or("unreal_orm");
+        let out_dir_str = args
+            .iter()
+            .position(|arg| arg == "--out")
+            .and_then(|idx| args.get(idx + 1))
+            .map(|s| s.as_str())
+            .unwrap_or("./exports");
+
+        let mut project = Project::new_default(1024, 1024);
+
+        if let Some(mat_idx) = args.iter().position(|arg| arg == "--material") {
+            if let Some(mat_name) = args.get(mat_idx + 1) {
+                project.apply_smart_material(mat_name);
+            }
+        }
+
+        let preset = if preset_str.ends_with(".json") {
+            match packing::CustomPackingPreset::load_from_json_file(Path::new(preset_str)) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("[3D Paintcraft] Failed to load preset JSON file {}: {}", preset_str, e);
+                    return Ok(());
+                }
+            }
+        } else {
+            match preset_str {
+                "unity_hdrp" => packing::CustomPackingPreset::unity_hdrp(),
+                "unity_urp" => packing::CustomPackingPreset::unity_urp(),
+                "godot4" => packing::CustomPackingPreset::godot4(),
+                "blender_gltf" => packing::CustomPackingPreset::blender_gltf(),
+                "cryengine_ddna" => packing::CustomPackingPreset::cryengine_ddna(),
+                "individual_channels" => packing::CustomPackingPreset::individual_channels(),
+                "custom_studio_default" => packing::CustomPackingPreset::custom_studio_default(),
+                _ => packing::CustomPackingPreset::unreal_orm(),
+            }
+        };
+
+        let out_path = PathBuf::from(out_dir_str);
+        let baked = project.baked_map_context();
+        match packing::CustomTexturePacker::pack_and_export(
+            &preset,
+            &project.composite_textures,
+            &project.mesh.name,
+            &out_path,
+            true,
+            Some(&project.mesh),
+            &baked,
+        ) {
+            Ok(files) => {
+                println!("[3D Paintcraft] Successfully packed and exported {} maps (Preset: {}) to {:?}", files.len(), preset.name, out_path);
+                for f in files {
+                    println!("  -> {}", f.display());
+                }
+            }
+            Err(e) => {
+                eprintln!("[3D Paintcraft] Custom packing error: {}", e);
             }
         }
         return Ok(());

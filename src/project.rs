@@ -232,6 +232,18 @@ impl Project {
         proj
     }
 
+    pub fn baked_map_context(&self) -> crate::packing::BakedMapContext<'_> {
+        crate::packing::BakedMapContext {
+            world_normal_map: self.world_normal_map.as_ref(),
+            world_space_normal_map: self.world_space_normal_map.as_ref(),
+            ao_map: self.ao_map.as_ref(),
+            curvature_map: self.curvature_map.as_ref(),
+            position_map: self.position_map.as_ref(),
+            thickness_map: self.thickness_map.as_ref(),
+            id_map: self.id_map.as_ref(),
+        }
+    }
+
     pub fn bake_mesh_maps(&mut self, res: u32, frontal_dist: f32, rear_dist: f32) {
         self.bake_mesh_maps_advanced(res, frontal_dist, rear_dist, true, true, true, true, true, true);
     }
