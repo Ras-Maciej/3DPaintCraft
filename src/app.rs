@@ -493,7 +493,7 @@ impl PaintcraftApp {
                 dir.to_string_lossy().to_string()
             },
             export_flip_v: true,
-            export_mesh: true,
+            export_mesh: false,
             export_tab_idx: 0,
             custom_packing_presets: crate::packing::CustomPackingPreset::default_presets(),
             active_custom_packing_idx: 0,
@@ -2031,14 +2031,17 @@ impl PaintcraftApp {
                                         ui.label(egui::RichText::new("Padding / Dilation:").strong());
                                         ui.add(egui::Slider::new(&mut self.export_padding_px, 0..=32).text("pixels"));
                                         ui.end_row();
-                                    });
 
-                                ui.add_space(6.0);
-                                ui.horizontal(|ui| {
-                                    ui.checkbox(&mut self.export_flip_v, "Flip Y / V-Axis (DirectX / Wavefront OBJ UV origin)")
-                                        .on_hover_text("Inverts vertical texture coordinates to conform to DirectX and standard DCC UV orientations.");
-                                    ui.checkbox(&mut self.export_mesh, "Export 3D Model (.obj, .mtl, .glb)");
-                                });
+                                        ui.label(egui::RichText::new("Export 3D Model:").strong());
+                                        ui.checkbox(&mut self.export_mesh, "Include 3D mesh files (.obj, .mtl, .glb)")
+                                            .on_hover_text("When checked, exports 3D mesh geometry files alongside texture maps. When unchecked, exports texture maps only.");
+                                        ui.end_row();
+
+                                        ui.label(egui::RichText::new("Coordinate System:").strong());
+                                        ui.checkbox(&mut self.export_flip_v, "Flip Y / V-Axis (DirectX / OBJ UV origin)")
+                                            .on_hover_text("Inverts vertical texture coordinates to conform to DirectX and standard DCC UV orientations.");
+                                        ui.end_row();
+                                    });
                             });
 
                             ui.add_space(8.0);
@@ -2069,6 +2072,23 @@ impl PaintcraftApp {
                                         .max_height(160.0)
                                         .id_source("export_preview_scroll")
                                         .show(ui, |ui| {
+                                            if self.export_mesh {
+                                                ui.horizontal(|ui| {
+                                                    ui.label(
+                                                        egui::RichText::new("[3D]")
+                                                            .monospace()
+                                                            .color(egui::Color32::from_rgb(120, 220, 140)),
+                                                    );
+                                                    ui.label(egui::RichText::new(format!("{}.obj, {}.mtl, {}.glb", mesh_clean, mesh_clean, mesh_clean)).strong());
+                                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                        ui.label(
+                                                            egui::RichText::new("3D Geometry + MTL")
+                                                                .small()
+                                                                .color(egui::Color32::from_rgb(180, 180, 180)),
+                                                        );
+                                                    });
+                                                });
+                                            }
                                             for map in &cur_preset.maps {
                                                 if !map.enabled {
                                                     continue;
@@ -11937,6 +11957,54 @@ mod tests {
         assert_eq!(p[2], 0); // Blue 0.0 -> 0
 
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_export_mesh_toggle_behavior() {
+        let proj = Project::new_default(16, 16);
+        let preset = crate::packing::CustomPackingPreset::unreal_orm();
+        let baked = proj.baked_map_context();
+
+        // 1. Export with mesh = None (export_mesh toggle OFF)
+        let temp_dir_no_mesh = std::env::temp_dir().join("test_export_mesh_toggle_off");
+        let exported_no_mesh = crate::packing::CustomTexturePacker::pack_and_export(
+            &preset,
+            &proj.composite_textures,
+            "NoMeshTest",
+            &temp_dir_no_mesh,
+            false,
+            None,
+            &baked,
+        )
+        .unwrap();
+
+        assert!(!exported_no_mesh.is_empty());
+        assert!(!temp_dir_no_mesh.join("nomeshtest.obj").exists(), "OBJ must not be exported when toggle is OFF");
+        assert!(!temp_dir_no_mesh.join("nomeshtest.mtl").exists(), "MTL must not be exported when toggle is OFF");
+        assert!(!temp_dir_no_mesh.join("nomeshtest.glb").exists(), "GLB must not be exported when toggle is OFF");
+        assert!(temp_dir_no_mesh.join("nomeshtest_BaseColor.png").exists(), "Textures must still be exported");
+
+        let _ = std::fs::remove_dir_all(&temp_dir_no_mesh);
+
+        // 2. Export with mesh = Some (export_mesh toggle ON)
+        let temp_dir_with_mesh = std::env::temp_dir().join("test_export_mesh_toggle_on");
+        let exported_with_mesh = crate::packing::CustomTexturePacker::pack_and_export(
+            &preset,
+            &proj.composite_textures,
+            "WithMeshTest",
+            &temp_dir_with_mesh,
+            false,
+            Some(&proj.mesh),
+            &baked,
+        )
+        .unwrap();
+
+        assert!(temp_dir_with_mesh.join("withmeshtest.obj").exists(), "OBJ must be exported when toggle is ON");
+        assert!(temp_dir_with_mesh.join("withmeshtest.mtl").exists(), "MTL must be exported when toggle is ON");
+        assert!(temp_dir_with_mesh.join("withmeshtest.glb").exists(), "GLB must be exported when toggle is ON");
+        assert!(temp_dir_with_mesh.join("withmeshtest_BaseColor.png").exists(), "Textures must be exported");
+
+        let _ = std::fs::remove_dir_all(&temp_dir_with_mesh);
     }
 }
 
