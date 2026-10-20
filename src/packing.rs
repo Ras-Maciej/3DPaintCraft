@@ -747,7 +747,11 @@ impl CustomTexturePacker {
 
                     for x in 0..w {
                         let active = textures.base_color.get_pixel(x, y).w > 0.001
-                            || textures.opacity.get_pixel(x, y) > 0.001;
+                            || textures.opacity.get_pixel(x, y) > 0.001
+                            || textures.metallic.get_pixel(x, y) > 0.001
+                            || (textures.roughness.get_pixel(x, y) - 0.5).abs() > 0.001
+                            || (textures.height_map.get_pixel(x, y) - 0.5).abs() > 0.001
+                            || textures.emissive.get_pixel(x, y).truncate().length_squared() > 1e-4;
 
                         let pixel_bytes = match map.color_mode {
                             PackedColorMode::Grayscale => {
@@ -790,9 +794,23 @@ impl CustomTexturePacker {
             let target_path = output_dir.join(&file_name);
 
             match map.format {
-                PackedImageFormat::Png => {
-                    img.save(&target_path).map_err(|e| e.to_string())?;
-                }
+                PackedImageFormat::Png => match map.color_mode {
+                    PackedColorMode::Grayscale => {
+                        image::DynamicImage::ImageRgba8(img)
+                            .to_luma8()
+                            .save(&target_path)
+                            .map_err(|e| e.to_string())?;
+                    }
+                    PackedColorMode::Rgb => {
+                        image::DynamicImage::ImageRgba8(img)
+                            .to_rgb8()
+                            .save(&target_path)
+                            .map_err(|e| e.to_string())?;
+                    }
+                    PackedColorMode::Rgba => {
+                        img.save(&target_path).map_err(|e| e.to_string())?;
+                    }
+                },
                 PackedImageFormat::Jpeg => {
                     image::DynamicImage::ImageRgba8(img)
                         .to_rgb8()
@@ -984,4 +1002,73 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
+
+    #[test]
+    fn test_pack_and_export_preserves_painted_colors_and_orm() {
+        let mut proj = crate::project::Project::new_default(16, 16);
+        // Add a custom fill layer with distinct blue color, low roughness, and high metallic
+        proj.add_fill_layer(
+            Some("Blue Steel".to_string()),
+            glam::Vec4::new(0.1, 0.4, 0.9, 1.0),
+            0.25,
+            0.85,
+        );
+        proj.rebuild_composite();
+        proj.sync_active_texture_set();
+
+        let temp_dir = std::env::temp_dir().join("test_export_painted_blue_steel");
+        let preset = CustomPackingPreset::unreal_orm();
+        let exported = CustomTexturePacker::pack_and_export(
+            &preset,
+            &proj.composite_textures,
+            "BlueSteelMesh",
+            &temp_dir,
+            false,
+            None,
+            &proj.baked_map_context(),
+        )
+        .unwrap();
+
+        assert!(!exported.is_empty(), "Exported files list should not be empty");
+
+        // Verify BaseColor is painted blue, NOT blank/white default
+        let bc_path = temp_dir.join("bluesteelmesh_BaseColor.png");
+        assert!(bc_path.exists(), "BaseColor file must exist on disk");
+        let bc_img = image::open(&bc_path).unwrap().into_rgba8();
+        let p_bc = bc_img.get_pixel(4, 4);
+        assert!((p_bc[0] as i32 - (0.1 * 255.0) as i32).abs() <= 2, "Red channel must match painted 0.1");
+        assert!((p_bc[1] as i32 - (0.4 * 255.0) as i32).abs() <= 2, "Green channel must match painted 0.4");
+        assert!((p_bc[2] as i32 - (0.9 * 255.0) as i32).abs() <= 2, "Blue channel must match painted 0.9");
+
+        // Verify ORM is packed correctly with painted Roughness (G) and Metallic (B)
+        let orm_path = temp_dir.join("bluesteelmesh_ORM.png");
+        assert!(orm_path.exists(), "ORM file must exist on disk");
+        let orm_img = image::open(&orm_path).unwrap().into_rgba8();
+        let p_orm = orm_img.get_pixel(4, 4);
+        assert_eq!(p_orm[0], 255, "AO should default to 1.0 (255)");
+        assert!((p_orm[1] as i32 - (0.25 * 255.0) as i32).abs() <= 2, "Roughness in Green must match painted 0.25");
+        assert!((p_orm[2] as i32 - (0.85 * 255.0) as i32).abs() <= 2, "Metallic in Blue must match painted 0.85");
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_rgba_dilation_preserves_alpha_channel() {
+        let mut img: ImageBuffer<Rgba<u8>, Vec<u8>> = ImageBuffer::new(4, 4);
+        let mut mask = vec![false; 16];
+
+        // Set pixel (1, 1) active with custom alpha 120
+        img.put_pixel(1, 1, Rgba([200, 150, 100, 120]));
+        mask[1 * 4 + 1] = true;
+
+        TextureExporter::dilate_image_rgba(&mut img, &mask, 1);
+
+        // Neighbor (2, 1) should be dilated from (1, 1) and receive alpha 120 (not forced 255)
+        let dilated_p = img.get_pixel(2, 1);
+        assert_eq!(dilated_p[0], 200);
+        assert_eq!(dilated_p[1], 150);
+        assert_eq!(dilated_p[2], 100);
+        assert_eq!(dilated_p[3], 120, "Dilation on RGBA must preserve the alpha channel value");
+    }
 }
+

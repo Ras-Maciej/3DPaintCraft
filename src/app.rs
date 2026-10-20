@@ -2116,12 +2116,22 @@ impl PaintcraftApp {
 
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                     // Primary Export Button (Substance standard high-visibility button)
+                                    let can_export = selected_ts_count > 0 || self.project.texture_sets.is_empty();
                                     let export_btn = egui::Button::new(
                                         egui::RichText::new("  Export  ").strong().color(egui::Color32::WHITE),
                                     )
-                                    .fill(egui::Color32::from_rgb(40, 120, 220));
+                                    .fill(if can_export {
+                                        egui::Color32::from_rgb(40, 120, 220)
+                                    } else {
+                                        egui::Color32::from_rgb(70, 75, 85)
+                                    });
 
-                                    if ui.add(export_btn).clicked() {
+                                    let resp = ui.add_enabled(can_export, export_btn);
+                                    if !can_export {
+                                        let _ = resp.clone().on_hover_text("Select at least one texture set to export");
+                                    }
+
+                                    if resp.clicked() {
                                         let out_path = PathBuf::from(&self.export_dir);
                                         let _ = std::fs::create_dir_all(&out_path);
                                         let mut all_exported = Vec::new();
@@ -2137,13 +2147,21 @@ impl PaintcraftApp {
                                             m.dilation_iterations = self.export_padding_px;
                                         }
 
+                                        // Step 0: Fully rebuild composite for active canvas and synchronize active texture set
+                                        self.project.rebuild_composite();
+                                        self.project.sync_active_texture_set();
+
                                         let ts_count = self.project.texture_sets.len();
 
-                                        // Step 1: Pre-composite all layers
+                                        // Step 1: Pre-composite all layers for visible texture sets
                                         if !self.project.texture_sets.is_empty() {
-                                            for ts in &mut self.project.texture_sets {
+                                            for (ts_idx, ts) in self.project.texture_sets.iter_mut().enumerate() {
                                                 if ts.visible {
-                                                    ts.composite_textures.composite_layers(&ts.layers);
+                                                    if ts_idx == self.project.active_texture_set_idx {
+                                                        ts.composite_textures = self.project.composite_textures.clone();
+                                                    } else {
+                                                        ts.composite_textures.composite_layers(&ts.layers);
+                                                    }
                                                 }
                                             }
                                         } else {
@@ -2163,9 +2181,15 @@ impl PaintcraftApp {
                                                         mesh_name.clone()
                                                     };
 
+                                                    let textures_to_export = if ts_idx == self.project.active_texture_set_idx {
+                                                        &self.project.composite_textures
+                                                    } else {
+                                                        &ts.composite_textures
+                                                    };
+
                                                     match crate::packing::CustomTexturePacker::pack_and_export(
                                                         &active_preset,
-                                                        &ts.composite_textures,
+                                                        textures_to_export,
                                                         &prefix,
                                                         &out_path,
                                                         self.export_flip_v,
@@ -11859,6 +11883,62 @@ mod tests {
         assert_eq!(unreal.maps[2].channel_g.source, crate::packing::ChannelSource::Roughness);
         assert_eq!(unreal.maps[2].channel_b.source, crate::packing::ChannelSource::Metallic);
     }
+
+    #[test]
+    fn test_export_modal_active_texture_set_sync() {
+        let mut proj = Project::new_default(32, 32);
+        assert_eq!(proj.texture_sets.len(), 1);
+        assert_eq!(proj.texture_sets[0].layers.len(), 1);
+
+        // Add a gold layer
+        proj.add_fill_layer(
+            Some("Gold Armor".to_string()),
+            glam::Vec4::new(1.0, 0.84, 0.0, 1.0),
+            0.15,
+            0.95,
+        );
+        assert_eq!(proj.layers.len(), 2);
+
+        // Before synchronization, texture_set[0] is stale
+        assert_eq!(proj.texture_sets[0].layers.len(), 1);
+
+        // Rebuild and synchronize as done during export
+        proj.rebuild_composite();
+        proj.sync_active_texture_set();
+
+        // After synchronization, texture_set[0] has all layers and matching gold composite
+        assert_eq!(proj.texture_sets[0].layers.len(), 2);
+        let sample = proj.texture_sets[0].composite_textures.base_color.get_pixel(8, 8);
+        assert!((sample.x - 1.0).abs() < 1e-4);
+        assert!((sample.y - 0.84).abs() < 1e-4);
+        assert!((sample.z - 0.0).abs() < 1e-4);
+
+        // Export with unreal_orm preset and verify saved textures are gold, not blank
+        let temp_dir = std::env::temp_dir().join("test_app_export_gold_sync");
+        let preset = crate::packing::CustomPackingPreset::unreal_orm();
+        let exported = crate::packing::CustomTexturePacker::pack_and_export(
+            &preset,
+            &proj.texture_sets[0].composite_textures,
+            "Character",
+            &temp_dir,
+            false,
+            None,
+            &proj.baked_map_context(),
+        )
+        .unwrap();
+
+        assert!(!exported.is_empty());
+        let bc_path = temp_dir.join("character_BaseColor.png");
+        assert!(bc_path.exists());
+        let bc_img = image::open(&bc_path).unwrap().into_rgba8();
+        let p = bc_img.get_pixel(8, 8);
+        assert_eq!(p[0], 255); // Red 1.0 -> 255
+        assert!((p[1] as i32 - 214).abs() <= 2); // Green 0.84 -> ~214
+        assert_eq!(p[2], 0); // Blue 0.0 -> 0
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
 }
+
 
 

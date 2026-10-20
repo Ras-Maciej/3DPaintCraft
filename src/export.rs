@@ -281,8 +281,8 @@ impl TextureExporter {
             return;
         }
 
-        // If all pixels are already filled, no dilation needed
-        if mask.iter().all(|&v| v) {
+        // If all pixels are already filled or none are filled, no dilation needed
+        if mask.iter().all(|&v| v) || mask.iter().all(|&v| !v) {
             return;
         }
 
@@ -298,6 +298,7 @@ impl TextureExporter {
                         let mut sum_r = 0u32;
                         let mut sum_g = 0u32;
                         let mut sum_b = 0u32;
+                        let mut sum_a = 0u32;
                         let mut count = 0u32;
 
                         let neighbors = [
@@ -315,6 +316,7 @@ impl TextureExporter {
                                     sum_r += p[0] as u32;
                                     sum_g += p[1] as u32;
                                     sum_b += p[2] as u32;
+                                    sum_a += p[3] as u32;
                                     count += 1;
                                 }
                             }
@@ -324,7 +326,8 @@ impl TextureExporter {
                             let r = (sum_r / count) as u8;
                             let g = (sum_g / count) as u8;
                             let b = (sum_b / count) as u8;
-                            img.put_pixel(x, y, Rgba([r, g, b, 255]));
+                            let a = (sum_a / count) as u8;
+                            img.put_pixel(x, y, Rgba([r, g, b, a]));
                             next_mask[idx] = true;
                             changes += 1;
                         }
