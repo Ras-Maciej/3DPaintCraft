@@ -2,6 +2,7 @@
 // Built with pure, safe Rust for Windows and Linux
 
 use crate::brush::{AlphaType, BrushEngine, PaintTarget, ToolMode};
+#[allow(unused_imports)]
 use crate::export::{ExportPreset, TextureExporter};
 #[allow(unused_imports)]
 use crate::packing::{
@@ -156,6 +157,7 @@ pub struct PaintcraftApp {
 
     // UI state
     pub status_message: String,
+    #[allow(dead_code)]
     pub export_preset: ExportPreset,
     pub export_dir: String,
     pub export_flip_v: bool,
@@ -165,6 +167,11 @@ pub struct PaintcraftApp {
     pub active_custom_packing_idx: usize,
     pub custom_packing_status: Option<String>,
     pub custom_preset_io_filename: String,
+    pub export_template_search: String,
+    pub export_selected_ts_idx: usize,
+    pub export_last_exported_files: Vec<PathBuf>,
+    pub export_resolution_override: u32,
+    pub export_padding_px: u32,
     pub project_file_path: String,
 
     pub show_about_modal: bool,
@@ -486,6 +493,11 @@ impl PaintcraftApp {
             active_custom_packing_idx: 0,
             custom_packing_status: None,
             custom_preset_io_filename: "my_custom_preset.json".to_string(),
+            export_template_search: String::new(),
+            export_selected_ts_idx: 0,
+            export_last_exported_files: Vec::new(),
+            export_resolution_override: 0,
+            export_padding_px: 16,
             project_file_path: {
                 let mut p = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
                 p.push("project.paintcraft");
@@ -1830,342 +1842,791 @@ impl PaintcraftApp {
         }
     }
 
-    /// Render the Export Textures Modal Dialog (Quick Presets & Custom Channel Packing)
+    /// Render the Substance 3D Painter Organized Export Textures Modal Dialog
     pub fn render_export_modal(&mut self, ctx: &egui::Context) {
         let mut close_modal = false;
         let mut status_update = None;
 
-        egui::Window::new("Export Textures & Custom Channel Packing")
+        egui::Window::new("Export Textures")
             .collapsible(false)
             .resizable(true)
-            .default_width(740.0)
-            .default_height(580.0)
+            .default_width(960.0)
+            .default_height(660.0)
+            .min_width(820.0)
+            .min_height(500.0)
             .show(ctx, |ui| {
-                // Header tab switcher
+                // Top Tab Navigation Bar (Substance 3D Painter Standard)
                 ui.horizontal(|ui| {
-                    ui.selectable_value(&mut self.export_tab_idx, 0, "Quick Engine Presets");
-                    ui.selectable_value(&mut self.export_tab_idx, 1, "Custom Texture Packing Matrix");
+                    ui.spacing_mut().item_spacing.x = 8.0;
+
+                    let is_settings = self.export_tab_idx == 0;
+                    let is_templates = self.export_tab_idx == 1;
+                    let is_exports = self.export_tab_idx == 2;
+
+                    if ui.selectable_label(is_settings, egui::RichText::new("Settings").strong().size(14.0)).clicked() {
+                        self.export_tab_idx = 0;
+                    }
+                    if ui.selectable_label(is_templates, egui::RichText::new("Output Templates").strong().size(14.0)).clicked() {
+                        self.export_tab_idx = 1;
+                    }
+                    let count = self.export_last_exported_files.len();
+                    let exports_label = if count > 0 {
+                        format!("List of Exports ({})", count)
+                    } else {
+                        "List of Exports".to_string()
+                    };
+                    if ui.selectable_label(is_exports, egui::RichText::new(exports_label).strong().size(14.0)).clicked() {
+                        self.export_tab_idx = 2;
+                    }
                 });
                 ui.separator();
 
+                // TAB 0: SETTINGS (Main Export Dashboard)
                 if self.export_tab_idx == 0 {
-                    // TAB 1: Quick Engine Presets
-                    ui.heading("Target Engine Preset:");
-                    egui::ComboBox::from_id_source("export_preset_combo")
-                        .selected_text(self.export_preset.name())
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut self.export_preset, ExportPreset::Godot4, "Godot 4 Engine (StandardMaterial3D / ORM)");
-                            ui.selectable_value(&mut self.export_preset, ExportPreset::UnrealEngine, "Unreal Engine (ORM Packed)");
-                            ui.selectable_value(&mut self.export_preset, ExportPreset::Unity, "Unity URP / Standard");
-                            ui.selectable_value(&mut self.export_preset, ExportPreset::BlenderGltf, "Blender / glTF Standard");
-                            ui.selectable_value(&mut self.export_preset, ExportPreset::GlbBinary, "glTF 2.0 Binary (.glb) with PBR Textures");
-                            ui.selectable_value(&mut self.export_preset, ExportPreset::IndividualMaps, "Individual Channel Maps");
-                        });
-
-                    ui.add_space(8.0);
-                    ui.label("Destination Directory:");
-                    ui.text_edit_singleline(&mut self.export_dir);
-
-                    ui.add_space(8.0);
-                    ui.label("Export Configuration:");
-                    ui.checkbox(&mut self.export_flip_v, "Flip Y / V-Axis (Recommended for Blender, Maya, Godot, OBJ)")
-                        .on_hover_text("Aligns texture coordinates with bottom-left UV origin convention used by Wavefront OBJ, Blender, and Godot.");
-                    ui.checkbox(&mut self.export_mesh, "Export 3D Model (.obj + .mtl, and .glb) alongside textures")
-                        .on_hover_text("Exports the active model in standard Wavefront OBJ and binary glTF 2.0 (.glb) format with matching UV coordinates ready for 1-click DCC import.");
-
-                    ui.add_space(12.0);
-                    ui.horizontal(|ui| {
-                        if ui.button("Export Now").clicked() {
-                            let out_path = PathBuf::from(&self.export_dir);
-                            self.project.composite_textures.composite_layers(&self.project.layers);
-                            match TextureExporter::export_preset(
-                                &self.project.composite_textures,
-                                &self.project.mesh.name,
-                                self.export_preset,
-                                &out_path,
-                                self.export_flip_v,
-                                if self.export_mesh { Some(&self.project.mesh) } else { None },
-                            ) {
-                                Ok(files) => {
-                                    status_update = Some(format!("Exported {} production assets to {}", files.len(), self.export_dir));
-                                    close_modal = true;
-                                }
-                                Err(err) => {
-                                    status_update = Some(format!("Export error: {}", err));
-                                }
-                            }
-                        }
-                        if ui.button("Cancel").clicked() {
-                            close_modal = true;
-                        }
-                    });
-                } else {
-                    // TAB 2: Custom Texture Packing Matrix
-                    let preset_count = self.custom_packing_presets.len();
-                    if self.active_custom_packing_idx >= preset_count && preset_count > 0 {
-                        self.active_custom_packing_idx = 0;
-                    }
-
-                    // Toolbar: Preset Selector & Preset Management
-                    ui.horizontal(|ui| {
-                        ui.label("Template:");
-                        let current_name = if let Some(p) = self.custom_packing_presets.get(self.active_custom_packing_idx) {
-                            p.name.clone()
-                        } else {
-                            "None".to_string()
-                        };
-
-                        egui::ComboBox::from_id_source("custom_packing_preset_select")
-                            .selected_text(&current_name)
-                            .show_ui(ui, |ui| {
-                                for (idx, p) in self.custom_packing_presets.iter().enumerate() {
-                                    ui.selectable_value(&mut self.active_custom_packing_idx, idx, &p.name);
-                                }
-                            });
-
-                        if ui.button("+ New").on_hover_text("Create a new blank custom preset").clicked() {
-                            let new_preset = crate::packing::CustomPackingPreset {
-                                id: format!("custom_{}", chrono::Utc::now().timestamp_millis()),
-                                name: "New Studio Preset".to_string(),
-                                description: "Custom user-defined texture packing matrix".to_string(),
-                                maps: vec![
-                                    crate::packing::PackedTextureMap::new_rgb("_Albedo", crate::packing::ChannelSource::BaseColorR, crate::packing::ChannelSource::BaseColorG, crate::packing::ChannelSource::BaseColorB),
-                                    crate::packing::PackedTextureMap::new_rgb("_Normal", crate::packing::ChannelSource::NormalX, crate::packing::ChannelSource::NormalY, crate::packing::ChannelSource::NormalZ),
-                                    crate::packing::PackedTextureMap::new_rgb("_Packed", crate::packing::ChannelSource::AmbientOcclusion, crate::packing::ChannelSource::Roughness, crate::packing::ChannelSource::Metallic),
-                                ],
-                            };
-                            self.custom_packing_presets.push(new_preset);
-                            self.active_custom_packing_idx = self.custom_packing_presets.len() - 1;
-                        }
-
-                        if ui.button("Duplicate").on_hover_text("Duplicate current preset").clicked() {
-                            if let Some(cur) = self.custom_packing_presets.get(self.active_custom_packing_idx) {
-                                let mut dup = cur.clone();
-                                dup.id = format!("{}_copy", dup.id);
-                                dup.name = format!("{} (Copy)", dup.name);
-                                self.custom_packing_presets.push(dup);
-                                self.active_custom_packing_idx = self.custom_packing_presets.len() - 1;
-                            }
-                        }
-
-                        if preset_count > 1 && ui.button("Delete").on_hover_text("Delete current preset").clicked() {
-                            self.custom_packing_presets.remove(self.active_custom_packing_idx);
-                            if self.active_custom_packing_idx >= self.custom_packing_presets.len() {
-                                self.active_custom_packing_idx = self.custom_packing_presets.len().saturating_sub(1);
-                            }
-                        }
-
-                        if ui.button("Reset Defaults").on_hover_text("Reset all presets to factory standards").clicked() {
-                            self.custom_packing_presets = crate::packing::CustomPackingPreset::default_presets();
-                            self.active_custom_packing_idx = 0;
-                            self.custom_packing_status = Some("Presets reset to factory defaults.".to_string());
-                        }
-                    });
-
-                    // Preset JSON Import / Export Bar
-                    ui.add_space(4.0);
-                    ui.horizontal(|ui| {
-                        ui.label("Preset File (.json):");
-                        ui.add(egui::TextEdit::singleline(&mut self.custom_preset_io_filename).desired_width(180.0));
-
-                        if ui.button("Save Preset").on_hover_text("Save active preset to JSON in destination directory").clicked() {
-                            if let Some(cur) = self.custom_packing_presets.get(self.active_custom_packing_idx) {
-                                let out_dir = PathBuf::from(&self.export_dir);
-                                let _ = std::fs::create_dir_all(&out_dir);
-                                let file_path = out_dir.join(&self.custom_preset_io_filename);
-                                match cur.save_to_json_file(&file_path) {
-                                    Ok(_) => {
-                                        self.custom_packing_status = Some(format!("Saved preset to {:?}", file_path));
-                                    }
-                                    Err(e) => {
-                                        self.custom_packing_status = Some(format!("Error saving preset: {}", e));
-                                    }
-                                }
-                            }
-                        }
-
-                        if ui.button("Load Preset").on_hover_text("Load preset from JSON in destination directory").clicked() {
-                            let out_dir = PathBuf::from(&self.export_dir);
-                            let file_path = out_dir.join(&self.custom_preset_io_filename);
-                            match crate::packing::CustomPackingPreset::load_from_json_file(&file_path) {
-                                Ok(loaded) => {
-                                    self.custom_packing_presets.push(loaded);
-                                    self.active_custom_packing_idx = self.custom_packing_presets.len() - 1;
-                                    self.custom_packing_status = Some(format!("Loaded preset from {:?}", file_path));
-                                }
-                                Err(e) => {
-                                    self.custom_packing_status = Some(format!("Error loading preset: {}", e));
-                                }
-                            }
-                        }
-                    });
-
-                    if let Some(ref status) = self.custom_packing_status {
-                        ui.add_space(2.0);
-                        ui.label(egui::RichText::new(status).color(egui::Color32::from_rgb(100, 200, 255)));
-                    }
-
-                    ui.separator();
-
-                    // Preset Details & Map Rules
-                    if let Some(cur) = self.custom_packing_presets.get_mut(self.active_custom_packing_idx) {
-                        ui.horizontal(|ui| {
-                            ui.label("Preset Name:");
-                            ui.text_edit_singleline(&mut cur.name);
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label("Description:");
-                            ui.text_edit_singleline(&mut cur.description);
-                        });
-
-                        ui.add_space(6.0);
-                        ui.heading("Channel Packing Matrix:");
-
-                        let mut map_to_delete: Option<usize> = None;
-                        let mut map_to_duplicate: Option<usize> = None;
-
-                        // Scrollable list of output texture maps
-                        egui::ScrollArea::vertical()
-                            .max_height(240.0)
-                            .id_source("custom_packing_maps_scroll")
-                            .show(ui, |ui| {
-                                for (m_idx, map) in cur.maps.iter_mut().enumerate() {
-                                    ui.group(|ui| {
-                                        ui.horizontal(|ui| {
-                                            ui.checkbox(&mut map.enabled, "");
-                                            ui.label("Suffix:");
-                                            ui.add(egui::TextEdit::singleline(&mut map.name_suffix).desired_width(120.0));
-
-                                            ui.label("Mode:");
-                                            egui::ComboBox::from_id_source(format!("map_colormode_{}", m_idx))
-                                                .selected_text(map.color_mode.name())
-                                                .show_ui(ui, |ui| {
-                                                    ui.selectable_value(&mut map.color_mode, crate::packing::PackedColorMode::Rgb, "RGB (3 Channels)");
-                                                    ui.selectable_value(&mut map.color_mode, crate::packing::PackedColorMode::Rgba, "RGBA (4 Channels)");
-                                                    ui.selectable_value(&mut map.color_mode, crate::packing::PackedColorMode::Grayscale, "Grayscale (1 Channel)");
-                                                });
-
-                                            ui.label("Format:");
-                                            egui::ComboBox::from_id_source(format!("map_format_{}", m_idx))
-                                                .selected_text(map.format.name())
-                                                .show_ui(ui, |ui| {
-                                                    ui.selectable_value(&mut map.format, crate::packing::PackedImageFormat::Png, "PNG (.png)");
-                                                    ui.selectable_value(&mut map.format, crate::packing::PackedImageFormat::Jpeg, "JPEG (.jpg)");
-                                                });
-
-                                            ui.label("Padding:");
-                                            ui.add(egui::Slider::new(&mut map.dilation_iterations, 0..=32).text("px"));
-
-                                            if ui.button("Dup").on_hover_text("Duplicate this map").clicked() {
-                                                map_to_duplicate = Some(m_idx);
+                    ui.columns(2, |columns| {
+                        // Left Column: Texture Sets
+                        columns[0].vertical(|ui| {
+                            ui.set_max_width(280.0);
+                            ui.group(|ui| {
+                                ui.horizontal(|ui| {
+                                    ui.heading("Texture Sets");
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        if ui.small_button("None").on_hover_text("Deselect all texture sets").clicked() {
+                                            for ts in &mut self.project.texture_sets {
+                                                ts.visible = false;
                                             }
-                                            if ui.button("X").on_hover_text("Remove this map").clicked() {
-                                                map_to_delete = Some(m_idx);
+                                        }
+                                        if ui.small_button("All").on_hover_text("Select all texture sets").clicked() {
+                                            for ts in &mut self.project.texture_sets {
+                                                ts.visible = true;
                                             }
-                                        });
-
-                                        ui.add_space(4.0);
-
-                                        // Channels Row: R, G, B, A slots
-                                        ui.horizontal(|ui| {
-                                            match map.color_mode {
-                                                crate::packing::PackedColorMode::Grayscale => {
-                                                    render_channel_picker(ui, "Gray (Luma):", &mut map.channel_r, m_idx, "gray");
-                                                }
-                                                crate::packing::PackedColorMode::Rgb => {
-                                                    render_channel_picker(ui, "Red (R):", &mut map.channel_r, m_idx, "r");
-                                                    ui.separator();
-                                                    render_channel_picker(ui, "Green (G):", &mut map.channel_g, m_idx, "g");
-                                                    ui.separator();
-                                                    render_channel_picker(ui, "Blue (B):", &mut map.channel_b, m_idx, "b");
-                                                }
-                                                crate::packing::PackedColorMode::Rgba => {
-                                                    render_channel_picker(ui, "Red (R):", &mut map.channel_r, m_idx, "r");
-                                                    ui.separator();
-                                                    render_channel_picker(ui, "Green (G):", &mut map.channel_g, m_idx, "g");
-                                                    ui.separator();
-                                                    render_channel_picker(ui, "Blue (B):", &mut map.channel_b, m_idx, "b");
-                                                    ui.separator();
-                                                    render_channel_picker(ui, "Alpha (A):", &mut map.channel_a, m_idx, "a");
-                                                }
-                                            }
-                                        });
-
-                                        // Summary
-                                        ui.add_space(2.0);
-                                        ui.label(egui::RichText::new(map.channel_summary()).small().color(egui::Color32::from_rgb(180, 180, 180)));
+                                        }
                                     });
-                                    ui.add_space(3.0);
+                                });
+                                ui.separator();
+
+                                if self.project.texture_sets.is_empty() {
+                                    ui.label("No texture sets defined");
+                                } else {
+                                    let mut focused_idx = self.export_selected_ts_idx;
+                                    egui::ScrollArea::vertical()
+                                        .max_height(340.0)
+                                        .id_source("export_texture_sets_scroll")
+                                        .show(ui, |ui| {
+                                            for (idx, ts) in self.project.texture_sets.iter_mut().enumerate() {
+                                                let is_focused = focused_idx == idx;
+                                                ui.horizontal(|ui| {
+                                                    ui.checkbox(&mut ts.visible, "");
+                                                    let resp = ui.selectable_label(
+                                                        is_focused,
+                                                        egui::RichText::new(&ts.name).strong(),
+                                                    );
+                                                    if resp.clicked() {
+                                                        focused_idx = idx;
+                                                    }
+                                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                        ui.label(
+                                                            egui::RichText::new(format!("{}x{}", ts.width, ts.height))
+                                                                .small()
+                                                                .color(egui::Color32::from_rgb(160, 160, 160)),
+                                                        );
+                                                    });
+                                                });
+                                            }
+                                        });
+                                    self.export_selected_ts_idx = focused_idx;
+                                }
+                            });
+                        });
+
+                        // Right Column: Global Settings & Output Maps Preview
+                        columns[1].vertical(|ui| {
+                            ui.group(|ui| {
+                                ui.heading("Global Settings");
+                                ui.separator();
+
+                                egui::Grid::new("export_settings_grid")
+                                    .num_columns(2)
+                                    .spacing([12.0, 8.0])
+                                    .show(ui, |ui| {
+                                        ui.label(egui::RichText::new("Output Directory:").strong());
+                                        ui.horizontal(|ui| {
+                                            ui.add(egui::TextEdit::singleline(&mut self.export_dir).desired_width(280.0));
+                                            if ui.button("Open Folder").on_hover_text("Open export folder in system file manager").clicked() {
+                                                let p = PathBuf::from(&self.export_dir);
+                                                let _ = std::fs::create_dir_all(&p);
+                                                open_folder_in_desktop(&p);
+                                            }
+                                        });
+                                        ui.end_row();
+
+                                        ui.label(egui::RichText::new("Output Template:").strong());
+                                        let current_template_name = self
+                                            .custom_packing_presets
+                                            .get(self.active_custom_packing_idx)
+                                            .map(|p| p.name.clone())
+                                            .unwrap_or_else(|| "None".to_string());
+
+                                        egui::ComboBox::from_id_source("settings_output_template_combo")
+                                            .selected_text(&current_template_name)
+                                            .width(280.0)
+                                            .show_ui(ui, |ui| {
+                                                for (idx, p) in self.custom_packing_presets.iter().enumerate() {
+                                                    ui.selectable_value(&mut self.active_custom_packing_idx, idx, &p.name);
+                                                }
+                                            });
+                                        ui.end_row();
+
+                                        ui.label(egui::RichText::new("Resolution Override:").strong());
+                                        egui::ComboBox::from_id_source("settings_res_override_combo")
+                                            .selected_text(match self.export_resolution_override {
+                                                0 => "Based on each texture set's size",
+                                                512 => "512 x 512",
+                                                1024 => "1024 x 1024 (1K)",
+                                                2048 => "2048 x 2048 (2K)",
+                                                4096 => "4096 x 4096 (4K)",
+                                                _ => "Custom",
+                                            })
+                                            .width(280.0)
+                                            .show_ui(ui, |ui| {
+                                                ui.selectable_value(&mut self.export_resolution_override, 0, "Based on each texture set's size");
+                                                ui.selectable_value(&mut self.export_resolution_override, 512, "512 x 512");
+                                                ui.selectable_value(&mut self.export_resolution_override, 1024, "1024 x 1024 (1K)");
+                                                ui.selectable_value(&mut self.export_resolution_override, 2048, "2048 x 2048 (2K)");
+                                                ui.selectable_value(&mut self.export_resolution_override, 4096, "4096 x 4096 (4K)");
+                                            });
+                                        ui.end_row();
+
+                                        ui.label(egui::RichText::new("Padding / Dilation:").strong());
+                                        ui.add(egui::Slider::new(&mut self.export_padding_px, 0..=32).text("pixels"));
+                                        ui.end_row();
+                                    });
+
+                                ui.add_space(6.0);
+                                ui.horizontal(|ui| {
+                                    ui.checkbox(&mut self.export_flip_v, "Flip Y / V-Axis (DirectX / Wavefront OBJ UV origin)")
+                                        .on_hover_text("Inverts vertical texture coordinates to conform to DirectX and standard DCC UV orientations.");
+                                    ui.checkbox(&mut self.export_mesh, "Export 3D Model (.obj, .mtl, .glb)");
+                                });
+                            });
+
+                            ui.add_space(8.0);
+
+                            // Output Maps Preview for selected texture set
+                            ui.group(|ui| {
+                                let focused_ts_name = self.project.texture_sets.get(self.export_selected_ts_idx)
+                                    .map(|ts| ts.name.as_str())
+                                    .unwrap_or("Active Project");
+
+                                ui.horizontal(|ui| {
+                                    ui.heading(format!("Output Maps for '{}':", focused_ts_name));
+                                    if let Some(cur_preset) = self.custom_packing_presets.get(self.active_custom_packing_idx) {
+                                        let active_count = cur_preset.maps.iter().filter(|m| m.enabled).count();
+                                        ui.label(
+                                            egui::RichText::new(format!("({} maps active)", active_count))
+                                                .color(egui::Color32::from_rgb(140, 200, 255)),
+                                        );
+                                    }
+                                });
+                                ui.separator();
+
+                                if let Some(cur_preset) = self.custom_packing_presets.get(self.active_custom_packing_idx) {
+                                    let mesh_clean = self.project.mesh.name.replace(' ', "_").to_lowercase();
+                                    let ts_clean = focused_ts_name.replace(' ', "_");
+
+                                    egui::ScrollArea::vertical()
+                                        .max_height(160.0)
+                                        .id_source("export_preview_scroll")
+                                        .show(ui, |ui| {
+                                            for map in &cur_preset.maps {
+                                                if !map.enabled {
+                                                    continue;
+                                                }
+                                                let file_name = if self.project.texture_sets.len() > 1 {
+                                                    format!("{}_{}{}.{}", mesh_clean, ts_clean, map.name_suffix, map.format.extension())
+                                                } else {
+                                                    format!("{}{}.{}", mesh_clean, map.name_suffix, map.format.extension())
+                                                };
+
+                                                ui.horizontal(|ui| {
+                                                    let mode_badge = match map.color_mode {
+                                                        crate::packing::PackedColorMode::Rgb => "RGB",
+                                                        crate::packing::PackedColorMode::Rgba => "RGBA",
+                                                        crate::packing::PackedColorMode::Grayscale => "GRAY",
+                                                    };
+                                                    ui.label(
+                                                        egui::RichText::new(format!("[{}]", mode_badge))
+                                                            .monospace()
+                                                            .color(egui::Color32::from_rgb(100, 200, 255)),
+                                                    );
+                                                    ui.label(egui::RichText::new(&file_name).strong());
+                                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                        ui.label(
+                                                            egui::RichText::new(map.channel_summary())
+                                                                .small()
+                                                                .color(egui::Color32::from_rgb(180, 180, 180)),
+                                                        );
+                                                    });
+                                                });
+                                            }
+                                        });
                                 }
                             });
 
-                        if let Some(del_idx) = map_to_delete {
-                            if cur.maps.len() > 1 {
-                                cur.maps.remove(del_idx);
-                            }
-                        }
+                            ui.add_space(8.0);
 
-                        if let Some(dup_idx) = map_to_duplicate {
-                            if let Some(src_map) = cur.maps.get(dup_idx) {
-                                let mut cloned_map = src_map.clone();
-                                cloned_map.name_suffix = format!("{}_copy", cloned_map.name_suffix);
-                                cur.maps.insert(dup_idx + 1, cloned_map);
-                            }
-                        }
+                            // Bottom Action Bar
+                            ui.horizontal(|ui| {
+                                let selected_ts_count = self.project.texture_sets.iter().filter(|ts| ts.visible).count();
+                                ui.label(
+                                    egui::RichText::new(format!("Selected Texture Sets: {} of {}", selected_ts_count, self.project.texture_sets.len()))
+                                        .strong(),
+                                );
 
-                        ui.add_space(4.0);
-                        if ui.button("+ Add Output Texture Map").clicked() {
-                            cur.maps.push(crate::packing::PackedTextureMap::new_rgb(
-                                "_CustomMap",
-                                crate::packing::ChannelSource::AmbientOcclusion,
-                                crate::packing::ChannelSource::Roughness,
-                                crate::packing::ChannelSource::Metallic,
-                            ));
-                        }
-                    }
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    // Primary Export Button (Substance standard high-visibility button)
+                                    let export_btn = egui::Button::new(
+                                        egui::RichText::new("  Export  ").strong().color(egui::Color32::WHITE),
+                                    )
+                                    .fill(egui::Color32::from_rgb(40, 120, 220));
 
-                    ui.separator();
+                                    if ui.add(export_btn).clicked() {
+                                        let out_path = PathBuf::from(&self.export_dir);
+                                        let _ = std::fs::create_dir_all(&out_path);
+                                        let mut all_exported = Vec::new();
 
-                    // Global Configuration
-                    ui.label("Destination Directory:");
-                    ui.text_edit_singleline(&mut self.export_dir);
+                                        let mut active_preset = self
+                                            .custom_packing_presets
+                                            .get(self.active_custom_packing_idx)
+                                            .cloned()
+                                            .unwrap_or_else(crate::packing::CustomPackingPreset::unreal_orm);
 
-                    ui.horizontal(|ui| {
-                        ui.checkbox(&mut self.export_flip_v, "Flip Y / V-Axis (DirectX / Wavefront OBJ UV convention)")
-                            .on_hover_text("Inverts the vertical axis of exported images to match bottom-left origin UVs.");
-                        ui.checkbox(&mut self.export_mesh, "Export 3D Model (.obj + .mtl, and .glb) alongside textures");
-                    });
+                                        // Apply global padding override if configured
+                                        for m in &mut active_preset.maps {
+                                            m.dilation_iterations = self.export_padding_px;
+                                        }
 
-                    ui.add_space(8.0);
-                    ui.horizontal(|ui| {
-                        if ui.button(egui::RichText::new("Export Custom Packed Textures").strong()).clicked() {
-                            let out_path = PathBuf::from(&self.export_dir);
-                            self.project.composite_textures.composite_layers(&self.project.layers);
-                            let baked = self.project.baked_map_context();
+                                        let ts_count = self.project.texture_sets.len();
 
-                            if let Some(cur_preset) = self.custom_packing_presets.get(self.active_custom_packing_idx) {
-                                match crate::packing::CustomTexturePacker::pack_and_export(
-                                    cur_preset,
-                                    &self.project.composite_textures,
-                                    &self.project.mesh.name,
-                                    &out_path,
-                                    self.export_flip_v,
-                                    if self.export_mesh { Some(&self.project.mesh) } else { None },
-                                    &baked,
-                                ) {
-                                    Ok(files) => {
-                                        status_update = Some(format!("Exported {} custom packed assets to {}", files.len(), self.export_dir));
+                                        // Step 1: Pre-composite all layers
+                                        if !self.project.texture_sets.is_empty() {
+                                            for ts in &mut self.project.texture_sets {
+                                                if ts.visible {
+                                                    ts.composite_textures.composite_layers(&ts.layers);
+                                                }
+                                            }
+                                        } else {
+                                            self.project.composite_textures.composite_layers(&self.project.layers);
+                                        }
+
+                                        // Step 2: Borrow baked context immutably
+                                        let baked = self.project.baked_map_context();
+                                        let mesh_name = self.project.mesh.name.clone();
+
+                                        if !self.project.texture_sets.is_empty() {
+                                            for (ts_idx, ts) in self.project.texture_sets.iter().enumerate() {
+                                                if ts.visible {
+                                                    let prefix = if ts_count > 1 {
+                                                        format!("{}_{}", mesh_name, ts.name)
+                                                    } else {
+                                                        mesh_name.clone()
+                                                    };
+
+                                                    match crate::packing::CustomTexturePacker::pack_and_export(
+                                                        &active_preset,
+                                                        &ts.composite_textures,
+                                                        &prefix,
+                                                        &out_path,
+                                                        self.export_flip_v,
+                                                        if self.export_mesh && ts_idx == 0 { Some(&self.project.mesh) } else { None },
+                                                        &baked,
+                                                    ) {
+                                                        Ok(mut files) => all_exported.append(&mut files),
+                                                        Err(e) => {
+                                                            status_update = Some(format!("Export error on {}: {}", ts.name, e));
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        } else {
+                                            match crate::packing::CustomTexturePacker::pack_and_export(
+                                                &active_preset,
+                                                &self.project.composite_textures,
+                                                &mesh_name,
+                                                &out_path,
+                                                self.export_flip_v,
+                                                if self.export_mesh { Some(&self.project.mesh) } else { None },
+                                                &baked,
+                                            ) {
+                                                Ok(mut files) => all_exported.append(&mut files),
+                                                Err(e) => {
+                                                    status_update = Some(format!("Export error: {}", e));
+                                                }
+                                            }
+                                        }
+
+                                        if !all_exported.is_empty() {
+                                            self.export_last_exported_files = all_exported.clone();
+                                            status_update = Some(format!("Successfully exported {} production maps to {}", all_exported.len(), self.export_dir));
+                                            self.export_tab_idx = 2; // Automatically switch to List of Exports tab!
+                                        }
+                                    }
+
+                                    if ui.button("Cancel").clicked() {
                                         close_modal = true;
                                     }
-                                    Err(err) => {
-                                        self.custom_packing_status = Some(format!("Export error: {}", err));
+                                });
+                            });
+                        });
+                    });
+                }
+
+                // TAB 1: OUTPUT TEMPLATES (Substance 3D Painter Channel Packing Matrix)
+                if self.export_tab_idx == 1 {
+                    ui.columns(2, |columns| {
+                        // Left Column: Templates Library
+                        columns[0].vertical(|ui| {
+                            ui.set_max_width(260.0);
+                            ui.group(|ui| {
+                                ui.heading("Output Templates");
+                                ui.separator();
+
+                                ui.horizontal(|ui| {
+                                    ui.label("🔍");
+                                    ui.add(egui::TextEdit::singleline(&mut self.export_template_search).hint_text("Search templates..."));
+                                });
+                                ui.add_space(4.0);
+
+                                let preset_count = self.custom_packing_presets.len();
+                                if self.active_custom_packing_idx >= preset_count && preset_count > 0 {
+                                    self.active_custom_packing_idx = 0;
+                                }
+
+                                egui::ScrollArea::vertical()
+                                    .max_height(280.0)
+                                    .id_source("substance_templates_list_scroll")
+                                    .show(ui, |ui| {
+                                        let search_lower = self.export_template_search.to_lowercase();
+                                        for (idx, p) in self.custom_packing_presets.iter().enumerate() {
+                                            if !search_lower.is_empty() && !p.name.to_lowercase().contains(&search_lower) {
+                                                continue;
+                                            }
+                                            let is_selected = self.active_custom_packing_idx == idx;
+                                            let map_count = p.maps.len();
+                                            let row_label = format!("{} ({} maps)", p.name, map_count);
+
+                                            if ui.selectable_label(is_selected, row_label).clicked() {
+                                                self.active_custom_packing_idx = idx;
+                                            }
+                                        }
+                                    });
+
+                                ui.separator();
+                                // Template management toolbar
+                                ui.horizontal_wrapped(|ui| {
+                                    if ui.button("+ New").on_hover_text("Create a new blank template").clicked() {
+                                        let new_preset = crate::packing::CustomPackingPreset {
+                                            id: format!("custom_{}", chrono::Utc::now().timestamp_millis()),
+                                            name: "New Output Template".to_string(),
+                                            description: "Custom user-defined channel matrix".to_string(),
+                                            maps: vec![
+                                                crate::packing::PackedTextureMap::new_rgb("_BaseColor", crate::packing::ChannelSource::BaseColorR, crate::packing::ChannelSource::BaseColorG, crate::packing::ChannelSource::BaseColorB),
+                                                crate::packing::PackedTextureMap::new_rgb("_Normal", crate::packing::ChannelSource::NormalX, crate::packing::ChannelSource::NormalY, crate::packing::ChannelSource::NormalZ),
+                                                crate::packing::PackedTextureMap::new_rgb("_ORM", crate::packing::ChannelSource::AmbientOcclusion, crate::packing::ChannelSource::Roughness, crate::packing::ChannelSource::Metallic),
+                                            ],
+                                        };
+                                        self.custom_packing_presets.push(new_preset);
+                                        self.active_custom_packing_idx = self.custom_packing_presets.len() - 1;
+                                    }
+
+                                    if ui.button("Duplicate").clicked() {
+                                        if let Some(cur) = self.custom_packing_presets.get(self.active_custom_packing_idx) {
+                                            let mut dup = cur.clone();
+                                            dup.id = format!("{}_copy", dup.id);
+                                            dup.name = format!("{} (Copy)", dup.name);
+                                            self.custom_packing_presets.push(dup);
+                                            self.active_custom_packing_idx = self.custom_packing_presets.len() - 1;
+                                        }
+                                    }
+
+                                    if preset_count > 1 && ui.button("Delete").clicked() {
+                                        self.custom_packing_presets.remove(self.active_custom_packing_idx);
+                                        if self.active_custom_packing_idx >= self.custom_packing_presets.len() {
+                                            self.active_custom_packing_idx = self.custom_packing_presets.len().saturating_sub(1);
+                                        }
+                                    }
+
+                                    if ui.button("Reset Defaults").clicked() {
+                                        self.custom_packing_presets = crate::packing::CustomPackingPreset::default_presets();
+                                        self.active_custom_packing_idx = 0;
+                                        self.custom_packing_status = Some("Templates reset to factory defaults.".to_string());
+                                    }
+                                });
+
+                                ui.add_space(4.0);
+                                ui.separator();
+                                ui.label(egui::RichText::new("Preset JSON I/O:").small().strong());
+                                ui.add(egui::TextEdit::singleline(&mut self.custom_preset_io_filename).desired_width(220.0));
+                                ui.horizontal(|ui| {
+                                    if ui.small_button("Save JSON").clicked() {
+                                        if let Some(cur) = self.custom_packing_presets.get(self.active_custom_packing_idx) {
+                                            let out_dir = PathBuf::from(&self.export_dir);
+                                            let _ = std::fs::create_dir_all(&out_dir);
+                                            let path = out_dir.join(&self.custom_preset_io_filename);
+                                            match cur.save_to_json_file(&path) {
+                                                Ok(_) => self.custom_packing_status = Some(format!("Saved: {:?}", path)),
+                                                Err(e) => self.custom_packing_status = Some(format!("Error: {}", e)),
+                                            }
+                                        }
+                                    }
+                                    if ui.small_button("Load JSON").clicked() {
+                                        let out_dir = PathBuf::from(&self.export_dir);
+                                        let path = out_dir.join(&self.custom_preset_io_filename);
+                                        match crate::packing::CustomPackingPreset::load_from_json_file(&path) {
+                                            Ok(loaded) => {
+                                                self.custom_packing_presets.push(loaded);
+                                                self.active_custom_packing_idx = self.custom_packing_presets.len() - 1;
+                                                self.custom_packing_status = Some(format!("Loaded: {:?}", path));
+                                            }
+                                            Err(e) => self.custom_packing_status = Some(format!("Error: {}", e)),
+                                        }
+                                    }
+                                });
+                            });
+                        });
+
+                        // Right Column: Active Template Editor & Channel Boxes
+                        columns[1].vertical(|ui| {
+                            if let Some(cur) = self.custom_packing_presets.get_mut(self.active_custom_packing_idx) {
+                                ui.group(|ui| {
+                                    // Template Header with quick-add buttons
+                                    ui.horizontal(|ui| {
+                                        ui.label(egui::RichText::new("Name:").strong());
+                                        ui.add(egui::TextEdit::singleline(&mut cur.name).desired_width(240.0));
+
+                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                            // Substance standard quick-add buttons
+                                            if ui.button("+ Gray").on_hover_text("Add a Grayscale (single channel) map").clicked() {
+                                                cur.maps.push(crate::packing::PackedTextureMap::new_grayscale(
+                                                    "_Mask",
+                                                    crate::packing::ChannelSource::Roughness,
+                                                ));
+                                            }
+                                            if ui.button("+ RGBA").on_hover_text("Add a 4-channel RGBA map").clicked() {
+                                                cur.maps.push(crate::packing::PackedTextureMap::new_rgba(
+                                                    "_MaskMap",
+                                                    crate::packing::ChannelSource::Metallic,
+                                                    crate::packing::ChannelSource::AmbientOcclusion,
+                                                    crate::packing::ChannelSource::BakedCurvature,
+                                                    crate::packing::ChannelSource::Roughness,
+                                                ));
+                                            }
+                                            if ui.button("+ RGB").on_hover_text("Add a 3-channel RGB map").clicked() {
+                                                cur.maps.push(crate::packing::PackedTextureMap::new_rgb(
+                                                    "_ORM",
+                                                    crate::packing::ChannelSource::AmbientOcclusion,
+                                                    crate::packing::ChannelSource::Roughness,
+                                                    crate::packing::ChannelSource::Metallic,
+                                                ));
+                                            }
+                                            ui.label(egui::RichText::new("Add Map:").strong());
+                                        });
+                                    });
+
+                                    ui.horizontal(|ui| {
+                                        ui.label(egui::RichText::new("Description:").small());
+                                        ui.add(egui::TextEdit::singleline(&mut cur.description).desired_width(400.0));
+                                    });
+                                });
+
+                                ui.add_space(6.0);
+
+                                let mut map_to_delete: Option<usize> = None;
+                                let mut map_to_duplicate: Option<usize> = None;
+
+                                // Output Maps Cards Scroll Area
+                                egui::ScrollArea::vertical()
+                                    .max_height(280.0)
+                                    .id_source("substance_maps_cards_scroll")
+                                    .show(ui, |ui| {
+                                        for (m_idx, map) in cur.maps.iter_mut().enumerate() {
+                                            egui::Frame::none()
+                                                .fill(egui::Color32::from_rgb(26, 26, 26))
+                                                .stroke(egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(50, 50, 50)))
+                                                .rounding(6.0)
+                                                .inner_margin(egui::Margin::same(8.0))
+                                                .show(ui, |ui| {
+                                                    // Map Header Line
+                                                    ui.horizontal(|ui| {
+                                                        ui.checkbox(&mut map.enabled, "");
+                                                        ui.label(egui::RichText::new("Suffix:").strong());
+                                                        ui.add(egui::TextEdit::singleline(&mut map.name_suffix).desired_width(140.0));
+
+                                                        egui::ComboBox::from_id_source(format!("substance_colormode_{}", m_idx))
+                                                            .selected_text(map.color_mode.name())
+                                                            .width(110.0)
+                                                            .show_ui(ui, |ui| {
+                                                                ui.selectable_value(&mut map.color_mode, crate::packing::PackedColorMode::Rgb, "RGB");
+                                                                ui.selectable_value(&mut map.color_mode, crate::packing::PackedColorMode::Rgba, "RGBA");
+                                                                ui.selectable_value(&mut map.color_mode, crate::packing::PackedColorMode::Grayscale, "Grayscale");
+                                                            });
+
+                                                        egui::ComboBox::from_id_source(format!("substance_format_{}", m_idx))
+                                                            .selected_text(map.format.name())
+                                                            .width(90.0)
+                                                            .show_ui(ui, |ui| {
+                                                                ui.selectable_value(&mut map.format, crate::packing::PackedImageFormat::Png, "PNG");
+                                                                ui.selectable_value(&mut map.format, crate::packing::PackedImageFormat::Jpeg, "JPEG");
+                                                            });
+
+                                                        ui.label("Pad:");
+                                                        ui.add(egui::Slider::new(&mut map.dilation_iterations, 0..=32).text("px"));
+
+                                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                            if ui.small_button("✕").on_hover_text("Delete this map").clicked() {
+                                                                map_to_delete = Some(m_idx);
+                                                            }
+                                                            if ui.small_button("Dup").on_hover_text("Duplicate map").clicked() {
+                                                                map_to_duplicate = Some(m_idx);
+                                                            }
+                                                        });
+                                                    });
+
+                                                    ui.add_space(4.0);
+
+                                                    // Substance Painter Channel Slot Boxes (Color-Accented Matrix)
+                                                    ui.horizontal(|ui| {
+                                                        match map.color_mode {
+                                                            crate::packing::PackedColorMode::Grayscale => {
+                                                                render_substance_channel_box(
+                                                                    ui,
+                                                                    "Gray",
+                                                                    &mut map.channel_r,
+                                                                    m_idx,
+                                                                    "gray",
+                                                                    egui::Color32::from_rgb(32, 32, 32),
+                                                                    egui::Color32::from_rgb(100, 100, 100),
+                                                                    egui::Color32::from_rgb(220, 220, 220),
+                                                                );
+                                                            }
+                                                            crate::packing::PackedColorMode::Rgb => {
+                                                                // Red Slot
+                                                                render_substance_channel_box(
+                                                                    ui,
+                                                                    "Red (R)",
+                                                                    &mut map.channel_r,
+                                                                    m_idx,
+                                                                    "r",
+                                                                    egui::Color32::from_rgb(45, 20, 20),
+                                                                    egui::Color32::from_rgb(140, 40, 40),
+                                                                    egui::Color32::from_rgb(255, 120, 120),
+                                                                );
+                                                                // Green Slot
+                                                                render_substance_channel_box(
+                                                                    ui,
+                                                                    "Green (G)",
+                                                                    &mut map.channel_g,
+                                                                    m_idx,
+                                                                    "g",
+                                                                    egui::Color32::from_rgb(20, 45, 20),
+                                                                    egui::Color32::from_rgb(40, 140, 40),
+                                                                    egui::Color32::from_rgb(120, 255, 120),
+                                                                );
+                                                                // Blue Slot
+                                                                render_substance_channel_box(
+                                                                    ui,
+                                                                    "Blue (B)",
+                                                                    &mut map.channel_b,
+                                                                    m_idx,
+                                                                    "b",
+                                                                    egui::Color32::from_rgb(20, 30, 50),
+                                                                    egui::Color32::from_rgb(40, 80, 160),
+                                                                    egui::Color32::from_rgb(120, 180, 255),
+                                                                );
+                                                            }
+                                                            crate::packing::PackedColorMode::Rgba => {
+                                                                // Red Slot
+                                                                render_substance_channel_box(
+                                                                    ui,
+                                                                    "Red (R)",
+                                                                    &mut map.channel_r,
+                                                                    m_idx,
+                                                                    "r",
+                                                                    egui::Color32::from_rgb(45, 20, 20),
+                                                                    egui::Color32::from_rgb(140, 40, 40),
+                                                                    egui::Color32::from_rgb(255, 120, 120),
+                                                                );
+                                                                // Green Slot
+                                                                render_substance_channel_box(
+                                                                    ui,
+                                                                    "Green (G)",
+                                                                    &mut map.channel_g,
+                                                                    m_idx,
+                                                                    "g",
+                                                                    egui::Color32::from_rgb(20, 45, 20),
+                                                                    egui::Color32::from_rgb(40, 140, 40),
+                                                                    egui::Color32::from_rgb(120, 255, 120),
+                                                                );
+                                                                // Blue Slot
+                                                                render_substance_channel_box(
+                                                                    ui,
+                                                                    "Blue (B)",
+                                                                    &mut map.channel_b,
+                                                                    m_idx,
+                                                                    "b",
+                                                                    egui::Color32::from_rgb(20, 30, 50),
+                                                                    egui::Color32::from_rgb(40, 80, 160),
+                                                                    egui::Color32::from_rgb(120, 180, 255),
+                                                                );
+                                                                // Alpha Slot
+                                                                render_substance_channel_box(
+                                                                    ui,
+                                                                    "Alpha (A)",
+                                                                    &mut map.channel_a,
+                                                                    m_idx,
+                                                                    "a",
+                                                                    egui::Color32::from_rgb(35, 35, 35),
+                                                                    egui::Color32::from_rgb(100, 100, 100),
+                                                                    egui::Color32::from_rgb(220, 220, 220),
+                                                                );
+                                                            }
+                                                        }
+                                                    });
+                                                });
+                                            ui.add_space(4.0);
+                                        }
+                                    });
+
+                                if let Some(del_idx) = map_to_delete {
+                                    if cur.maps.len() > 1 {
+                                        cur.maps.remove(del_idx);
                                     }
                                 }
-                            }
-                        }
 
-                        if ui.button("Close").clicked() {
-                            close_modal = true;
+                                if let Some(dup_idx) = map_to_duplicate {
+                                    if let Some(src_map) = cur.maps.get(dup_idx) {
+                                        let mut cloned_map = src_map.clone();
+                                        cloned_map.name_suffix = format!("{}_copy", cloned_map.name_suffix);
+                                        cur.maps.insert(dup_idx + 1, cloned_map);
+                                    }
+                                }
+
+                                ui.add_space(6.0);
+
+                                // Substance Painter Input Maps & Mesh Maps Reference Shelf
+                                egui::CollapsingHeader::new(egui::RichText::new("Input Maps & Mesh Maps Palette").strong())
+                                    .default_open(true)
+                                    .show(ui, |ui| {
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.label(egui::RichText::new("Input Channels:").small().strong());
+                                            for &src in &[
+                                                crate::packing::ChannelSource::BaseColorR,
+                                                crate::packing::ChannelSource::Roughness,
+                                                crate::packing::ChannelSource::Metallic,
+                                                crate::packing::ChannelSource::NormalX,
+                                                crate::packing::ChannelSource::NormalY,
+                                                crate::packing::ChannelSource::NormalYInverted,
+                                                crate::packing::ChannelSource::Height,
+                                                crate::packing::ChannelSource::AmbientOcclusion,
+                                                crate::packing::ChannelSource::Opacity,
+                                                crate::packing::ChannelSource::EmissiveR,
+                                            ] {
+                                                ui.label(
+                                                    egui::RichText::new(format!("[{}]", src.short_code()))
+                                                        .small()
+                                                        .color(egui::Color32::from_rgb(120, 200, 255)),
+                                                );
+                                            }
+                                        });
+
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.label(egui::RichText::new("Baked Mesh Maps:").small().strong());
+                                            for &src in &[
+                                                crate::packing::ChannelSource::BakedCurvature,
+                                                crate::packing::ChannelSource::BakedThickness,
+                                                crate::packing::ChannelSource::BakedWorldNormalX,
+                                                crate::packing::ChannelSource::BakedPositionX,
+                                                crate::packing::ChannelSource::BakedId,
+                                            ] {
+                                                ui.label(
+                                                    egui::RichText::new(format!("[{}]", src.short_code()))
+                                                        .small()
+                                                        .color(egui::Color32::from_rgb(255, 180, 100)),
+                                                );
+                                            }
+                                        });
+                                    });
+                            }
+                        });
+                    });
+                }
+
+                // TAB 2: LIST OF EXPORTS (Substance 3D Painter Export Report)
+                if self.export_tab_idx == 2 {
+                    ui.group(|ui| {
+                        ui.horizontal(|ui| {
+                            ui.heading("Export History & Generated Assets");
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.button("Clear Log").clicked() {
+                                    self.export_last_exported_files.clear();
+                                }
+                                if ui.button("Open Destination Folder").clicked() {
+                                    let p = PathBuf::from(&self.export_dir);
+                                    let _ = std::fs::create_dir_all(&p);
+                                    open_folder_in_desktop(&p);
+                                }
+                            });
+                        });
+                        ui.separator();
+
+                        if self.export_last_exported_files.is_empty() {
+                            ui.add_space(20.0);
+                            ui.vertical_centered(|ui| {
+                                ui.label(egui::RichText::new("No files exported yet in this session.").size(14.0));
+                                ui.label(egui::RichText::new("Configure your settings in the 'Settings' tab and click 'Export'.").color(egui::Color32::GRAY));
+                            });
+                        } else {
+                            ui.label(
+                                egui::RichText::new(format!("Successfully generated {} production assets in:", self.export_last_exported_files.len()))
+                                    .strong()
+                                    .color(egui::Color32::from_rgb(100, 230, 120)),
+                            );
+                            ui.label(egui::RichText::new(&self.export_dir).monospace().color(egui::Color32::from_rgb(180, 220, 255)));
+                            ui.add_space(6.0);
+
+                            egui::ScrollArea::vertical()
+                                .max_height(400.0)
+                                .id_source("export_history_scroll")
+                                .show(ui, |ui| {
+                                    for path in &self.export_last_exported_files {
+                                        let fname = path.file_name().and_then(|f| f.to_str()).unwrap_or("file");
+                                        let size_str = if let Ok(meta) = std::fs::metadata(path) {
+                                            let bytes = meta.len();
+                                            if bytes > 1024 * 1024 {
+                                                format!("{:.2} MB", bytes as f64 / (1024.0 * 1024.0))
+                                            } else {
+                                                format!("{} KB", bytes / 1024)
+                                            }
+                                        } else {
+                                            "--".to_string()
+                                        };
+
+                                        ui.horizontal(|ui| {
+                                            let icon = if fname.ends_with(".obj") || fname.ends_with(".glb") {
+                                                "📦"
+                                            } else if fname.ends_with(".mtl") {
+                                                "⚙"
+                                            } else {
+                                                "📄"
+                                            };
+                                            ui.label(icon);
+                                            ui.label(egui::RichText::new(fname).strong());
+                                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                ui.label(egui::RichText::new(size_str).small().color(egui::Color32::GRAY));
+                                            });
+                                        });
+                                    }
+                                });
                         }
                     });
                 }
@@ -2180,25 +2641,52 @@ impl PaintcraftApp {
     }
 }
 
-fn render_channel_picker(
+/// Helper function to open directories across Windows and Linux
+pub fn open_folder_in_desktop(path: &std::path::Path) {
+    #[cfg(target_os = "windows")]
+    {
+        let _ = std::process::Command::new("explorer").arg(path).spawn();
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = std::process::Command::new("xdg-open").arg(path).spawn();
+    }
+}
+
+fn render_substance_channel_box(
     ui: &mut egui::Ui,
-    label: &str,
+    title: &str,
     slot: &mut crate::packing::ChannelSlot,
     map_idx: usize,
     channel_key: &str,
+    bg_color: egui::Color32,
+    border_color: egui::Color32,
+    label_color: egui::Color32,
 ) {
-    ui.vertical(|ui| {
-        ui.label(label);
-        egui::ComboBox::from_id_source(format!("chan_src_{}_{}", map_idx, channel_key))
-            .selected_text(slot.source.name())
-            .width(160.0)
-            .show_ui(ui, |ui| {
-                for src in crate::packing::ChannelSource::all() {
-                    ui.selectable_value(&mut slot.source, *src, src.name());
-                }
+    egui::Frame::none()
+        .fill(bg_color)
+        .stroke(egui::Stroke::new(1.0_f32, border_color))
+        .rounding(4.0)
+        .inner_margin(egui::Margin::same(6.0))
+        .show(ui, |ui| {
+            ui.vertical(|ui| {
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(title).strong().color(label_color));
+                    if slot.invert {
+                        ui.label(egui::RichText::new("(Inv)").small().color(egui::Color32::from_rgb(255, 200, 100)));
+                    }
+                });
+                egui::ComboBox::from_id_source(format!("substance_chan_{}_{}", map_idx, channel_key))
+                    .selected_text(slot.source.name())
+                    .width(130.0)
+                    .show_ui(ui, |ui| {
+                        for src in crate::packing::ChannelSource::all() {
+                            ui.selectable_value(&mut slot.source, *src, src.name());
+                        }
+                    });
+                ui.checkbox(&mut slot.invert, "Invert");
             });
-        ui.checkbox(&mut slot.invert, "Invert (1 - x)");
-    });
+        });
 }
 
 impl PaintcraftApp {
@@ -11167,6 +11655,31 @@ mod tests {
         proj.bake_mesh_maps(32, 0.1, 0.1);
         assert!(proj.curvature_map.is_some(), "Explicit bake must populate curvature map");
         assert!(proj.ao_map.is_some(), "Explicit bake must populate AO map");
+    }
+
+    #[test]
+    fn test_substance_painter_export_modal_state_and_defaults() {
+        let presets = crate::packing::CustomPackingPreset::default_presets();
+        assert!(!presets.is_empty(), "Should load factory output templates");
+        assert_eq!(presets.len(), 8, "Should have 8 factory production output templates");
+
+        // Verify built-in templates exist
+        let template_ids: Vec<&str> = presets.iter().map(|p| p.id.as_str()).collect();
+        assert!(template_ids.contains(&"unreal_orm"));
+        assert!(template_ids.contains(&"unity_hdrp"));
+        assert!(template_ids.contains(&"unity_urp"));
+        assert!(template_ids.contains(&"godot4"));
+        assert!(template_ids.contains(&"blender_gltf"));
+        assert!(template_ids.contains(&"cryengine_ddna"));
+        assert!(template_ids.contains(&"individual_channels"));
+        assert!(template_ids.contains(&"custom_studio_default"));
+
+        // Verify Unreal ORM has expected map channels
+        let unreal = presets.iter().find(|p| p.id == "unreal_orm").unwrap();
+        assert_eq!(unreal.maps[2].name_suffix, "_ORM");
+        assert_eq!(unreal.maps[2].channel_r.source, crate::packing::ChannelSource::AmbientOcclusion);
+        assert_eq!(unreal.maps[2].channel_g.source, crate::packing::ChannelSource::Roughness);
+        assert_eq!(unreal.maps[2].channel_b.source, crate::packing::ChannelSource::Metallic);
     }
 }
 

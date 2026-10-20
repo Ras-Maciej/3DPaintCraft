@@ -23,6 +23,7 @@ pub enum ExportPreset {
 }
 
 impl ExportPreset {
+    #[allow(dead_code)]
     pub fn name(&self) -> &'static str {
         match self {
             Self::Godot4 => "Godot 4 Engine (StandardMaterial3D / ORM)",
