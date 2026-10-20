@@ -695,7 +695,11 @@ impl BrushEngine {
                         let alpha = (cur_col.w + weight * (1.0 - cur_col.w)).clamp(0.0, 1.0);
 
                         if do_color {
-                            let blended = cur_col.truncate() * (1.0 - weight) + eff_base_col.truncate() * weight;
+                            let blended = if cur_col.w <= 1e-4 {
+                                eff_base_col.truncate()
+                            } else {
+                                cur_col.truncate().lerp(eff_base_col.truncate(), (weight / alpha).clamp(0.0, 1.0))
+                            };
                             *layer.base_color_buf.data.get_unchecked_mut(idx) = Vec4::new(blended.x, blended.y, blended.z, alpha);
                         } else {
                             layer.base_color_buf.data.get_unchecked_mut(idx).w = alpha;
@@ -951,40 +955,63 @@ pub fn barycentric_3d(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> (f32, f32, f32) {
             let tri_min_y = p0_uv.y.min(p1_uv.y).min(p2_uv.y).floor() as i32;
             let tri_max_y = p0_uv.y.max(p1_uv.y).max(p2_uv.y).ceil() as i32;
 
-            // Tight brush sphere bounding in UV space
-            let e1_3d = (v1.position - v0.position).length().max(1e-5);
-            let e2_3d = (v2.position - v0.position).length().max(1e-5);
-            let e1_uv = (p1_uv - p0_uv).length();
-            let e2_uv = (p2_uv - p0_uv).length();
-            let max_uv_rate = (e1_uv / e1_3d).max(e2_uv / e2_3d);
+            let (min_x, max_x, min_y, max_y) = if (tri_max_x - tri_min_x) > 128 || (tri_max_y - tri_min_y) > 128 {
+                // For unusually large triangles (e.g. huge ground planes), compute conservative sphere bounds
+                let e1_3d = (v1.position - v0.position).length().max(1e-5);
+                let e2_3d = (v2.position - v0.position).length().max(1e-5);
+                let e3_3d = (v2.position - v1.position).length().max(1e-5);
+                let e1_uv = (p1_uv - p0_uv).length();
+                let e2_uv = (p2_uv - p0_uv).length();
+                let e3_uv = (p2_uv - p1_uv).length();
+                let max_uv_rate = (e1_uv / e1_3d).max(e2_uv / e2_3d).max(e3_uv / e3_3d);
 
-            let plane_rad = (world_radius_sq - dist_to_plane * dist_to_plane).max(0.0).sqrt();
-            let uv_brush_radius = (plane_rad * max_uv_rate * 1.25).ceil() as i32 + 2;
+                let plane_rad = (world_radius_sq - dist_to_plane * dist_to_plane).max(0.0).sqrt();
+                let uv_brush_radius = (plane_rad * max_uv_rate * 2.0).ceil() as i32 + 8;
 
-            let proj_pt = hit_pos - tri_normal * dist_to_plane;
-            let (bc_u, bc_v, bc_w) = Self::barycentric_3d(proj_pt, v0.position, v1.position, v2.position);
-            let center_uv = p0_uv * bc_u.clamp(-0.2, 1.2) + p1_uv * bc_v.clamp(-0.2, 1.2) + p2_uv * bc_w.clamp(-0.2, 1.2);
+                let proj_pt = hit_pos - tri_normal * dist_to_plane;
+                let (bc_u, bc_v, bc_w) = Self::barycentric_3d(proj_pt, v0.position, v1.position, v2.position);
+                let center_uv = p0_uv * bc_u + p1_uv * bc_v + p2_uv * bc_w;
 
-            let min_x = tri_min_x.max((center_uv.x - uv_brush_radius as f32).floor() as i32).clamp(0, w - 1);
-            let max_x = tri_max_x.min((center_uv.x + uv_brush_radius as f32).ceil() as i32).clamp(0, w - 1);
-            let min_y = tri_min_y.max((center_uv.y - uv_brush_radius as f32).floor() as i32).clamp(0, h - 1);
-            let max_y = tri_max_y.min((center_uv.y + uv_brush_radius as f32).ceil() as i32).clamp(0, h - 1);
+                (
+                    tri_min_x.max((center_uv.x - uv_brush_radius as f32).floor() as i32).clamp(0, w - 1),
+                    tri_max_x.min((center_uv.x + uv_brush_radius as f32).ceil() as i32).clamp(0, w - 1),
+                    tri_min_y.max((center_uv.y - uv_brush_radius as f32).floor() as i32).clamp(0, h - 1),
+                    tri_max_y.min((center_uv.y + uv_brush_radius as f32).ceil() as i32).clamp(0, h - 1),
+                )
+            } else {
+                // For typical mesh triangles, use the triangle's UV bounds directly.
+                // This guarantees the smooth spherical distance test (p3d - hit_pos).length_squared() <= world_radius_sq
+                // defines the brush boundary without ANY artificial axis-aligned staircase/zigzag truncation.
+                (
+                    tri_min_x.clamp(0, w - 1),
+                    tri_max_x.clamp(0, w - 1),
+                    tri_min_y.clamp(0, h - 1),
+                    tri_max_y.clamp(0, h - 1),
+                )
+            };
 
             if min_x > max_x || min_y > max_y {
                 continue;
             }
 
+            let dw0_dx = (p1_uv.y - p2_uv.y) * inv_det;
+            let dw1_dx = (p2_uv.y - p0_uv.y) * inv_det;
+            let dw0_dy = (p2_uv.x - p1_uv.x) * inv_det;
+            let dw1_dy = (p0_uv.x - p2_uv.x) * inv_det;
+
+            let start_x_f = min_x as f32 + 0.5;
+            let start_y_f = min_y as f32 + 0.5;
+            let mut row_w0 = ((p1_uv.y - p2_uv.y) * (start_x_f - p2_uv.x) + (p2_uv.x - p1_uv.x) * (start_y_f - p2_uv.y)) * inv_det;
+            let mut row_w1 = ((p2_uv.y - p0_uv.y) * (start_x_f - p2_uv.x) + (p0_uv.x - p2_uv.x) * (start_y_f - p2_uv.y)) * inv_det;
+
             for py in min_y..=max_y {
-                let py_f = py as f32 + 0.5;
                 let wrap_y = py as usize;
                 let buf_y_offset = wrap_y * buf_w;
 
-                for px in min_x..=max_x {
-                    let px_f = px as f32 + 0.5;
+                let mut w0 = row_w0;
+                let mut w1 = row_w1;
 
-                    // Barycentric coordinates (w0, w1, w2)
-                    let w0 = ((p1_uv.y - p2_uv.y) * (px_f - p2_uv.x) + (p2_uv.x - p1_uv.x) * (py_f - p2_uv.y)) * inv_det;
-                    let w1 = ((p2_uv.y - p0_uv.y) * (px_f - p2_uv.x) + (p0_uv.x - p2_uv.x) * (py_f - p2_uv.y)) * inv_det;
+                for px in min_x..=max_x {
                     let w2 = 1.0 - w0 - w1;
 
                     // If pixel center is inside the triangle (with small epsilon)
@@ -1082,7 +1109,11 @@ pub fn barycentric_3d(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> (f32, f32, f32) {
                                     let cur_col = *layer.base_color_buf.data.get_unchecked(idx);
                                     let alpha = (cur_col.w + weight * (1.0 - cur_col.w)).clamp(0.0, 1.0);
                                     if do_color {
-                                        let blended = cur_col.truncate() * (1.0 - weight) + eff_base_col.truncate() * weight;
+                                        let blended = if cur_col.w <= 1e-4 {
+                                            eff_base_col.truncate()
+                                        } else {
+                                            cur_col.truncate().lerp(eff_base_col.truncate(), (weight / alpha).clamp(0.0, 1.0))
+                                        };
                                         *layer.base_color_buf.data.get_unchecked_mut(idx) = Vec4::new(blended.x, blended.y, blended.z, alpha);
                                     } else {
                                         layer.base_color_buf.data.get_unchecked_mut(idx).w = alpha;
@@ -1123,7 +1154,11 @@ pub fn barycentric_3d(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> (f32, f32, f32) {
                             }
                         }
                     }
+                    w0 += dw0_dx;
+                    w1 += dw1_dx;
                 }
+                row_w0 += dw0_dy;
+                row_w1 += dw1_dy;
             }
         }
 
@@ -1176,7 +1211,7 @@ pub fn barycentric_3d(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> (f32, f32, f32) {
                 }
                 let dist = delta.length();
                 let step_dist = (world_radius * self.settings.spacing).max(0.001);
-                let steps = ((dist / step_dist).ceil() as usize).clamp(1, 6);
+                let steps = ((dist / step_dist).ceil() as usize).clamp(1, 16);
 
                 if steps > 1 {
                     let mut pts = Vec::with_capacity(steps);
@@ -1716,5 +1751,45 @@ mod tests {
 
         engine.end_stroke();
         assert_eq!(engine.follow_path_angle, 0.0);
+    }
+
+    #[test]
+    fn test_stamp_3d_smooth_circular_coverage() {
+        let robot_head = crate::mesh::Mesh::create_robot_head_mesh("RobotHead", 1.8);
+        assert!(!robot_head.indices.is_empty(), "Robot head must have geometry");
+        
+        // BVH sphere query on dense head
+        let hit_pos = Vec3::new(0.0, 0.0, 0.88);
+        let hit_normal = Vec3::Z;
+        let triangles = robot_head.query_sphere(hit_pos, 0.25);
+        assert!(!triangles.is_empty(), "BVH query_sphere must return triangles without stack dropping");
+
+        let mut layer = Layer::new_paint_layer(1, "Paint".to_string(), 128, 128);
+        let mut engine = BrushEngine::new();
+        engine.settings.paint_color = Vec4::new(1.0, 0.0, 0.0, 1.0); // Pure Red
+        engine.settings.opacity = 1.0;
+        engine.settings.flow = 1.0;
+        engine.settings.hardness = 0.5;
+
+        // Perform 3D projection stamping
+        engine.stamp_3d(&mut layer, &robot_head, hit_pos, hit_normal, 0.25);
+
+        // Verify painted pixels exist and color is straight (red > 0.9, not premultiplied with black)
+        let mut painted_pixel_count = 0;
+        let mut max_red = 0.0f32;
+        let mut max_alpha = 0.0f32;
+        for &pixel in &layer.base_color_buf.data {
+            if pixel.w > 0.01 {
+                painted_pixel_count += 1;
+                max_red = max_red.max(pixel.x);
+                max_alpha = max_alpha.max(pixel.w);
+                // Straight color test: red channel should NOT be crushed toward zero
+                assert!(pixel.x >= 0.8, "Painted pixel should preserve straight red color, got x={}", pixel.x);
+            }
+        }
+
+        assert!(painted_pixel_count > 10, "Stamp 3D must cover surface, found {} pixels", painted_pixel_count);
+        assert!(max_red > 0.95, "Stamp 3D maximum red should be ~1.0, got {}", max_red);
+        assert!(max_alpha > 0.95, "Stamp 3D maximum alpha should be ~1.0, got {}", max_alpha);
     }
 }

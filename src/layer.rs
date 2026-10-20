@@ -40,7 +40,7 @@ impl BlendMode {
 
     #[inline]
     pub fn blend_color(&self, dst: Vec4, src: Vec4, opacity: f32) -> Vec4 {
-        let eff_alpha = src.w * opacity;
+        let eff_alpha = opacity.clamp(0.0, 1.0);
         if eff_alpha <= 1e-5 {
             return dst;
         }
@@ -3294,7 +3294,31 @@ impl Default for CompositeTextureSet {
 impl CompositeTextureSet {
     pub fn composite_layers(&mut self, layers: &[Layer]) {
         let w = self.width as usize;
-        let _h = self.height as usize;
+        let h = self.height as usize;
+        if w == 0 || h == 0 {
+            return;
+        }
+        self.composite_layers_rect(layers, 0, 0, w - 1, h - 1);
+    }
+
+    pub fn composite_layers_rect(
+        &mut self,
+        layers: &[Layer],
+        min_x: usize,
+        min_y: usize,
+        max_x: usize,
+        max_y: usize,
+    ) {
+        let w = self.width as usize;
+        let h = self.height as usize;
+        if w == 0 || h == 0 || min_x >= w || min_y >= h {
+            return;
+        }
+        let max_x = max_x.min(w - 1);
+        let max_y = max_y.min(h - 1);
+        if min_x > max_x || min_y > max_y {
+            return;
+        }
 
         let base_col_data = &mut self.base_color.data;
         let rough_data = &mut self.roughness.data;
@@ -3308,20 +3332,27 @@ impl CompositeTextureSet {
         let aniso_data = &mut self.anisotropy.data;
         let aniso_ang_data = &mut self.anisotropy_angle.data;
 
-        base_col_data.par_chunks_mut(w)
-            .zip(rough_data.par_chunks_mut(w))
-            .zip(metal_data.par_chunks_mut(w))
-            .zip(norm_data.par_chunks_mut(w))
-            .zip(height_data.par_chunks_mut(w))
-            .zip(ao_data.par_chunks_mut(w))
-            .zip(emissive_data.par_chunks_mut(w))
-            .zip(opacity_data.par_chunks_mut(w))
-            .zip(clearcoat_data.par_chunks_mut(w))
-            .zip(aniso_data.par_chunks_mut(w))
-            .zip(aniso_ang_data.par_chunks_mut(w))
+        let row_start = min_y * w;
+        let row_count = (max_y - min_y + 1) * w;
+        if row_start + row_count > base_col_data.len() {
+            return;
+        }
+
+        base_col_data[row_start..row_start + row_count].par_chunks_mut(w)
+            .zip(rough_data[row_start..row_start + row_count].par_chunks_mut(w))
+            .zip(metal_data[row_start..row_start + row_count].par_chunks_mut(w))
+            .zip(norm_data[row_start..row_start + row_count].par_chunks_mut(w))
+            .zip(height_data[row_start..row_start + row_count].par_chunks_mut(w))
+            .zip(ao_data[row_start..row_start + row_count].par_chunks_mut(w))
+            .zip(emissive_data[row_start..row_start + row_count].par_chunks_mut(w))
+            .zip(opacity_data[row_start..row_start + row_count].par_chunks_mut(w))
+            .zip(clearcoat_data[row_start..row_start + row_count].par_chunks_mut(w))
+            .zip(aniso_data[row_start..row_start + row_count].par_chunks_mut(w))
+            .zip(aniso_ang_data[row_start..row_start + row_count].par_chunks_mut(w))
             .enumerate()
-            .for_each(|(y, ((((((((((base_row, rough_row), metal_row), norm_row), height_row), ao_row), emissive_row), opacity_row), clearcoat_row), aniso_row), aniso_ang_row))| {
-                for x in 0..w {
+            .for_each(|(local_y, ((((((((((base_row, rough_row), metal_row), norm_row), height_row), ao_row), emissive_row), opacity_row), clearcoat_row), aniso_row), aniso_ang_row))| {
+                let y = min_y + local_y;
+                for x in min_x..=max_x {
                     base_row[x] = glam::Vec4::new(0.5, 0.5, 0.55, 1.0);
                     rough_row[x] = 0.5;
                     metal_row[x] = 0.0;
@@ -3383,7 +3414,7 @@ impl CompositeTextureSet {
                     }
                     let is_paint_layer = layer.layer_type == LayerType::Paint;
 
-                    for x in 0..w {
+                    for x in min_x..=max_x {
                         let idx2 = y * w + x;
                         let mut mask_val = if layer.has_mask {
                             let m = layer.mask_buf.data[idx2];
@@ -3485,35 +3516,53 @@ impl CompositeTextureSet {
                     }
                 }
 
-                for x in 0..w {
+                for x in min_x..=max_x {
                     norm_row[x].w = height_row[x];
                 }
             });
 
-        // Convert composite height map to tangent normal bump and blend with layer normals (Adobe 3D Painter standard)
-        self.apply_height_to_normal_bump(4.0);
+        self.apply_height_to_normal_bump_rect(min_x as u32, min_y as u32, max_x as u32, max_y as u32, 4.0);
     }
 
-    /// Converts composite height map into a tangent normal bump map and blends with the layer normal map using RNM
     pub fn apply_height_to_normal_bump(&mut self, bump_strength: f32) {
         let w = self.width;
         let h = self.height;
         if w < 2 || h < 2 {
             return;
         }
+        self.apply_height_to_normal_bump_rect(0, 0, w - 1, h - 1, bump_strength);
+    }
+
+    pub fn apply_height_to_normal_bump_rect(&mut self, min_x: u32, min_y: u32, max_x: u32, max_y: u32, bump_strength: f32) {
+        let w = self.width;
+        let h = self.height;
+        if w < 2 || h < 2 {
+            return;
+        }
+
+        let x_start = min_x.saturating_sub(1);
+        let x_end = (max_x + 1).min(w - 1);
+        let y_start = min_y.saturating_sub(1);
+        let y_end = (max_y + 1).min(h - 1);
 
         let height_map = &self.height_map;
         let norm_data = &mut self.normal.data;
 
-        norm_data
+        let row_start = (y_start * w) as usize;
+        let row_count = ((y_end - y_start + 1) * w) as usize;
+        if row_start + row_count > norm_data.len() {
+            return;
+        }
+
+        norm_data[row_start..row_start + row_count]
             .par_chunks_exact_mut(w as usize)
             .enumerate()
-            .for_each(|(y, norm_row)| {
-                let y = y as u32;
+            .for_each(|(local_y, norm_row)| {
+                let y = y_start + local_y as u32;
                 let ym = if y > 0 { y - 1 } else { h - 1 };
                 let yp = if y + 1 < h { y + 1 } else { 0 };
 
-                for x in 0..w {
+                for x in x_start..=x_end {
                     let xm = if x > 0 { x - 1 } else { w - 1 };
                     let xp = if x + 1 < w { x + 1 } else { 0 };
 
@@ -4262,6 +4311,47 @@ mod tests {
         layer5.add_black_mask();
         layer5.add_mask_generator_mask_editor(Some(&curv_map), Some(&ao_map), Some(&pos_map), Some(&wn_map));
         assert!(layer5.mask_buf.data.iter().all(|&v| v >= 0.0 && v <= 1.0), "All mask editor values must be clamped within [0, 1]");
+    }
+
+    #[test]
+    fn test_composite_layers_rect_matches_full_compositing() {
+        let w = 64;
+        let h = 64;
+        let mut l1 = Layer::new_fill_layer(1, "Base Red".to_string(), w, h, Vec4::new(1.0, 0.0, 0.0, 1.0), 0.5, 0.0);
+        l1.evaluate_fill(None);
+
+        let mut l2 = Layer::new_paint_layer(2, "Stroke Blue".to_string(), w, h);
+        // Paint a blue patch in [10..=25, 12..=28]
+        for y in 12..=28 {
+            for x in 10..=25 {
+                l2.base_color_buf.set_pixel(x, y, Vec4::new(0.0, 0.0, 1.0, 1.0));
+                l2.roughness_buf.set_pixel(x, y, 0.2);
+                l2.metallic_buf.set_pixel(x, y, 0.8);
+            }
+        }
+        l2.dirty_rect = Some((10, 12, 25, 28));
+
+        let mut full_comp = CompositeTextureSet::new(w, h);
+        full_comp.composite_layers(&[l1.clone(), l2.clone()]);
+
+        let mut rect_comp = CompositeTextureSet::new(w, h);
+        rect_comp.composite_layers(&[l1.clone()]);
+        rect_comp.composite_layers_rect(&[l1.clone(), l2.clone()], 10, 12, 25, 28);
+
+        // Verify inside the rectangle: exact match with full composite
+        for y in 12..=28 {
+            for x in 10..=25 {
+                let full_col = full_comp.base_color.get_pixel(x, y);
+                let rect_col = rect_comp.base_color.get_pixel(x, y);
+                assert_eq!(full_col, rect_col, "Color mismatch at ({}, {})", x, y);
+                assert_eq!(full_comp.roughness.get_pixel(x, y), rect_comp.roughness.get_pixel(x, y));
+                assert_eq!(full_comp.metallic.get_pixel(x, y), rect_comp.metallic.get_pixel(x, y));
+            }
+        }
+
+        // Verify outside the rectangle: rect_comp retains base layer
+        assert_eq!(rect_comp.base_color.get_pixel(0, 0), Vec4::new(1.0, 0.0, 0.0, 1.0));
+        assert_eq!(rect_comp.base_color.get_pixel(50, 50), Vec4::new(1.0, 0.0, 0.0, 1.0));
     }
 }
 

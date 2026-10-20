@@ -1,4 +1,4 @@
-// 3D Paintcraft - A Clean-Room Recreation of Substance 3D Painter in Pure Rust for Linux
+// 3D Paintcraft - A Clean-Room Recreation of Substance 3D Painter in Pure Rust for Windows & Linux
 // Part of the ArtCraft Creative Suite
 
 mod app;
@@ -11,6 +11,7 @@ mod hdri;
 mod hdri_generator;
 mod gpu_compositor;
 mod gpu_brush;
+pub mod gpu_baker;
 mod history;
 mod layer;
 mod mcp;
@@ -92,7 +93,7 @@ fn main() -> Result<(), eframe::Error> {
         return Ok(());
     }
 
-    // Mode 4: Desktop Linux GUI Application (egui / eframe)
+    // Mode 4: Desktop GUI Application (egui / eframe) - Windows & Linux
     let mut wgpu_options = eframe::egui_wgpu::WgpuConfiguration::default();
     wgpu_options.power_preference = eframe::wgpu::PowerPreference::HighPerformance;
     let env_present = std::env::var("PAINTCRAFT_PRESENT_MODE").unwrap_or_default().to_lowercase();

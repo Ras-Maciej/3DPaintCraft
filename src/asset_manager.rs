@@ -60,8 +60,31 @@ pub struct AssetPaths {
 
 impl Default for AssetPaths {
     fn default() -> Self {
-        let base = if Path::new("assets").exists() {
+        let base = if let Ok(appdir) = std::env::var("APPDIR") {
+            let ad_path = PathBuf::from(appdir);
+            if ad_path.join("usr/bin/assets").exists() {
+                ad_path.join("usr/bin/assets")
+            } else if ad_path.join("usr/share/paintcraft/assets").exists() {
+                ad_path.join("usr/share/paintcraft/assets")
+            } else {
+                ad_path.join("assets")
+            }
+        } else if Path::new("assets").exists() {
             PathBuf::from("assets")
+        } else if let Ok(exe_path) = std::env::current_exe() {
+            if let Some(parent) = exe_path.parent() {
+                if parent.join("assets").exists() {
+                    parent.join("assets")
+                } else if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
+                    PathBuf::from(manifest_dir).join("assets")
+                } else if let Ok(current) = std::env::current_dir() {
+                    current.join("assets")
+                } else {
+                    parent.join("assets")
+                }
+            } else {
+                PathBuf::from("assets")
+            }
         } else if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
             PathBuf::from(manifest_dir).join("assets")
         } else if let Ok(current) = std::env::current_dir() {
@@ -263,6 +286,14 @@ impl AssetManager {
             let _ = fs::create_dir_all(path);
         }
 
+        #[cfg(target_os = "windows")]
+        {
+            std::process::Command::new("explorer")
+                .arg(path)
+                .spawn()
+                .map_err(|e| format!("Failed to open folder via explorer: {}", e))?;
+            Ok(())
+        }
         #[cfg(target_os = "linux")]
         {
             std::process::Command::new("xdg-open")
@@ -271,7 +302,15 @@ impl AssetManager {
                 .map_err(|e| format!("Failed to open folder via xdg-open: {}", e))?;
             Ok(())
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "macos")]
+        {
+            std::process::Command::new("open")
+                .arg(path)
+                .spawn()
+                .map_err(|e| format!("Failed to open folder via open: {}", e))?;
+            Ok(())
+        }
+        #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
         {
             Err("Unsupported OS for folder open".to_string())
         }
@@ -368,6 +407,14 @@ impl AssetManager {
             let _ = fs::create_dir_all(path);
         }
 
+        #[cfg(target_os = "windows")]
+        {
+            std::process::Command::new("explorer")
+                .arg(path)
+                .spawn()
+                .map_err(|e| format!("Failed to open folder via explorer: {}", e))?;
+            Ok(())
+        }
         #[cfg(target_os = "linux")]
         {
             std::process::Command::new("xdg-open")
@@ -376,7 +423,15 @@ impl AssetManager {
                 .map_err(|e| format!("Failed to open folder via xdg-open: {}", e))?;
             Ok(())
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "macos")]
+        {
+            std::process::Command::new("open")
+                .arg(path)
+                .spawn()
+                .map_err(|e| format!("Failed to open folder via open: {}", e))?;
+            Ok(())
+        }
+        #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
         {
             Err("Unsupported OS for folder open".to_string())
         }

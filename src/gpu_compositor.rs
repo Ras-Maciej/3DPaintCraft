@@ -510,6 +510,7 @@ mod tests {
             ("skybox.wgsl", include_str!("skybox.wgsl")),
             ("postprocess.wgsl", include_str!("postprocess.wgsl")),
             ("gpu_brush_stamp.wgsl", include_str!("gpu_brush_stamp.wgsl")),
+            ("gpu_baker.wgsl", include_str!("gpu_baker.wgsl")),
         ];
 
         for (name, source) in shaders {
@@ -520,7 +521,7 @@ mod tests {
                 wgpu::naga::valid::Capabilities::all(),
             );
             validator.validate(&module)
-                .unwrap_or_else(|e| panic!("{} failed validation: {}", name, e));
+                .unwrap_or_else(|e| panic!("{} failed validation: {:?}", name, e));
         }
     }
 }

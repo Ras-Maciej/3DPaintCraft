@@ -842,6 +842,170 @@ impl PaintcraftApp {
         }
     }
 
+    /// Fast sub-rectangle update of the 2D UV canvas texture in egui using set_partial
+    fn update_uv_texture_rect(&mut self, ctx: &egui::Context, min_x: u32, min_y: u32, max_x: u32, max_y: u32) {
+        if self.layout == ViewLayout::View3DOnly {
+            return;
+        }
+        if self.uv_canvas_texture.is_none() {
+            self.update_uv_texture(ctx);
+            return;
+        }
+        let w = self.project.texture_width;
+        let h = self.project.texture_height;
+        if min_x >= w || min_y >= h {
+            return;
+        }
+        let max_x = max_x.min(w - 1);
+        let max_y = max_y.min(h - 1);
+        let rw = (max_x - min_x + 1) as usize;
+        let rh = (max_y - min_y + 1) as usize;
+        if rw == 0 || rh == 0 {
+            return;
+        }
+
+        let is_mask_mode = self.uv_view_mask_mode;
+        let active_mask_buf = if is_mask_mode {
+            self.project.active_layer().and_then(|l| if l.has_mask { Some(l.mask_buf.clone()) } else { None })
+        } else {
+            None
+        };
+        let base_col = &self.project.composite_textures.base_color;
+        let rough = &self.project.composite_textures.roughness;
+        let metal = &self.project.composite_textures.metallic;
+        let normal = &self.project.composite_textures.normal;
+        let height_map = &self.project.composite_textures.height_map;
+        let emis_map = &self.project.composite_textures.emissive;
+        let opac_map = &self.project.composite_textures.opacity;
+        let cc_map = &self.project.composite_textures.clearcoat;
+        let aniso_map = &self.project.composite_textures.anisotropy;
+        let aniso_ang_map = &self.project.composite_textures.anisotropy_angle;
+        let ao_map = self.project.ao_map.as_ref();
+        let curv_map = self.project.curvature_map.as_ref();
+        let pos_map = self.project.position_map.as_ref();
+        let wn_map = self.project.world_space_normal_map.as_ref();
+        let thick_map = self.project.thickness_map.as_ref();
+        let view_mode = self.view_mode;
+
+        let mut sub_pixels = vec![0u8; rw * rh * 4];
+        for local_y in 0..rh {
+            let y = min_y + local_y as u32;
+            let row_offset = local_y * rw * 4;
+            for local_x in 0..rw {
+                let x = min_x + local_x as u32;
+                let idx = row_offset + local_x * 4;
+
+                if let Some(mask) = &active_mask_buf {
+                    let m = (mask.get_pixel(x, y).clamp(0.0, 1.0) * 255.0) as u8;
+                    sub_pixels[idx] = m;
+                    sub_pixels[idx + 1] = m;
+                    sub_pixels[idx + 2] = m;
+                    sub_pixels[idx + 3] = 255;
+                } else {
+                    match view_mode {
+                        ViewportChannelMode::Material | ViewportChannelMode::BaseColor => {
+                            let col = base_col.get_pixel(x, y);
+                            sub_pixels[idx] = (col.x.clamp(0.0, 1.0) * 255.0) as u8;
+                            sub_pixels[idx + 1] = (col.y.clamp(0.0, 1.0) * 255.0) as u8;
+                            sub_pixels[idx + 2] = (col.z.clamp(0.0, 1.0) * 255.0) as u8;
+                            sub_pixels[idx + 3] = (col.w.clamp(0.0, 1.0) * 255.0) as u8;
+                        }
+                        ViewportChannelMode::Roughness => {
+                            let r = (rough.get_pixel(x, y).clamp(0.0, 1.0) * 255.0) as u8;
+                            sub_pixels[idx] = r; sub_pixels[idx + 1] = r; sub_pixels[idx + 2] = r; sub_pixels[idx + 3] = 255;
+                        }
+                        ViewportChannelMode::Metallic => {
+                            let m = (metal.get_pixel(x, y).clamp(0.0, 1.0) * 255.0) as u8;
+                            sub_pixels[idx] = m; sub_pixels[idx + 1] = m; sub_pixels[idx + 2] = m; sub_pixels[idx + 3] = 255;
+                        }
+                        ViewportChannelMode::Normal => {
+                            let n = normal.get_pixel(x, y);
+                            sub_pixels[idx] = (n.x.clamp(0.0, 1.0) * 255.0) as u8;
+                            sub_pixels[idx + 1] = (n.y.clamp(0.0, 1.0) * 255.0) as u8;
+                            sub_pixels[idx + 2] = (n.z.clamp(0.0, 1.0) * 255.0) as u8;
+                            sub_pixels[idx + 3] = 255;
+                        }
+                        ViewportChannelMode::Height => {
+                            let h = (height_map.get_pixel(x, y).clamp(0.0, 1.0) * 255.0) as u8;
+                            sub_pixels[idx] = h; sub_pixels[idx + 1] = h; sub_pixels[idx + 2] = h; sub_pixels[idx + 3] = 255;
+                        }
+                        ViewportChannelMode::AmbientOcclusion => {
+                            let val = if let Some(ref ao_buf) = ao_map {
+                                (ao_buf.get_pixel(x, y).clamp(0.0, 1.0) * 255.0) as u8
+                            } else {
+                                255
+                            };
+                            sub_pixels[idx] = val; sub_pixels[idx + 1] = val; sub_pixels[idx + 2] = val; sub_pixels[idx + 3] = 255;
+                        }
+                        ViewportChannelMode::Curvature => {
+                            let val = if let Some(ref curv_buf) = curv_map {
+                                (curv_buf.get_pixel(x, y).clamp(0.0, 1.0) * 255.0) as u8
+                            } else {
+                                128
+                            };
+                            sub_pixels[idx] = val; sub_pixels[idx + 1] = val; sub_pixels[idx + 2] = val; sub_pixels[idx + 3] = 255;
+                        }
+                        ViewportChannelMode::Position => {
+                            let col = if let Some(ref p_buf) = pos_map {
+                                p_buf.get_pixel(x, y)
+                            } else {
+                                glam::Vec4::new(0.5, 0.5, 0.5, 1.0)
+                            };
+                            sub_pixels[idx] = (col.x.clamp(0.0, 1.0) * 255.0) as u8;
+                            sub_pixels[idx + 1] = (col.y.clamp(0.0, 1.0) * 255.0) as u8;
+                            sub_pixels[idx + 2] = (col.z.clamp(0.0, 1.0) * 255.0) as u8;
+                            sub_pixels[idx + 3] = 255;
+                        }
+                        ViewportChannelMode::WorldNormal => {
+                            let col = if let Some(ref wn_buf) = wn_map {
+                                wn_buf.get_pixel(x, y)
+                            } else {
+                                glam::Vec4::new(0.5, 0.5, 1.0, 1.0)
+                            };
+                            sub_pixels[idx] = (col.x.clamp(0.0, 1.0) * 255.0) as u8;
+                            sub_pixels[idx + 1] = (col.y.clamp(0.0, 1.0) * 255.0) as u8;
+                            sub_pixels[idx + 2] = (col.z.clamp(0.0, 1.0) * 255.0) as u8;
+                            sub_pixels[idx + 3] = 255;
+                        }
+                        ViewportChannelMode::Thickness => {
+                            let val = if let Some(ref th_buf) = thick_map {
+                                (th_buf.get_pixel(x, y).clamp(0.0, 1.0) * 255.0) as u8
+                            } else {
+                                255
+                            };
+                            sub_pixels[idx] = val; sub_pixels[idx + 1] = val; sub_pixels[idx + 2] = val; sub_pixels[idx + 3] = 255;
+                        }
+                        ViewportChannelMode::Emissive => {
+                            let col = emis_map.get_pixel(x, y);
+                            sub_pixels[idx] = (col.x.clamp(0.0, 1.0) * 255.0) as u8;
+                            sub_pixels[idx + 1] = (col.y.clamp(0.0, 1.0) * 255.0) as u8;
+                            sub_pixels[idx + 2] = (col.z.clamp(0.0, 1.0) * 255.0) as u8;
+                            sub_pixels[idx + 3] = 255;
+                        }
+                        ViewportChannelMode::Opacity => {
+                            let o = (opac_map.get_pixel(x, y).clamp(0.0, 1.0) * 255.0) as u8;
+                            sub_pixels[idx] = o; sub_pixels[idx + 1] = o; sub_pixels[idx + 2] = o; sub_pixels[idx + 3] = 255;
+                        }
+                        ViewportChannelMode::Clearcoat => {
+                            let c = (cc_map.get_pixel(x, y).clamp(0.0, 1.0) * 255.0) as u8;
+                            sub_pixels[idx] = c; sub_pixels[idx + 1] = c; sub_pixels[idx + 2] = c; sub_pixels[idx + 3] = 255;
+                        }
+                        ViewportChannelMode::Anisotropy => {
+                            let a = ((aniso_map.get_pixel(x, y) * 0.5 + 0.5).clamp(0.0, 1.0) * 255.0) as u8;
+                            let ang = (aniso_ang_map.get_pixel(x, y).clamp(0.0, 1.0) * 255.0) as u8;
+                            sub_pixels[idx] = a; sub_pixels[idx + 1] = ang; sub_pixels[idx + 2] = 0; sub_pixels[idx + 3] = 255;
+                        }
+                    }
+                }
+            }
+        }
+
+        let color_image = ColorImage::from_rgba_unmultiplied([rw, rh], &sub_pixels);
+        if let Some(tex) = &mut self.uv_canvas_texture {
+            tex.set_partial([min_x as usize, min_y as usize], color_image, TextureOptions::LINEAR);
+        }
+    }
+
     /// Create small preview thumbnail texture for baked RGBA maps
     pub fn create_rgba_thumbnail(ctx: &egui::Context, id: &str, buf: &crate::channel::RgbaBuffer, thumb_w: u32, thumb_h: u32) -> TextureHandle {
         let mut pixels = vec![0u8; (thumb_w * thumb_h * 4) as usize];
@@ -1826,52 +1990,71 @@ impl eframe::App for PaintcraftApp {
 
         // --- POLL BACKGROUND BAKE WORKER ---
         if let Some(rx) = &self.bake_receiver {
-            if let Ok(res) = rx.try_recv() {
-                if let Some(wn) = res.tangent_normal {
-                    self.bake_preview_normal = Some(Self::create_rgba_thumbnail(ctx, "prev_wn", &wn, 64, 64));
-                    self.project.world_normal_map = Some(wn);
-                }
-                if let Some(wsn) = res.world_space_normal {
-                    self.project.world_space_normal_map = Some(wsn);
-                }
-                if let Some(ao) = res.ao {
-                    self.bake_preview_ao = Some(Self::create_scalar_thumbnail(ctx, "prev_ao", &ao, 64, 64));
-                    self.project.ao_map = Some(ao);
-                }
-                if let Some(curv) = res.curvature {
-                    self.bake_preview_curv = Some(Self::create_scalar_thumbnail(ctx, "prev_curv", &curv, 64, 64));
-                    self.project.curvature_map = Some(curv);
-                }
-                if let Some(pos) = res.position {
-                    self.bake_preview_pos = Some(Self::create_rgba_thumbnail(ctx, "prev_pos", &pos, 64, 64));
-                    self.project.position_map = Some(pos);
-                }
-                if let Some(th) = res.thickness {
-                    self.bake_preview_thick = Some(Self::create_scalar_thumbnail(ctx, "prev_th", &th, 64, 64));
-                    self.project.thickness_map = Some(th);
-                }
-                if let Some(id_m) = res.id_map {
-                    self.project.id_map = Some(id_m);
-                }
+            match rx.try_recv() {
+                Ok(res) => {
+                    if let Some(wn) = res.tangent_normal {
+                        self.bake_preview_normal = Some(Self::create_rgba_thumbnail(ctx, "prev_wn", &wn, 64, 64));
+                        self.project.world_normal_map = Some(wn);
+                    }
+                    if let Some(wsn) = res.world_space_normal {
+                        self.project.world_space_normal_map = Some(wsn);
+                    }
+                    if let Some(ao) = res.ao {
+                        self.bake_preview_ao = Some(Self::create_scalar_thumbnail(ctx, "prev_ao", &ao, 64, 64));
+                        self.project.ao_map = Some(ao);
+                    }
+                    if let Some(curv) = res.curvature {
+                        self.bake_preview_curv = Some(Self::create_scalar_thumbnail(ctx, "prev_curv", &curv, 64, 64));
+                        self.project.curvature_map = Some(curv);
+                    }
+                    if let Some(pos) = res.position {
+                        self.bake_preview_pos = Some(Self::create_rgba_thumbnail(ctx, "prev_pos", &pos, 64, 64));
+                        self.project.position_map = Some(pos);
+                    }
+                    if let Some(th) = res.thickness {
+                        self.bake_preview_thick = Some(Self::create_scalar_thumbnail(ctx, "prev_th", &th, 64, 64));
+                        self.project.thickness_map = Some(th);
+                    }
+                    if let Some(id_m) = res.id_map {
+                        self.project.id_map = Some(id_m);
+                    }
 
-                self.project.sync_baked_maps_to_resources();
-                self.shelf_thumbnails_dirty = true;
-                self.refresh_shelf_thumbnails(ctx);
-                self.project.gpu_mesh_maps_sync_needed = true;
-                for layer in &mut self.project.layers {
-                    layer.evaluate_fill(self.project.curvature_map.as_ref());
+                    self.project.sync_baked_maps_to_resources();
+                    self.shelf_thumbnails_dirty = true;
+                    self.refresh_shelf_thumbnails(ctx);
+                    self.project.gpu_mesh_maps_sync_needed = true;
+                    for layer in &mut self.project.layers {
+                        layer.evaluate_fill_advanced(
+                            self.project.curvature_map.as_ref(),
+                            self.project.position_map.as_ref(),
+                            self.project.world_normal_map.as_ref(),
+                            self.project.ao_map.as_ref(),
+                        );
+                    }
+                    self.project.rebuild_composite();
+                    self.update_uv_texture(ctx);
+                    if let Some(wgpu) = &mut self.wgpu_viewport {
+                        wgpu.sync_mesh_maps(&self.project);
+                        wgpu.sync_textures(&mut self.project);
+                    }
+                    self.bake_success_message = Some(format!("Baking completed successfully in {:.2}s!", res.elapsed_secs));
+                    self.status_message = format!("Mesh maps baked in {:.2}s", res.elapsed_secs);
+                    self.bake_receiver = None;
                 }
-                self.project.rebuild_composite();
-                self.update_uv_texture(ctx);
-                if let Some(wgpu) = &mut self.wgpu_viewport {
-                    wgpu.sync_mesh_maps(&self.project);
-                    wgpu.sync_textures(&mut self.project);
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    if self.bake_worker_state.as_ref().map(|s| !s.lock().unwrap().is_done).unwrap_or(false) {
+                        ctx.request_repaint();
+                    }
                 }
-                self.bake_success_message = Some(format!("Baking completed successfully in {:.2}s!", res.elapsed_secs));
-                self.status_message = format!("Mesh maps baked in {:.2}s", res.elapsed_secs);
-                self.bake_receiver = None;
-            } else if self.bake_worker_state.as_ref().map(|s| !s.lock().unwrap().is_done).unwrap_or(false) {
-                ctx.request_repaint();
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.bake_receiver = None;
+                    if let Some(state) = &self.bake_worker_state {
+                        let mut st = state.lock().unwrap();
+                        st.is_done = true;
+                        st.step_name = "Bake finished or interrupted".to_string();
+                    }
+                    self.status_message = "Bake worker finished".to_string();
+                }
             }
         }
 
@@ -6412,6 +6595,10 @@ impl PaintcraftApp {
         let vp_h = rect.height().max(64.0);
         let aspect = vp_w / vp_h;
 
+        let is_camera_moving = response.dragged_by(egui::PointerButton::Middle)
+            || response.dragged_by(egui::PointerButton::Secondary)
+            || (response.dragged_by(egui::PointerButton::Primary) && ctx.input(|i| i.modifiers.alt));
+
         let is_interacting = response.dragged() || self.is_stroke_active;
         if is_interacting || response.hovered() || self.project.gpu_sync_needed || textures_dirty {
             ctx.request_repaint();
@@ -6420,13 +6607,13 @@ impl PaintcraftApp {
         let render_h = (vp_h as u32).max(128).min(2160);
 
         let mut frame_settings = self.shader_settings;
-        if is_interacting && self.shader_settings.adaptive_resolution {
-            // Bypass heavy Screen-Space Ray Tracing, SSAO, Bloom & Depth-of-Field during fast camera orbit or brush drag
+        if is_camera_moving && self.shader_settings.adaptive_resolution {
+            // Bypass heavy Screen-Space Ray Tracing, SSAO, Bloom & Depth-of-Field ONLY during camera orbit/pan/dolly
             frame_settings.ssr_enabled = false;
             frame_settings.ssao_enabled = false;
             frame_settings.bloom_enabled = false;
             frame_settings.dof_enabled = false;
-            frame_settings.shadow_softness = 0.0; // Fast single-tap shadow lookup during interaction
+            frame_settings.shadow_softness = 0.0; // Fast single-tap shadow lookup during camera motion
         }
 
         let texture_id = if self.iray_mode {
@@ -7051,7 +7238,7 @@ impl PaintcraftApp {
                                     }
 
                                     // Keep CPU layer buffer updated for history/undo/save integrity
-                                    let stroke_pts = if !skip_stroke {
+                                    let _stroke_pts = if !skip_stroke {
                                         let layer = &mut self.project.layers[act_idx];
                                         let mesh = &self.project.mesh;
                                         self.brush_engine.paint_stroke_3d(layer, mesh, hit.point, hit.normal, world_radius)
@@ -7061,39 +7248,29 @@ impl PaintcraftApp {
 
                                     self.brush_engine.settings.paint_color = orig_color;
 
-                                    // Option 1 & 3: Hardware GPU Compute Shader 3D Projection Stamping across all stroke points & symmetry points
-                                    let mut gpu_stamped = false;
+                                    // Hardware GPU Direct Dirty-Rect Sync: Streams the exact painted pixels to VRAM
+                                    // Guarantees 100% WYSIWYG stroke fidelity while drawing with zero visual shift upon release
+                                    let mut gpu_synced = false;
                                     if let Some(wgpu) = &mut self.wgpu_viewport {
-                                        let mut any_stamped = false;
-                                        for (pt_pos, pt_norm) in &stroke_pts {
-                                            let sym_pts = self.brush_engine.get_symmetry_points(*pt_pos, *pt_norm);
-                                            for (p, n) in &sym_pts {
-                                                if let Some((uniforms, gpu_tris)) = self.brush_engine.build_gpu_stamp_data(&self.project.mesh, *p, *n, world_radius, doc_w, doc_h) {
-                                                    wgpu.stamp_3d_gpu(act_idx, &uniforms, &gpu_tris);
-                                                    any_stamped = true;
-                                                }
+                                        let active_layer = &mut self.project.layers[act_idx];
+                                        if let Some(d_rect) = active_layer.dirty_rect {
+                                            if self.brush_engine.settings.channels.clearcoat
+                                                || self.brush_engine.settings.channels.emission
+                                                || self.brush_engine.settings.channels.opacity
+                                                || self.brush_engine.settings.channels.anisotropy
+                                            {
+                                                wgpu.sync_extended_dirty_rect(active_layer, d_rect, self.brush_engine.settings.channels);
+                                                self.need_cpu_composite_sync = true;
+                                            }
+                                            if let Some(gpu_layer) = wgpu.gpu_layers.get(act_idx) {
+                                                wgpu.gpu_compositor.update_layer(active_layer, gpu_layer, doc_w, doc_h);
+                                                wgpu.composite_and_update(&self.project);
+                                                let rw = (d_rect.2.saturating_sub(d_rect.0) + 1) as u64;
+                                                let rh = (d_rect.3.saturating_sub(d_rect.1) + 1) as u64;
+                                                self.perf_metrics.texture_transfer_bytes = rw * rh * 32;
+                                                gpu_synced = true;
                                             }
                                         }
-                                        if any_stamped {
-                                            wgpu.composite_and_update(&self.project);
-                                            self.perf_metrics.texture_transfer_bytes = (doc_w as u64) * (doc_h as u64) * 40 * (stroke_pts.len() as u64);
-                                            gpu_stamped = true;
-                                        }
-                                    }
-
-                                    if self.brush_engine.settings.channels.clearcoat
-                                        || self.brush_engine.settings.channels.emission
-                                        || self.brush_engine.settings.channels.opacity
-                                        || self.brush_engine.settings.channels.anisotropy
-                                    {
-                                        if let Some(active_layer) = self.project.active_layer() {
-                                            if let Some(d_rect) = active_layer.dirty_rect {
-                                                if let Some(wgpu) = &mut self.wgpu_viewport {
-                                                    wgpu.sync_extended_dirty_rect(active_layer, d_rect, self.brush_engine.settings.channels);
-                                                }
-                                            }
-                                        }
-                                        self.need_cpu_composite_sync = true;
                                     }
 
                                     self.perf_metrics.paint_stroke_ms = t_stroke.elapsed().as_secs_f32() * 1000.0;
@@ -7102,7 +7279,7 @@ impl PaintcraftApp {
                                         self.brush_engine.settings.flow = orig_flow;
                                     }
 
-                                    if !gpu_stamped {
+                                    if !gpu_synced {
                                         self.project.gpu_sync_needed = true;
                                     }
                                     self.project.is_dirty = true;
@@ -7770,43 +7947,60 @@ impl PaintcraftApp {
                             } else {
                                 self.status_message = "No UV polygon at clicked coordinate.".to_string();
                             }
-                        } else if let Some(layer) = self.project.active_layer_mut() {
-                            if self.brush_engine.settings.target == PaintTarget::Material && layer.layer_type != LayerType::Paint {
-                                self.status_message = "Direct painting blocked on Fill layers. Switch target to Mask or add a Paint layer.".to_string();
-                            } else {
-                                let pressure = ui.input(|i| {
-                                    i.events.iter().find_map(|e| match e {
-                                        egui::Event::Touch { force: Some(f), .. } => Some(*f),
-                                        _ => None,
-                                    }).unwrap_or(1.0)
-                                }).clamp(0.05, 1.0);
-                                let orig_rad = self.brush_engine.settings.radius;
-                                let orig_flow = self.brush_engine.settings.flow;
-                                if self.brush_engine.settings.pressure_size {
-                                    self.brush_engine.settings.radius = orig_rad * (0.2 + 0.8 * pressure);
+                        } else {
+                            let act_idx = self.project.active_layer_idx;
+                            if act_idx < self.project.layers.len() {
+                                let is_paint = self.project.layers[act_idx].layer_type == LayerType::Paint;
+                                if self.brush_engine.settings.target == PaintTarget::Material && !is_paint {
+                                    self.status_message = "Direct painting blocked on Fill layers. Switch target to Mask or add a Paint layer.".to_string();
+                                } else {
+                                    let pressure = ui.input(|i| {
+                                        i.events.iter().find_map(|e| match e {
+                                            egui::Event::Touch { force: Some(f), .. } => Some(*f),
+                                            _ => None,
+                                        }).unwrap_or(1.0)
+                                    }).clamp(0.05, 1.0);
+                                    let orig_rad = self.brush_engine.settings.radius;
+                                    let orig_flow = self.brush_engine.settings.flow;
+                                    if self.brush_engine.settings.pressure_size {
+                                        self.brush_engine.settings.radius = orig_rad * (0.2 + 0.8 * pressure);
+                                    }
+                                    if self.brush_engine.settings.pressure_opacity {
+                                        self.brush_engine.settings.flow = orig_flow * pressure;
+                                    }
+                                    let t_stroke = std::time::Instant::now();
+                                    self.brush_engine.paint_stroke(&mut self.project.layers[act_idx], glam::Vec2::new(u, v));
+                                    self.perf_metrics.paint_stroke_ms = t_stroke.elapsed().as_secs_f32() * 1000.0;
+                                    self.brush_engine.settings.radius = orig_rad;
+                                    self.brush_engine.settings.flow = orig_flow;
+                                    let d_rect = self.project.layers[act_idx].dirty_rect;
+                                    if let Some((d_x0, d_y0, d_x1, d_y1)) = d_rect {
+                                        self.project.rebuild_composite_rect(
+                                            d_x0 as usize,
+                                            d_y0 as usize,
+                                            d_x1 as usize,
+                                            d_y1 as usize,
+                                        );
+                                        self.update_uv_texture_rect(ctx, d_x0, d_y0, d_x1, d_y1);
+                                        if let Some(wgpu) = &mut self.wgpu_viewport {
+                                            if let Some(gpu_layer) = wgpu.gpu_layers.get(act_idx) {
+                                                let doc_w = self.project.texture_width;
+                                                let doc_h = self.project.texture_height;
+                                                let active_layer = &mut self.project.layers[act_idx];
+                                                wgpu.gpu_compositor.update_layer(active_layer, gpu_layer, doc_w, doc_h);
+                                                wgpu.composite_and_update(&self.project);
+                                            }
+                                        }
+                                    } else {
+                                        self.update_uv_texture(ctx);
+                                    }
+                                    self.project.gpu_sync_needed = false;
+                                    self.project.is_dirty = true;
+                                    self.last_painted_uv = Some(glam::Vec2::new(u, v));
+                                    self.last_hovered_uv_2d = Some(glam::Vec2::new(u, v));
+                                    self.status_message = format!("2D UV Painting at ({:.3}, {:.3})", u, v);
+                                    ctx.request_repaint();
                                 }
-                                if self.brush_engine.settings.pressure_opacity {
-                                    self.brush_engine.settings.flow = orig_flow * pressure;
-                                }
-                                let t_stroke = std::time::Instant::now();
-                                self.brush_engine.paint_stroke(layer, glam::Vec2::new(u, v));
-                                self.perf_metrics.paint_stroke_ms = t_stroke.elapsed().as_secs_f32() * 1000.0;
-                                self.brush_engine.settings.radius = orig_rad;
-                                self.brush_engine.settings.flow = orig_flow;
-                                if self.brush_engine.settings.channels.height {
-                                    layer.update_normal_from_height(1.0);
-                                }
-                                self.project.composite_textures.composite_layers(&self.project.layers);
-                                self.update_uv_texture(ctx);
-                                if let Some(wgpu) = &mut self.wgpu_viewport {
-                                    wgpu.sync_textures(&mut self.project);
-                                }
-                                self.project.gpu_sync_needed = false;
-                                self.project.is_dirty = false;
-                                self.last_painted_uv = Some(glam::Vec2::new(u, v));
-                                self.last_hovered_uv_2d = Some(glam::Vec2::new(u, v));
-                                self.status_message = format!("2D UV Painting at ({:.3}, {:.3})", u, v);
-                                ctx.request_repaint();
                             }
                         }
                     }
@@ -9537,6 +9731,7 @@ impl PaintcraftApp {
                     st.step_name = format!("[{}/{}] Baking Tangent Space Normal Map...", completed_tasks + 1, total_tasks);
                     st.progress = (completed_tasks as f32) / (total_tasks as f32).max(1.0);
                 }
+
                 result.tangent_normal = match crate::baker::Baker::bake_tangent_normals_with_options(
                     &mesh,
                     high_poly.as_ref(),
@@ -9619,7 +9814,7 @@ impl PaintcraftApp {
                 if state_clone.lock().unwrap().cancelled { return; }
                 {
                     let mut st = state_clone.lock().unwrap();
-                    st.step_name = format!("[{}/{}] Baking World Position (WPO)...", completed_tasks + 1, total_tasks);
+                    st.step_name = format!("[{}/{}] Baking World Position WPO...", completed_tasks + 1, total_tasks);
                     st.progress = (completed_tasks as f32) / (total_tasks as f32).max(1.0);
                 }
                 result.position = Some(crate::baker::Baker::bake_position_with_options(&mesh, res, res, &position_config));
@@ -9642,12 +9837,11 @@ impl PaintcraftApp {
                 completed_tasks += 1;
             }
 
-
             if bake_id_map {
                 if state_clone.lock().unwrap().cancelled { return; }
                 {
                     let mut st = state_clone.lock().unwrap();
-                    st.step_name = format!("[{}/{}] Baking ID Map (Submesh / Material IDs)...", completed_tasks + 1, total_tasks);
+                    st.step_name = format!("[{}/{}] Baking ID Map...", completed_tasks + 1, total_tasks);
                     st.progress = (completed_tasks as f32) / (total_tasks as f32).max(1.0);
                 }
                 result.id_map = Some(crate::baker::Baker::bake_id_map(&mesh, res, res));

@@ -519,6 +519,14 @@ impl Project {
         self.texture_revision = self.texture_revision.wrapping_add(1);
     }
 
+    pub fn rebuild_composite_rect(&mut self, min_x: usize, min_y: usize, max_x: usize, max_y: usize) {
+        self.composite_textures.composite_layers_rect(&self.layers, min_x, min_y, max_x, max_y);
+        self.is_dirty = true;
+        self.gpu_sync_needed = true;
+        self.gpu_extended_channels_dirty = true;
+        self.texture_revision = self.texture_revision.wrapping_add(1);
+    }
+
     pub fn active_layer_mut(&mut self) -> Option<&mut Layer> {
         self.layers.get_mut(self.active_layer_idx)
     }

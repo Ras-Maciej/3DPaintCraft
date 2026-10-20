@@ -3,6 +3,7 @@
 
 use glam::{Vec2, Vec3, Vec4};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -187,13 +188,10 @@ impl Bvh {
             return result;
         }
 
-        let mut stack = [0usize; 64];
-        stack[0] = 0;
-        let mut stack_len = 1;
+        let mut stack = Vec::with_capacity(128);
+        stack.push(0usize);
 
-        while stack_len > 0 {
-            stack_len -= 1;
-            let node_idx = stack[stack_len];
+        while let Some(node_idx) = stack.pop() {
             let node = &self.nodes[node_idx];
 
             if sphere_intersects_aabb(center, radius, node.aabb_min, node.aabb_max) {
@@ -201,16 +199,10 @@ impl Bvh {
                     result.extend_from_slice(&node.triangle_indices);
                 }
                 if let Some(left) = node.left_child {
-                    if stack_len < 64 {
-                        stack[stack_len] = left;
-                        stack_len += 1;
-                    }
+                    stack.push(left);
                 }
                 if let Some(right) = node.right_child {
-                    if stack_len < 64 {
-                        stack[stack_len] = right;
-                        stack_len += 1;
-                    }
+                    stack.push(right);
                 }
             }
         }
@@ -219,15 +211,26 @@ impl Bvh {
     }
 
     pub fn raycast(&self, ray: &Ray, vertices: &[Vertex], indices: &[u32]) -> Option<RayHit> {
+        self.raycast_filtered(ray, vertices, indices, f32::MAX, None)
+    }
+
+    pub fn raycast_filtered(
+        &self,
+        ray: &Ray,
+        vertices: &[Vertex],
+        indices: &[u32],
+        max_dist: f32,
+        allowed_triangles: Option<&HashSet<usize>>,
+    ) -> Option<RayHit> {
         if self.nodes.is_empty() {
             return None;
         }
 
         let mut closest_hit: Option<RayHit> = None;
-        let mut min_t = f32::MAX;
+        let mut min_t = max_dist;
 
         // Traverse stack on CPU stack rather than heap vector
-        let mut stack = [0usize; 64];
+        let mut stack = [0usize; 128];
         stack[0] = 0;
         let mut stack_len = 1;
 
@@ -244,9 +247,16 @@ impl Bvh {
                 // If leaf node, test triangles
                 if !node.triangle_indices.is_empty() {
                     for &t_idx in &node.triangle_indices {
-                        let i0 = indices[t_idx as usize * 3] as usize;
-                        let i1 = indices[t_idx as usize * 3 + 1] as usize;
-                        let i2 = indices[t_idx as usize * 3 + 2] as usize;
+                        let t_idx_usize = t_idx as usize;
+                        if let Some(allowed) = allowed_triangles {
+                            if !allowed.contains(&t_idx_usize) {
+                                continue;
+                            }
+                        }
+
+                        let i0 = indices[t_idx_usize * 3] as usize;
+                        let i1 = indices[t_idx_usize * 3 + 1] as usize;
+                        let i2 = indices[t_idx_usize * 3 + 2] as usize;
 
                         let v0 = &vertices[i0];
                         let v1 = &vertices[i1];
@@ -278,12 +288,15 @@ impl Bvh {
                         }
 
                         let t = f * edge2.dot(q);
-                        if t > 1e-4 && t < min_t {
+                        if t > 1e-5 && t < min_t {
                             min_t = t;
                             let w = 1.0 - u - v;
 
                             let point = ray.origin + ray.direction * t;
-                            let normal = (v0.normal * w + v1.normal * u + v2.normal * v).normalize_or_zero();
+                            let mut normal = (v0.normal * w + v1.normal * u + v2.normal * v).normalize_or_zero();
+                            if normal.length_squared() < 1e-5 {
+                                normal = edge1.cross(edge2).normalize_or_zero();
+                            }
                             let uv = v0.uv * w + v1.uv * u + v2.uv * v;
 
                             closest_hit = Some(RayHit {
@@ -291,24 +304,45 @@ impl Bvh {
                                 point,
                                 normal,
                                 uv,
-                                triangle_idx: t_idx as usize,
+                                triangle_idx: t_idx_usize,
                                 barycentric: Vec3::new(w, u, v),
                             });
                         }
                     }
                 } else {
-                    // Internal node: push children
-                    if let Some(r) = node.right_child {
-                        if stack_len < 64 {
-                            stack[stack_len] = r;
-                            stack_len += 1;
+                    // Internal node: push children in front-to-back order along the ray
+                    match (node.left_child, node.right_child) {
+                        (Some(l), Some(r)) => {
+                            let t_l = ray_intersect_aabb(self.nodes[l].aabb_min, self.nodes[l].aabb_max, ray);
+                            let t_r = ray_intersect_aabb(self.nodes[r].aabb_min, self.nodes[r].aabb_max, ray);
+                            match (t_l, t_r) {
+                                (Some(tl), Some(tr)) => {
+                                    if tl < tr {
+                                        // Left is closer: push Right first so Left is popped and tested first
+                                        if tr < min_t && stack_len < 128 { stack[stack_len] = r; stack_len += 1; }
+                                        if tl < min_t && stack_len < 128 { stack[stack_len] = l; stack_len += 1; }
+                                    } else {
+                                        // Right is closer: push Left first so Right is popped and tested first
+                                        if tl < min_t && stack_len < 128 { stack[stack_len] = l; stack_len += 1; }
+                                        if tr < min_t && stack_len < 128 { stack[stack_len] = r; stack_len += 1; }
+                                    }
+                                }
+                                (Some(tl), None) => {
+                                    if tl < min_t && stack_len < 128 { stack[stack_len] = l; stack_len += 1; }
+                                }
+                                (None, Some(tr)) => {
+                                    if tr < min_t && stack_len < 128 { stack[stack_len] = r; stack_len += 1; }
+                                }
+                                (None, None) => {}
+                            }
                         }
-                    }
-                    if let Some(l) = node.left_child {
-                        if stack_len < 64 {
-                            stack[stack_len] = l;
-                            stack_len += 1;
+                        (Some(l), None) => {
+                            if stack_len < 128 { stack[stack_len] = l; stack_len += 1; }
                         }
+                        (None, Some(r)) => {
+                            if stack_len < 128 { stack[stack_len] = r; stack_len += 1; }
+                        }
+                        (None, None) => {}
                     }
                 }
             }
@@ -533,7 +567,15 @@ impl Mesh {
     }
 
     pub fn raycast(&self, ray: &Ray) -> Option<RayHit> {
-        self.bvh.raycast(ray, &self.vertices, &self.indices)
+        self.bvh.raycast_filtered(ray, &self.vertices, &self.indices, f32::MAX, None)
+    }
+
+    pub fn raycast_dist(&self, ray: &Ray, max_dist: f32) -> Option<RayHit> {
+        self.bvh.raycast_filtered(ray, &self.vertices, &self.indices, max_dist, None)
+    }
+
+    pub fn raycast_filtered(&self, ray: &Ray, max_dist: f32, allowed_triangles: Option<&HashSet<usize>>) -> Option<RayHit> {
+        self.bvh.raycast_filtered(ray, &self.vertices, &self.indices, max_dist, allowed_triangles)
     }
 
     /// Find which triangle in UV space contains the given (u, v) coordinates
@@ -2367,6 +2409,19 @@ f 1/1/1 3/3/1 4/4/1
         let quad_tris = cube.get_polygon_quad(0);
         assert_eq!(quad_tris.len(), 2, "Quad face should return 2 coplanar triangles");
         assert!(quad_tris.contains(&0) && quad_tris.contains(&1), "Quad face should contain triangles 0 and 1");
+    }
+
+    #[test]
+    fn test_bvh_raycast_closest_hit() {
+        let sphere = Mesh::create_sphere(1.0, 32, 16);
+        // Shoot ray from (0, 0, 5) toward (0, 0, 0)
+        let ray = Ray::new(glam::Vec3::new(0.0, 0.0, 5.0), glam::Vec3::new(0.0, 0.0, -1.0));
+        let hit = sphere.raycast(&ray);
+        assert!(hit.is_some(), "Expected ray to hit sphere");
+        let h = hit.unwrap();
+        // Since unit box normalization scales sphere, closest hit should be in front (+Z)
+        assert!(h.point.z > 0.0, "Expected front facing hit with z > 0, got {}", h.point.z);
+        assert!(h.normal.z > 0.8, "Normal should face toward +Z, got {}", h.normal.z);
     }
 }
 

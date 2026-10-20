@@ -196,6 +196,19 @@ impl FileExplorerDialog {
                     if downloads.exists() && ui.button("Downloads").clicked() {
                         self.set_dir(downloads);
                     }
+
+                    #[cfg(target_os = "windows")]
+                    {
+                        for drive in b'C'..=b'Z' {
+                            let drive_str = format!("{}:\\", drive as char);
+                            let drive_path = PathBuf::from(&drive_str);
+                            if drive_path.exists() {
+                                if ui.button(format!("{}:", drive as char)).clicked() {
+                                    self.set_dir(drive_path);
+                                }
+                            }
+                        }
+                    }
                 });
 
                 ui.separator();

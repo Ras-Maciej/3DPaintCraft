@@ -328,7 +328,7 @@ pub struct WgpuViewport {
     baked_tex_width: u32,
     baked_tex_height: u32,
     
-    gpu_compositor: crate::gpu_compositor::GpuCompositor,
+    pub gpu_compositor: crate::gpu_compositor::GpuCompositor,
     pub gpu_layers: Vec<crate::gpu_compositor::GpuLayer>,
     pub gpu_brush: crate::gpu_brush::GpuBrushEngine,
     pub submeshes: Vec<crate::mesh::SubMeshRange>,
@@ -1095,6 +1095,7 @@ impl WgpuViewport {
     }
 
     /// Dispatch hardware-accelerated 3D projection stamping on GPU compute cores
+    #[allow(dead_code)]
     pub fn stamp_3d_gpu(
         &mut self,
         active_layer_idx: usize,
@@ -2127,6 +2128,16 @@ impl WgpuViewport {
 
     pub fn clear_gpu_layers(&mut self) {
         self.gpu_layers.clear();
+    }
+
+    #[allow(dead_code)]
+    pub fn device(&self) -> Arc<wgpu::Device> {
+        Arc::clone(&self.device)
+    }
+
+    #[allow(dead_code)]
+    pub fn queue(&self) -> Arc<wgpu::Queue> {
+        Arc::clone(&self.queue)
     }
 }
 

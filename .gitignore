@@ -30,3 +30,9 @@ assets/hdris/*_2k.hdr
 assets/hdris/*_4k.hdr
 assets/hdris/*_8k.hdr
 assets/hdris/*_16k.hdr
+
+# Release archives & AppImages
+releases/
+*.AppImage
+*.tar.gz
+*.zip

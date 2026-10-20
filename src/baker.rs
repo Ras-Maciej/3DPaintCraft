@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use crate::channel::{RgbaBuffer, ScalarBuffer};
-use crate::mesh::{Mesh, Ray};
+use crate::mesh::{Bvh, Mesh, Ray};
 use glam::{Vec2, Vec3, Vec4};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -211,169 +211,6 @@ pub fn strip_mesh_suffix(name: &str, suffix: &str) -> String {
     }
 }
 
-struct SpatialHash {
-    cell_size: f32,
-    min_bound: Vec3,
-    cells: HashMap<[i32; 3], Vec<usize>>,
-}
-
-impl SpatialHash {
-    fn new(mesh: &Mesh) -> Self {
-        let mut min_bound = Vec3::splat(f32::MAX);
-        let mut max_bound = Vec3::splat(f32::MIN);
-        for v in &mesh.vertices {
-            min_bound = min_bound.min(v.position);
-            max_bound = max_bound.max(v.position);
-        }
-        
-        let extents = max_bound - min_bound;
-        let volume = extents.x * extents.y * extents.z;
-        let tri_count = mesh.indices.len() / 3;
-        
-        let cell_volume = volume / (tri_count as f32 / 10.0).max(1.0);
-        let cell_size = cell_volume.powf(1.0 / 3.0).max(0.005);
-        
-        let mut cells: HashMap<[i32; 3], Vec<usize>> = HashMap::new();
-        
-        for t in 0..tri_count {
-            let v0 = mesh.vertices[mesh.indices[t * 3] as usize].position;
-            let v1 = mesh.vertices[mesh.indices[t * 3 + 1] as usize].position;
-            let v2 = mesh.vertices[mesh.indices[t * 3 + 2] as usize].position;
-            
-            let t_min = v0.min(v1).min(v2);
-            let t_max = v0.max(v1).max(v2);
-            
-            let min_coord = [
-                ((t_min.x - min_bound.x) / cell_size).floor() as i32,
-                ((t_min.y - min_bound.y) / cell_size).floor() as i32,
-                ((t_min.z - min_bound.z) / cell_size).floor() as i32,
-            ];
-            let max_coord = [
-                ((t_max.x - min_bound.x) / cell_size).floor() as i32,
-                ((t_max.y - min_bound.y) / cell_size).floor() as i32,
-                ((t_max.z - min_bound.z) / cell_size).floor() as i32,
-            ];
-            
-            for z in min_coord[2]..=max_coord[2] {
-                for y in min_coord[1]..=max_coord[1] {
-                    for x in min_coord[0]..=max_coord[0] {
-                        cells.entry([x, y, z]).or_default().push(t);
-                    }
-                }
-            }
-        }
-        
-        Self { cell_size, cells, min_bound }
-    }
-
-    fn ray_triangle_intersect(orig: Vec3, dir: Vec3, v0: Vec3, v1: Vec3, v2: Vec3) -> Option<(f32, f32, f32)> {
-    let edge1 = v1 - v0;
-    let edge2 = v2 - v0;
-    let h = dir.cross(edge2);
-    let a = edge1.dot(h);
-    if a > -1e-5 && a < 1e-5 { return None; }
-    let f = 1.0 / a;
-    let s = orig - v0;
-    let u = f * s.dot(h);
-    if u < 0.0 || u > 1.0 { return None; }
-    let q = s.cross(edge1);
-    let v = f * dir.dot(q);
-    if v < 0.0 || u + v > 1.0 { return None; }
-    let t = f * edge2.dot(q);
-    if t > 1e-5 { Some((t, u, v)) } else { None }
-}
-
-    pub fn query_ray_closest_filtered(
-        &self,
-        origin: Vec3,
-        dir: Vec3,
-        max_dist: f32,
-        mesh: &Mesh,
-        allowed_triangles: Option<&HashSet<usize>>,
-    ) -> Option<(f32, Vec3)> {
-        let end_pos = origin + dir * max_dist;
-        let r_min = origin.min(end_pos);
-        let r_max = origin.max(end_pos);
-        
-        let min_coord = [
-            ((r_min.x - self.min_bound.x) / self.cell_size).floor() as i32,
-            ((r_min.y - self.min_bound.y) / self.cell_size).floor() as i32,
-            ((r_min.z - self.min_bound.z) / self.cell_size).floor() as i32,
-        ];
-        let max_coord = [
-            ((r_max.x - self.min_bound.x) / self.cell_size).floor() as i32,
-            ((r_max.y - self.min_bound.y) / self.cell_size).floor() as i32,
-            ((r_max.z - self.min_bound.z) / self.cell_size).floor() as i32,
-        ];
-
-        let mut closest_t = max_dist;
-        let mut best_normal = None;
-
-        // Track visited triangles to avoid duplicate ray-triangle intersection math
-        // across adjacent 3D spatial hash cells.
-        let mut visited_stack = [0usize; 64];
-        let mut visited_count = 0;
-        let mut visited_fallback: Option<HashSet<usize>> = None;
-
-        for z in min_coord[2]..=max_coord[2] {
-            for y in min_coord[1]..=max_coord[1] {
-                for x in min_coord[0]..=max_coord[0] {
-                    if let Some(triangles) = self.cells.get(&[x, y, z]) {
-                        for &t in triangles {
-                            if let Some(allowed) = allowed_triangles {
-                                if !allowed.contains(&t) {
-                                    continue;
-                                }
-                            }
-
-                            if visited_count < 64 {
-                                if visited_stack[..visited_count].contains(&t) {
-                                    continue;
-                                }
-                                visited_stack[visited_count] = t;
-                                visited_count += 1;
-                            } else {
-                                let set = visited_fallback.get_or_insert_with(|| {
-                                    let mut s = HashSet::with_capacity(128);
-                                    s.extend(&visited_stack);
-                                    s
-                                });
-                                if !set.insert(t) {
-                                    continue;
-                                }
-                            }
-
-                            let i0 = mesh.indices[t * 3] as usize;
-                            let i1 = mesh.indices[t * 3 + 1] as usize;
-                            let i2 = mesh.indices[t * 3 + 2] as usize;
-                            let v0 = mesh.vertices[i0].position;
-                            let v1 = mesh.vertices[i1].position;
-                            let v2 = mesh.vertices[i2].position;
-                            
-                            if let Some((t_hit, u, v)) = SpatialHash::ray_triangle_intersect(origin, dir, v0, v1, v2) {
-                                if t_hit > 0.0 && t_hit < closest_t {
-                                    closest_t = t_hit;
-                                    let n0 = mesh.vertices[i0].normal;
-                                    let n1 = mesh.vertices[i1].normal;
-                                    let n2 = mesh.vertices[i2].normal;
-                                    let n = (n0 * (1.0 - u - v) + n1 * u + n2 * v).normalize_or_zero();
-                                    best_normal = Some(n);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        
-        best_normal.map(|n| (closest_t, n))
-    }
-
-    #[allow(dead_code)]
-    pub fn query_ray_closest(&self, origin: Vec3, dir: Vec3, max_dist: f32, mesh: &Mesh) -> Option<(f32, Vec3)> {
-        self.query_ray_closest_filtered(origin, dir, max_dist, mesh, None)
-    }
-}
 
 
 pub struct Baker;
@@ -462,17 +299,11 @@ impl Baker {
         Self::bake_curvature_with_options(mesh, width, height, &CurvatureBakeConfig::default())
     }
 
-    /// Bake Curvature map with custom algorithm weights, intensity, contrast and blur passes
-    pub fn bake_curvature_with_options(
-        mesh: &Mesh,
-        width: u32,
-        height: u32,
-        config: &CurvatureBakeConfig,
-    ) -> ScalarBuffer {
-        let mut buffer = ScalarBuffer::new(width, height, 0.5);
+    /// Calculate signed dihedral curvature and normal deflection for all mesh vertices
+    pub fn compute_vertex_curvature(mesh: &Mesh, config: &CurvatureBakeConfig) -> Vec<f32> {
         let vert_count = mesh.vertices.len();
         if vert_count == 0 || mesh.indices.is_empty() {
-            return buffer;
+            return vec![0.5; vert_count];
         }
 
         let tri_count = mesh.indices.len() / 3;
@@ -633,6 +464,25 @@ impl Baker {
             canonical_curvature[i] = val;
         }
 
+        (0..vert_count).map(|vi| canonical_curvature[canonical_indices[vi]]).collect()
+    }
+
+    /// Bake Curvature map with custom algorithm weights, intensity, contrast and blur passes
+    pub fn bake_curvature_with_options(
+        mesh: &Mesh,
+        width: u32,
+        height: u32,
+        config: &CurvatureBakeConfig,
+    ) -> ScalarBuffer {
+        let mut buffer = ScalarBuffer::new(width, height, 0.5);
+        let vert_count = mesh.vertices.len();
+        if vert_count == 0 || mesh.indices.is_empty() {
+            return buffer;
+        }
+
+        let tri_count = mesh.indices.len() / 3;
+        let vert_curvature = Self::compute_vertex_curvature(mesh, config);
+
         // 7. Rasterize triangles into UV buffer with seam wrapping and mask tracking
         let mut written_mask = vec![false; (width * height) as usize];
         for t in 0..tri_count {
@@ -644,9 +494,9 @@ impl Baker {
             let uv1 = mesh.vertices[i1].uv;
             let uv2 = mesh.vertices[i2].uv;
 
-            let c0 = canonical_curvature[canonical_indices[i0]];
-            let c1 = canonical_curvature[canonical_indices[i1]];
-            let c2 = canonical_curvature[canonical_indices[i2]];
+            let c0 = vert_curvature[i0];
+            let c1 = vert_curvature[i1];
+            let c2 = vert_curvature[i2];
 
             Self::rasterize_scalar_triangle_masked(
                 &mut buffer,
@@ -662,42 +512,50 @@ impl Baker {
         // 9. Configurable Separable Gaussian Blur for smooth edge gradients
         let mut current_buf = buffer.clone();
         if config.blur_passes > 0 {
-            let w = width as i32;
-            let h = height as i32;
-            let weights = [0.06136f32, 0.24477, 0.38774, 0.24477, 0.06136];
-
-            for _ in 0..config.blur_passes {
-                let mut temp_h = current_buf.clone();
-                // Horizontal pass
-                for y in 0..h {
-                    for x in 0..w {
-                        let mut sum = 0.0f32;
-                        for (k, &wt) in weights.iter().enumerate() {
-                            let sample_x = (x + (k as i32 - 2)).clamp(0, w - 1) as u32;
-                            sum += current_buf.get_pixel(sample_x, y as u32) * wt;
-                        }
-                        temp_h.set_pixel(x as u32, y as u32, sum);
-                    }
-                }
-
-                // Vertical pass
-                for y in 0..h {
-                    for x in 0..w {
-                        let mut sum = 0.0f32;
-                        for (k, &wt) in weights.iter().enumerate() {
-                            let sample_y = (y + (k as i32 - 2)).clamp(0, h - 1) as u32;
-                            sum += temp_h.get_pixel(x as u32, sample_y) * wt;
-                        }
-                        current_buf.set_pixel(x as u32, y as u32, sum);
-                    }
-                }
-            }
+            Self::blur_scalar(&mut current_buf, config.blur_passes);
         }
 
         // 10. Dilate again so bilinear filtering outside UV borders is completely smooth
         Self::dilate_scalar(&mut current_buf, &mut written_mask, 16);
 
         current_buf
+    }
+
+    /// Apply Separable Gaussian Blur to a scalar buffer
+    pub fn blur_scalar(buffer: &mut ScalarBuffer, passes: usize) {
+        if passes == 0 {
+            return;
+        }
+        let w = buffer.width as i32;
+        let h = buffer.height as i32;
+        let weights = [0.06136f32, 0.24477, 0.38774, 0.24477, 0.06136];
+
+        for _ in 0..passes {
+            let mut temp_h = buffer.clone();
+            // Horizontal pass
+            for y in 0..h {
+                for x in 0..w {
+                    let mut sum = 0.0f32;
+                    for (k, &wt) in weights.iter().enumerate() {
+                        let sample_x = (x + (k as i32 - 2)).clamp(0, w - 1) as u32;
+                        sum += buffer.get_pixel(sample_x, y as u32) * wt;
+                    }
+                    temp_h.set_pixel(x as u32, y as u32, sum);
+                }
+            }
+
+            // Vertical pass
+            for y in 0..h {
+                for x in 0..w {
+                    let mut sum = 0.0f32;
+                    for (k, &wt) in weights.iter().enumerate() {
+                        let sample_y = (y + (k as i32 - 2)).clamp(0, h - 1) as u32;
+                        sum += temp_h.get_pixel(x as u32, sample_y) * wt;
+                    }
+                    buffer.set_pixel(x as u32, y as u32, sum);
+                }
+            }
+        }
     }
 
     /// Bake Ambient Occlusion map via Monte Carlo Hemisphere Occlusion with smoothed normal consideration
@@ -717,18 +575,16 @@ impl Baker {
         Self::bake_ao_with_options(mesh, width, height, cage_config, &AoBakeConfig::default())
     }
 
-    /// Bake Ambient Occlusion map with customizable samples, distances, bias, spread and contrast
-    pub fn bake_ao_with_options(
+    /// Calculate Ambient Occlusion per vertex using Monte Carlo hemisphere raycasting against mesh BVH
+    pub fn compute_vertex_ao(
         mesh: &Mesh,
-        width: u32,
-        height: u32,
         cage_config: &BakeCageConfig,
         ao_config: &AoBakeConfig,
-    ) -> Result<ScalarBuffer, String> {
-        let mut buffer = ScalarBuffer::new(width, height, 1.0);
+    ) -> Result<Vec<f32>, String> {
         let tri_count = mesh.indices.len() / 3;
-        if tri_count == 0 || mesh.vertices.is_empty() {
-            return Ok(buffer);
+        let vert_count = mesh.vertices.len();
+        if tri_count == 0 || vert_count == 0 {
+            return Ok(vec![1.0; vert_count]);
         }
 
         let cage_verts = Self::compute_cage_vertices(mesh, cage_config)?;
@@ -777,7 +633,7 @@ impl Baker {
                     origin,
                     direction: world_dir,
                 };
-                if let Some(hit) = mesh.raycast(&ray) {
+                if let Some(hit) = mesh.raycast_dist(&ray, max_dist) {
                     // Only count valid occlusions:
                     // 1. Must be a front-facing hit surface: hit.normal must oppose ray direction
                     // 2. Reject self-intersections on convex curved facets:
@@ -805,6 +661,25 @@ impl Baker {
 
             (unoccluded / sample_count as f32).clamp(0.05, 1.0)
         }).collect();
+
+        Ok(vert_ao)
+    }
+
+    /// Bake Ambient Occlusion map with customizable samples, distances, bias, spread and contrast
+    pub fn bake_ao_with_options(
+        mesh: &Mesh,
+        width: u32,
+        height: u32,
+        cage_config: &BakeCageConfig,
+        ao_config: &AoBakeConfig,
+    ) -> Result<ScalarBuffer, String> {
+        let mut buffer = ScalarBuffer::new(width, height, 1.0);
+        let tri_count = mesh.indices.len() / 3;
+        if tri_count == 0 || mesh.vertices.is_empty() {
+            return Ok(buffer);
+        }
+
+        let vert_ao = Self::compute_vertex_ao(mesh, cage_config, ao_config)?;
 
         let mut written_mask = vec![false; (width * height) as usize];
         for t in 0..tri_count {
@@ -890,7 +765,17 @@ impl Baker {
         let cage_vertices = Self::compute_cage_vertices(mesh, cage_config)?;
         let has_cage = cage_vertices.is_some();
 
-        let spatial_hash = high_poly.map(|hp| SpatialHash::new(hp));
+        let fallback_bvh;
+        let hp_bvh = if let Some(hp) = high_poly {
+            if hp.bvh.nodes.is_empty() {
+                fallback_bvh = Some(Bvh::build(&hp.vertices, &hp.indices));
+                fallback_bvh.as_ref()
+            } else {
+                Some(&hp.bvh)
+            }
+        } else {
+            None
+        };
 
         // Generate position, normal, tangent, cage and triangle index raster buffers for Low Poly
         let mut pos_buf = vec![None; (width * height) as usize];
@@ -976,41 +861,45 @@ impl Baker {
                 for x in 0..width {
                     let idx = (y * width + x) as usize;
                     if let (Some(pos), Some(norm)) = (p_buf[idx], n_buf[idx]) {
-                        if let Some(hp) = high_poly {
-                            if let Some(hash) = &spatial_hash {
-                                // When cage buffer is present, ray originates from cage envelope down to low-poly
-                                let (ray_orig, ray_dir, max_ray_dist) = if let Some(cage_pos) = cage_ref.and_then(|cb| cb[idx]) {
-                                    let to_mesh = pos - cage_pos;
-                                    let dist_to_surface = to_mesh.length();
-                                    if dist_to_surface > 1e-6 {
-                                        let dir = to_mesh / dist_to_surface;
-                                        (cage_pos, dir, dist_to_surface + rear_dist)
-                                    } else {
-                                        (pos + norm * frontal_dist, -norm, frontal_dist + rear_dist)
-                                    }
+                        if let (Some(hp), Some(bvh)) = (high_poly, hp_bvh) {
+                            // When cage buffer is present, ray originates from cage envelope down to low-poly
+                            let (ray_orig, ray_dir, max_ray_dist) = if let Some(cage_pos) = cage_ref.and_then(|cb| cb[idx]) {
+                                let to_mesh = pos - cage_pos;
+                                let dist_to_surface = to_mesh.length();
+                                if dist_to_surface > 1e-6 {
+                                    let dir = to_mesh / dist_to_surface;
+                                    (cage_pos, dir, dist_to_surface + rear_dist)
                                 } else {
                                     (pos + norm * frontal_dist, -norm, frontal_dist + rear_dist)
-                                };
+                                }
+                            } else {
+                                (pos + norm * frontal_dist, -norm, frontal_dist + rear_dist)
+                            };
 
-                                let allowed = if match_config.mode == BakeMatchMode::ByMeshName {
-                                    tr_buf[idx].and_then(|t| mesh.submesh_index_for_triangle(t))
-                                        .and_then(|sm_idx| submesh_allowed.get(sm_idx))
-                                        .and_then(|opt| opt.as_ref())
-                                } else {
-                                    None
-                                };
+                            let allowed = if match_config.mode == BakeMatchMode::ByMeshName {
+                                tr_buf[idx].and_then(|t| mesh.submesh_index_for_triangle(t))
+                                    .and_then(|sm_idx| submesh_allowed.get(sm_idx))
+                                    .and_then(|opt| opt.as_ref())
+                            } else {
+                                None
+                            };
 
-                                if let Some((_, hp_norm)) = hash.query_ray_closest_filtered(ray_orig, ray_dir, max_ray_dist, hp, allowed) {
-                                    if let Some(tan) = t_buf[idx] {
-                                        let n = norm.normalize_or_zero();
-                                        let t = (tan.truncate() - n * n.dot(tan.truncate())).normalize_or_zero();
-                                        let tw = if tan.w < 0.0 { -1.0 } else { 1.0 };
-                                        let b = n.cross(t) * tw;
-                                        let ts_norm = Vec3::new(hp_norm.dot(t), hp_norm.dot(b), hp_norm.dot(n)).normalize_or_zero();
-                                        let ny = if invert_green { -ts_norm.y } else { ts_norm.y };
-                                        row[x as usize] = Vec4::new(ts_norm.x * 0.5 + 0.5, ny * 0.5 + 0.5, ts_norm.z * 0.5 + 0.5, 1.0);
-                                        continue;
-                                    }
+                            let ray = Ray {
+                                origin: ray_orig,
+                                direction: ray_dir,
+                            };
+
+                            if let Some(hit) = bvh.raycast_filtered(&ray, &hp.vertices, &hp.indices, max_ray_dist, allowed) {
+                                if let Some(tan) = t_buf[idx] {
+                                    let hp_norm = hit.normal;
+                                    let n = norm.normalize_or_zero();
+                                    let t = (tan.truncate() - n * n.dot(tan.truncate())).normalize_or_zero();
+                                    let tw = if tan.w < 0.0 { -1.0 } else { 1.0 };
+                                    let b = n.cross(t) * tw;
+                                    let ts_norm = Vec3::new(hp_norm.dot(t), hp_norm.dot(b), hp_norm.dot(n)).normalize_or_zero();
+                                    let ny = if invert_green { -ts_norm.y } else { ts_norm.y };
+                                    row[x as usize] = Vec4::new(ts_norm.x * 0.5 + 0.5, ny * 0.5 + 0.5, ts_norm.z * 0.5 + 0.5, 1.0);
+                                    continue;
                                 }
                             }
                         }
@@ -1287,18 +1176,17 @@ impl Baker {
         Self::bake_thickness_with_options(mesh, width, height, cage_config, &ThicknessBakeConfig::default())
     }
 
-    /// Bake Surface Thickness map with customizable sample count, ray reach, bias, and invert option
-    pub fn bake_thickness_with_options(
+    /// Calculate Surface Thickness per vertex using inward hemisphere raycasting against the mesh BVH
+    pub fn compute_vertex_thickness(
         mesh: &Mesh,
-        width: u32,
-        height: u32,
         cage_config: &BakeCageConfig,
         config: &ThicknessBakeConfig,
-    ) -> Result<ScalarBuffer, String> {
-        let mut buffer = ScalarBuffer::new(width, height, 1.0);
+    ) -> Result<Vec<f32>, String> {
         let tri_count = mesh.indices.len() / 3;
-        if tri_count == 0 || mesh.vertices.is_empty() {
-            return Ok(buffer);
+        let vert_count = mesh.vertices.len();
+        if tri_count == 0 || vert_count == 0 {
+            let default_val = if config.invert { 1.0 } else { 0.0 };
+            return Ok(vec![default_val; vert_count]);
         }
 
         let cage_verts = Self::compute_cage_vertices(mesh, cage_config)?;
@@ -1353,7 +1241,7 @@ impl Baker {
                     direction: inward_dir,
                 };
 
-                if let Some(hit) = mesh.raycast(&ray) {
+                if let Some(hit) = mesh.raycast_dist(&ray, max_dist) {
                     if hit.t > min_self_dist && hit.t < max_dist {
                         accum_dist += hit.t;
                     } else if hit.t >= max_dist {
@@ -1369,8 +1257,33 @@ impl Baker {
             }
 
             let avg_dist = accum_dist / (sample_count as f32);
-            (avg_dist / max_dist).clamp(0.0, 1.0)
+            let val = (avg_dist / max_dist).clamp(0.0, 1.0);
+            if config.invert {
+                1.0 - val
+            } else {
+                val
+            }
         }).collect();
+
+        Ok(vert_thickness)
+    }
+
+    /// Bake Surface Thickness map with customizable sample count, ray reach, bias, and invert option
+    pub fn bake_thickness_with_options(
+        mesh: &Mesh,
+        width: u32,
+        height: u32,
+        cage_config: &BakeCageConfig,
+        config: &ThicknessBakeConfig,
+    ) -> Result<ScalarBuffer, String> {
+        let default_val = if config.invert { 0.0 } else { 1.0 };
+        let mut buffer = ScalarBuffer::new(width, height, default_val);
+        let tri_count = mesh.indices.len() / 3;
+        if tri_count == 0 || mesh.vertices.is_empty() {
+            return Ok(buffer);
+        }
+
+        let vert_thickness = Self::compute_vertex_thickness(mesh, cage_config, config)?;
 
         let mut written_mask = vec![false; (width * height) as usize];
         for t in 0..tri_count {
@@ -1391,9 +1304,6 @@ impl Baker {
         }
 
         Self::dilate_scalar(&mut buffer, &mut written_mask, 16);
-        if config.invert {
-            buffer.invert();
-        }
         Ok(buffer)
     }
 
@@ -1462,86 +1372,110 @@ impl Baker {
     }
     
     fn dilate_rgba(buffer: &mut RgbaBuffer, pos_buf: &[Option<Vec3>]) {
-        let original = buffer.data.clone();
         let width = buffer.width as usize;
         let height = buffer.height as usize;
-        let r = 16isize;
+        if width == 0 || height == 0 {
+            return;
+        }
 
-        buffer.data
-            .par_chunks_exact_mut(width)
-            .enumerate()
-            .for_each(|(y_idx, row)| {
-                let y = y_idx;
-                let min_dy = (y as isize - r).max(0) as usize;
-                let max_dy = (y as isize + r).min(height as isize - 1) as usize;
+        let mut current_data = buffer.data.clone();
+        let mut current_valid: Vec<bool> = pos_buf.iter().map(|p| p.is_some()).collect();
+        let mut next_data = current_data.clone();
+        let mut next_valid = current_valid.clone();
 
-                for x in 0..width {
-                    let idx = y * width + x;
-                    if pos_buf[idx].is_none() {
-                        let mut nearest_val = Vec4::new(0.5, 0.5, 1.0, 1.0);
-                        let mut min_dist = 99999isize;
-                        let min_dx = (x as isize - r).max(0) as usize;
-                        let max_dx = (x as isize + r).min(width as isize - 1) as usize;
+        for _ in 0..16 {
+            let any_updated = std::sync::atomic::AtomicBool::new(false);
 
-                        for sy in min_dy..=max_dy {
-                            let row_offset = sy * width;
-                            for sx in min_dx..=max_dx {
-                                let sidx = row_offset + sx;
-                                if pos_buf[sidx].is_some() {
-                                    let dist = (x as isize - sx as isize).pow(2) + (y as isize - sy as isize).pow(2);
-                                    if dist < min_dist {
-                                        min_dist = dist;
-                                        nearest_val = original[sidx];
+            next_data
+                .par_chunks_mut(width)
+                .zip(next_valid.par_chunks_mut(width))
+                .enumerate()
+                .for_each(|(y, (data_row, valid_row))| {
+                    for x in 0..width {
+                        let idx = y * width + x;
+                        if !current_valid[idx] {
+                            for (dx, dy) in [(-1isize, 0isize), (1, 0), (0, -1), (0, 1)] {
+                                let nx = x as isize + dx;
+                                let ny = y as isize + dy;
+                                if nx >= 0 && nx < width as isize && ny >= 0 && ny < height as isize {
+                                    let nidx = (ny as usize) * width + (nx as usize);
+                                    if current_valid[nidx] {
+                                        data_row[x] = current_data[nidx];
+                                        valid_row[x] = true;
+                                        any_updated.store(true, std::sync::atomic::Ordering::Relaxed);
+                                        break;
                                     }
                                 }
                             }
                         }
-                        row[x] = nearest_val;
                     }
-                }
-            });
-    }
+                });
 
+            if !any_updated.load(std::sync::atomic::Ordering::Relaxed) {
+                break;
+            }
+            current_data.copy_from_slice(&next_data);
+            current_valid.copy_from_slice(&next_valid);
+        }
+
+        buffer.data = current_data;
+    }
 
     /// Dilate scalar buffer by expanding valid mask pixels into empty UV background
     fn dilate_scalar(buffer: &mut ScalarBuffer, mask: &mut [bool], passes: usize) {
         let w = buffer.width as usize;
         let h = buffer.height as usize;
-        let offsets: [(isize, isize); 4] = [(-1, 0), (1, 0), (0, -1), (0, 1)];
+        if w == 0 || h == 0 || passes == 0 {
+            return;
+        }
 
-        for _ in 0..passes {
-            let mut writes = Vec::new();
-            for y in 0..h {
-                for x in 0..w {
-                    let idx = y * w + x;
-                    if !mask[idx] {
-                        let mut sum = 0.0f32;
-                        let mut count = 0usize;
-                        for &(dx, dy) in &offsets {
-                            let nx = x as isize + dx;
-                            let ny = y as isize + dy;
-                            if nx >= 0 && nx < w as isize && ny >= 0 && ny < h as isize {
-                                let nidx = (ny as usize) * w + (nx as usize);
-                                if mask[nidx] {
-                                    sum += buffer.data[nidx];
-                                    count += 1;
+        let mut current_data = buffer.data.clone();
+        let mut current_mask = mask.to_vec();
+        let mut next_data = current_data.clone();
+        let mut next_mask = current_mask.clone();
+
+        for _ in 0..passes.min(16) {
+            let any_updated = std::sync::atomic::AtomicBool::new(false);
+
+            next_data
+                .par_chunks_mut(w)
+                .zip(next_mask.par_chunks_mut(w))
+                .enumerate()
+                .for_each(|(y, (data_row, mask_row))| {
+                    for x in 0..w {
+                        let idx = y * w + x;
+                        if !current_mask[idx] {
+                            let mut sum = 0.0f32;
+                            let mut count = 0usize;
+                            for (dx, dy) in [(-1isize, 0isize), (1, 0), (0, -1), (0, 1)] {
+                                let nx = x as isize + dx;
+                                let ny = y as isize + dy;
+                                if nx >= 0 && nx < w as isize && ny >= 0 && ny < h as isize {
+                                    let nidx = (ny as usize) * w + (nx as usize);
+                                    if current_mask[nidx] {
+                                        sum += current_data[nidx];
+                                        count += 1;
+                                    }
                                 }
                             }
-                        }
-                        if count > 0 {
-                            writes.push((idx, sum / count as f32));
+                            if count > 0 {
+                                data_row[x] = sum / count as f32;
+                                mask_row[x] = true;
+                                any_updated.store(true, std::sync::atomic::Ordering::Relaxed);
+                            }
                         }
                     }
-                }
-            }
-            if writes.is_empty() {
+                });
+
+            if !any_updated.load(std::sync::atomic::Ordering::Relaxed) {
                 break;
             }
-            for (idx, val) in writes {
-                buffer.data[idx] = val;
-                mask[idx] = true;
-            }
+            current_data.copy_from_slice(&next_data);
+            current_mask.copy_from_slice(&next_mask);
         }
+
+        buffer.data = current_data;
+        mask.copy_from_slice(&current_mask);
     }
 
     /// Helper to rasterize a triangle in UV space for scalar buffers with seam handling and mask
@@ -2140,6 +2074,94 @@ mod tests {
             },
         );
         assert_eq!(pos_world.width, 16);
+    }
+
+    #[test]
+    fn test_rebake_mesh_maps_stability() {
+        let cube = Mesh::create_cube_mesh("RebakeTestCube", 1.0);
+
+        // Run all bakes once
+        let n1 = Baker::bake_tangent_normals_with_match(&cube, None, 0.1, 0.1, 32, 32, &BakeMatchConfig::default());
+        let wn1 = Baker::bake_world_space_normal(&cube, 32, 32);
+        let ao1 = Baker::bake_ao(&cube, 32, 32);
+        let curv1 = Baker::bake_curvature(&cube, 32, 32);
+        let pos1 = Baker::bake_position(&cube, 32, 32);
+        let th1 = Baker::bake_thickness(&cube, 32, 32);
+        let id1 = Baker::bake_id_map(&cube, 32, 32);
+
+        // Rebake (second pass immediately following)
+        let n2 = Baker::bake_tangent_normals_with_match(&cube, None, 0.1, 0.1, 32, 32, &BakeMatchConfig::default());
+        let wn2 = Baker::bake_world_space_normal(&cube, 32, 32);
+        let ao2 = Baker::bake_ao(&cube, 32, 32);
+        let curv2 = Baker::bake_curvature(&cube, 32, 32);
+        let pos2 = Baker::bake_position(&cube, 32, 32);
+        let th2 = Baker::bake_thickness(&cube, 32, 32);
+        let id2 = Baker::bake_id_map(&cube, 32, 32);
+
+        assert_eq!(n1.width, n2.width);
+        assert_eq!(wn1.width, wn2.width);
+        assert_eq!(ao1.data.len(), ao2.data.len());
+        assert_eq!(curv1.data.len(), curv2.data.len());
+        assert_eq!(pos1.data.len(), pos2.data.len());
+        assert_eq!(th1.data.len(), th2.data.len());
+        assert_eq!(id1.data.len(), id2.data.len());
+    }
+
+    #[test]
+    fn test_large_ray_distance_baking_performance() {
+        let low_cube = Mesh::create_cube_mesh("LowCube", 1.0);
+        let high_sphere = Mesh::create_sphere(1.0, 32, 24);
+
+        let start = std::time::Instant::now();
+
+        // Bake tangent normal with max slider ray distances (frontal = 0.5, rear = 0.5)
+        let normal_map = Baker::bake_tangent_normals_with_match(
+            &low_cube,
+            Some(&high_sphere),
+            0.5,
+            0.5,
+            64,
+            64,
+            &BakeMatchConfig::default(),
+        );
+
+        // Bake AO with large max_distance (2.0)
+        let ao_map = Baker::bake_ao_with_options(
+            &high_sphere,
+            32,
+            32,
+            &BakeCageConfig::default(),
+            &AoBakeConfig {
+                samples: 16,
+                max_distance: 2.0,
+                ray_bias: 0.01,
+                spread: 1.0,
+                contrast: 1.0,
+            },
+        ).expect("AO with large distance should succeed");
+
+        // Bake Thickness with large max_distance (2.0)
+        let thick_map = Baker::bake_thickness_with_options(
+            &high_sphere,
+            32,
+            32,
+            &BakeCageConfig::default(),
+            &ThicknessBakeConfig {
+                samples: 16,
+                max_distance: 2.0,
+                ray_bias: 0.01,
+                invert: false,
+            },
+        ).expect("Thickness with large distance should succeed");
+
+        let duration = start.elapsed();
+
+        assert_eq!(normal_map.width, 64);
+        assert_eq!(ao_map.width, 32);
+        assert_eq!(thick_map.width, 32);
+
+        // The operation must complete in well under 3 seconds, proving no volumetric O(D^3) hang
+        assert!(duration.as_secs_f32() < 3.0, "Large ray distance bake took {:?}, must complete rapidly!", duration);
     }
 }
 
