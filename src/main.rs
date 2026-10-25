@@ -171,14 +171,14 @@ fn main() -> Result<(), eframe::Error> {
     wgpu_options.device_descriptor = std::sync::Arc::new(|adapter| {
         let mut desc = eframe::wgpu::DeviceDescriptor::default();
         desc.required_features |= eframe::wgpu::Features::FLOAT32_FILTERABLE;
-        if adapter.features().contains(eframe::wgpu::Features::TIMESTAMP_QUERY) {
-            desc.required_features |= eframe::wgpu::Features::TIMESTAMP_QUERY;
-        }
-        if adapter.features().contains(eframe::wgpu::Features::TIMESTAMP_QUERY_INSIDE_PASSES) {
-            desc.required_features |= eframe::wgpu::Features::TIMESTAMP_QUERY_INSIDE_PASSES;
-        }
-        if adapter.features().contains(eframe::wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS) {
-            desc.required_features |= eframe::wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;
+        let disable_hw_timestamps = std::env::var("PAINTCRAFT_NO_HW_TIMESTAMPS").map(|v| v == "1" || v == "true").unwrap_or(false);
+        if !disable_hw_timestamps {
+            if adapter.features().contains(eframe::wgpu::Features::TIMESTAMP_QUERY) {
+                desc.required_features |= eframe::wgpu::Features::TIMESTAMP_QUERY;
+            }
+            if adapter.features().contains(eframe::wgpu::Features::TIMESTAMP_QUERY_INSIDE_PASSES) {
+                desc.required_features |= eframe::wgpu::Features::TIMESTAMP_QUERY_INSIDE_PASSES;
+            }
         }
         desc
     });

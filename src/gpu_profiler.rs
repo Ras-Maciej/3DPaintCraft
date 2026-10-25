@@ -55,17 +55,14 @@ pub struct GpuProfiler {
     cpu_compositing_ms: f32,
 }
 
-// Query slot mapping (8 total query slots)
-const QUERY_SLOT_PBR_START: u32 = 0;
-const QUERY_SLOT_PBR_END: u32 = 1;
-const QUERY_SLOT_POSTPROCESS_START: u32 = 2;
-const QUERY_SLOT_POSTPROCESS_END: u32 = 3;
-const QUERY_SLOT_COMPUTE_START: u32 = 4;
-const QUERY_SLOT_COMPUTE_END: u32 = 5;
-const QUERY_SLOT_COMPOSITE_START: u32 = 6;
-const QUERY_SLOT_COMPOSITE_END: u32 = 7;
-const TOTAL_QUERY_COUNT: u32 = 8;
-const BUFFER_SIZE_BYTES: u64 = (TOTAL_QUERY_COUNT as u64) * 8; // 8 x u64 = 64 bytes
+// Query slot mapping for 3D Viewport rendering (4 total query slots: PBR + PostProcess)
+pub const QUERY_SLOT_PBR_START: u32 = 0;
+pub const QUERY_SLOT_PBR_END: u32 = 1;
+pub const QUERY_SLOT_POSTPROCESS_START: u32 = 2;
+pub const QUERY_SLOT_POSTPROCESS_END: u32 = 3;
+pub const VIEWPORT_QUERY_COUNT: u32 = 4;
+pub const TOTAL_QUERY_COUNT: u32 = 4;
+pub const BUFFER_SIZE_BYTES: u64 = (TOTAL_QUERY_COUNT as u64) * 8; // 4 x u64 = 32 bytes
 
 impl GpuProfiler {
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, _adapter: &wgpu::Adapter) -> Self {
@@ -153,22 +150,18 @@ impl GpuProfiler {
                     {
                         let view = staging.buffer.slice(..).get_mapped_range();
                         let raw_timestamps: &[u64] = bytemuck::cast_slice(&view);
-                        if raw_timestamps.len() >= TOTAL_QUERY_COUNT as usize {
+                        if raw_timestamps.len() >= VIEWPORT_QUERY_COUNT as usize {
                             let t0 = raw_timestamps[QUERY_SLOT_PBR_START as usize];
                             let t1 = raw_timestamps[QUERY_SLOT_PBR_END as usize];
                             let t2 = raw_timestamps[QUERY_SLOT_POSTPROCESS_START as usize];
                             let t3 = raw_timestamps[QUERY_SLOT_POSTPROCESS_END as usize];
-                            let t4 = raw_timestamps[QUERY_SLOT_COMPUTE_START as usize];
-                            let t5 = raw_timestamps[QUERY_SLOT_COMPUTE_END as usize];
-                            let t6 = raw_timestamps[QUERY_SLOT_COMPOSITE_START as usize];
-                            let t7 = raw_timestamps[QUERY_SLOT_COMPOSITE_END as usize];
 
                             let period = hw.timestamp_period_ns as f64 / 1_000_000.0; // ns to ms factor
 
                             let pbr_ms = if t1 > t0 { ((t1 - t0) as f64 * period) as f32 } else { 0.0 };
                             let pp_ms = if t3 > t2 { ((t3 - t2) as f64 * period) as f32 } else { 0.0 };
-                            let comp_brush_ms = if t5 > t4 { ((t5 - t4) as f64 * period) as f32 } else { 0.0 };
-                            let compositing_ms = if t7 > t6 { ((t7 - t6) as f64 * period) as f32 } else { 0.0 };
+                            let comp_brush_ms = self.cpu_compute_brush_ms;
+                            let compositing_ms = self.cpu_compositing_ms;
 
                             self.timings.pbr_pass_ms = pbr_ms;
                             self.timings.postprocess_pass_ms = pp_ms;
@@ -237,11 +230,7 @@ impl GpuProfiler {
 
     /// Provides ComputePassTimestampWrites for GPU Compute Brush Stamping.
     pub fn compute_brush_timestamp_writes(&self) -> Option<wgpu::ComputePassTimestampWrites<'_>> {
-        self.hardware.as_ref().map(|hw| wgpu::ComputePassTimestampWrites {
-            query_set: &hw.query_set,
-            beginning_of_pass_write_index: Some(QUERY_SLOT_COMPUTE_START),
-            end_of_pass_write_index: Some(QUERY_SLOT_COMPUTE_END),
-        })
+        None
     }
 
     /// Resolves the query set and copies timestamp data into the active staging buffer if it is unmapped and idle.
