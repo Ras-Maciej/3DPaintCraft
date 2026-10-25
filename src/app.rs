@@ -2064,7 +2064,21 @@ impl PaintcraftApp {
                                     .show(ui, |ui| {
                                         ui.label(egui::RichText::new("Output Directory:").strong());
                                         ui.horizontal(|ui| {
-                                            ui.add(egui::TextEdit::singleline(&mut self.export_dir).desired_width(280.0));
+                                            ui.add(egui::TextEdit::singleline(&mut self.export_dir).desired_width(230.0));
+                                            if ui.button("Browse...").on_hover_text("Select export output directory using system folder picker").clicked() {
+                                                let initial_dir = PathBuf::from(&self.export_dir);
+                                                let mut dialog = rfd::FileDialog::new().set_title("Select Export Directory");
+                                                if initial_dir.is_dir() {
+                                                    dialog = dialog.set_directory(&initial_dir);
+                                                } else if let Some(parent) = initial_dir.parent() {
+                                                    if parent.is_dir() {
+                                                        dialog = dialog.set_directory(parent);
+                                                    }
+                                                }
+                                                if let Some(folder) = dialog.pick_folder() {
+                                                    self.export_dir = folder.to_string_lossy().to_string();
+                                                }
+                                            }
                                             if ui.button("Open Folder").on_hover_text("Open export folder in system file manager").clicked() {
                                                 let p = PathBuf::from(&self.export_dir);
                                                 let _ = std::fs::create_dir_all(&p);
@@ -2726,6 +2740,20 @@ impl PaintcraftApp {
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 if ui.button("Clear Log").clicked() {
                                     self.export_last_exported_files.clear();
+                                }
+                                if ui.button("Browse...").on_hover_text("Select destination folder using system file dialog").clicked() {
+                                    let initial_dir = PathBuf::from(&self.export_dir);
+                                    let mut dialog = rfd::FileDialog::new().set_title("Select Export Directory");
+                                    if initial_dir.is_dir() {
+                                        dialog = dialog.set_directory(&initial_dir);
+                                    } else if let Some(parent) = initial_dir.parent() {
+                                        if parent.is_dir() {
+                                            dialog = dialog.set_directory(parent);
+                                        }
+                                    }
+                                    if let Some(folder) = dialog.pick_folder() {
+                                        self.export_dir = folder.to_string_lossy().to_string();
+                                    }
                                 }
                                 if ui.button("Open Destination Folder").clicked() {
                                     let p = PathBuf::from(&self.export_dir);
@@ -10052,6 +10080,21 @@ mod tests {
         assert!(layout.texture_sets_collapsed);
         assert!(layout.layers_collapsed);
         assert!(layout.properties_collapsed);
+    }
+
+    #[test]
+    fn test_export_directory_selection_and_validation() {
+        let temp_dir = std::env::temp_dir().join("test_custom_export_destination");
+        let _ = std::fs::create_dir_all(&temp_dir);
+
+        let mut export_dir = temp_dir.to_string_lossy().to_string();
+        assert!(PathBuf::from(&export_dir).is_dir());
+
+        let sub_dir = temp_dir.join("sub_textures");
+        export_dir = sub_dir.to_string_lossy().to_string();
+        assert_eq!(export_dir, sub_dir.to_string_lossy().to_string());
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }
 
