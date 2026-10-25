@@ -619,7 +619,7 @@ impl GpuBrushEngine {
         };
 
         // 2. Staging Normal (RGBA32Float)
-        let staging_normal = if channels.normal {
+        let staging_normal = if channels.normal || channels.height {
             num_mappings += 1;
             let buf = self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("Staging Normal"),
@@ -817,6 +817,10 @@ impl GpuBrushEngine {
         if let Some(buf) = &batch.staging_normal {
             let slice = buf.slice(..);
             let mapped = slice.get_mapped_range();
+            cpu_layer.normal_buf.ensure_allocated();
+            if batch.channels.height {
+                cpu_layer.height_buf.ensure_allocated();
+            }
             for y in 0..rect_h {
                 let src_start = (y * batch.padded_bytes_rgba) as usize;
                 let src_end = src_start + batch.unpadded_bytes_rgba as usize;
@@ -824,9 +828,13 @@ impl GpuBrushEngine {
                 let float_slice: &[f32] = bytemuck::cast_slice(row_bytes);
                 let dst_row_start = (min_y + y) as usize * layer_w + min_x as usize;
                 for (i, chunk) in float_slice.chunks_exact(4).enumerate() {
-                    if dst_row_start + i < cpu_layer.normal_buf.data.len() {
-                        cpu_layer.normal_buf.data[dst_row_start + i] =
+                    let idx = dst_row_start + i;
+                    if idx < cpu_layer.normal_buf.data.len() {
+                        cpu_layer.normal_buf.data[idx] =
                             glam::Vec4::new(chunk[0], chunk[1], chunk[2], chunk[3]);
+                    }
+                    if batch.channels.height && idx < cpu_layer.height_buf.data.len() {
+                        cpu_layer.height_buf.data[idx] = chunk[3];
                     }
                 }
             }
@@ -877,7 +885,7 @@ impl GpuBrushEngine {
             color: batch.channels.base_color,
             roughness: batch.channels.roughness,
             metallic: batch.channels.metallic,
-            normal: batch.channels.normal,
+            normal: batch.channels.normal || batch.channels.height,
             mask: false,
         };
 

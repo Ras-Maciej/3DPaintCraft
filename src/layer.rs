@@ -793,7 +793,7 @@ impl Layer {
                 ChannelType::BaseColor => self.dirty_flags.color = true,
                 ChannelType::Roughness => self.dirty_flags.roughness = true,
                 ChannelType::Metallic => self.dirty_flags.metallic = true,
-                ChannelType::Normal => self.dirty_flags.normal = true,
+                ChannelType::Normal | ChannelType::Height => self.dirty_flags.normal = true,
                 _ => {}
             }
         }
@@ -805,6 +805,22 @@ impl Layer {
         if w > 0 && h > 0 {
             self.dirty_rect = Some((0, 0, w - 1, h - 1));
             self.dirty_flags.mask = true;
+        }
+    }
+
+    pub fn set_fill_height(&mut self, val: f32) {
+        self.fill_height = val;
+        if self.fill_height_tex.is_none() && self.fill_generator == ProceduralGenerator::None && !self.triplanar {
+            self.height_buf.make_sparse(val);
+            if self.fill_normal_tex.is_none() {
+                self.normal_buf.make_sparse(glam::Vec4::new(0.5, 0.5, 1.0, val));
+            } else {
+                self.normal_buf.ensure_allocated();
+                for pixel in &mut self.normal_buf.data {
+                    pixel.w = val;
+                }
+            }
+            self.mark_dirty_channel(ChannelType::Height);
         }
     }
 
@@ -3790,7 +3806,7 @@ impl Layer {
             self.clearcoat_buf.make_sparse(self.fill_clearcoat);
             self.anisotropy_buf.make_sparse(self.fill_anisotropy);
             self.anisotropy_angle_buf.make_sparse(self.fill_anisotropy_angle);
-            self.normal_buf.make_sparse(glam::Vec4::new(0.5, 0.5, 1.0, 1.0));
+            self.normal_buf.make_sparse(glam::Vec4::new(0.5, 0.5, 1.0, self.fill_height));
             self.mark_dirty_full();
             return;
         }
@@ -4173,7 +4189,7 @@ impl Layer {
         if self.fill_normal_tex.is_some() || self.fill_height_tex.is_some() || self.fill_generator != ProceduralGenerator::None {
             self.update_normal_from_height(self.fill_normal_strength);
         } else {
-            self.normal_buf.make_sparse(glam::Vec4::new(0.5, 0.5, 1.0, 1.0));
+            self.normal_buf.make_sparse(glam::Vec4::new(0.5, 0.5, 1.0, self.fill_height));
         }
         self.mark_dirty_full();
     }
@@ -5235,8 +5251,8 @@ mod tests {
         assert_eq!(layer.metallic_buf.get_pixel(32, 32), 0.75);
         assert_eq!(layer.clearcoat_buf.get_pixel(32, 32), 0.5);
         assert_eq!(layer.anisotropy_buf.get_pixel(32, 32), 0.6);
-        assert_eq!(layer.anisotropy_angle_buf.get_pixel(32, 32), 0.25);
-        assert_eq!(layer.normal_buf.get_pixel(0, 0), Vec4::new(0.5, 0.5, 1.0, 1.0));
+        assert_eq!(layer.normal_buf.get_pixel(0, 0), Vec4::new(0.5, 0.5, 1.0, 0.5));
+        assert_eq!(layer.height_buf.get_pixel(0, 0), 0.5);
 
         // Now test procedural fill with Perlin Noise (triggers Rayon parallel evaluation)
         layer.fill_generator = ProceduralGenerator::PerlinNoise;

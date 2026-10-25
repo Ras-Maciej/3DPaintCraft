@@ -349,6 +349,7 @@ pub struct PaintcraftApp {
     pub show_uv_wireframe: bool,
     pub split_view_ratio: f32,
     pub uv_view_mask_mode: bool,
+    pub mask_preview_layer_id: Option<u64>,
 
     // Recent Projects
     pub recent_projects: Vec<String>,
@@ -700,6 +701,7 @@ impl PaintcraftApp {
             show_uv_wireframe: false,
             split_view_ratio: 0.5,
             uv_view_mask_mode: false,
+            mask_preview_layer_id: None,
             recent_projects: Self::load_recent_projects(),
             zen_mode: false,
             continuous_60fps: true,
@@ -814,6 +816,65 @@ impl PaintcraftApp {
         }
     }
 
+    /// Delete currently selected layer with undo history and GPU synchronization
+    pub fn delete_selected_layer(&mut self, ctx: &egui::Context) {
+        let act_idx = self.project.active_layer_idx;
+        if act_idx < self.project.layers.len() {
+            let prev_active = self.project.active_layer_idx;
+            let layer_id = self.project.layers[act_idx].id;
+            if self.mask_preview_layer_id == Some(layer_id) {
+                self.mask_preview_layer_id = None;
+                self.uv_view_mask_mode = false;
+            }
+            if let Some(removed_layer) = self.project.delete_layer(act_idx) {
+                let layer_name = removed_layer.name.clone();
+                self.history.push("Delete Layer", HistoryAction::DeleteLayer {
+                    layer_idx: act_idx,
+                    layer: Box::new(removed_layer),
+                    prev_active,
+                });
+                self.project.rebuild_composite();
+                self.project.gpu_sync_needed = true;
+                self.need_cpu_composite_sync = true;
+                if let Some(wgpu) = &mut self.wgpu_viewport {
+                    wgpu.sync_textures(&mut self.project);
+                }
+                self.update_uv_texture(ctx);
+                self.status_message = format!("Deleted layer '{}'", layer_name);
+            }
+        }
+    }
+
+    /// Toggle Alt + Left Click mask preview mode for a layer
+    pub fn toggle_mask_preview(&mut self, layer_id: u64, ctx: &egui::Context) {
+        if self.mask_preview_layer_id == Some(layer_id) {
+            self.mask_preview_layer_id = None;
+            self.uv_view_mask_mode = false;
+            self.status_message = "Exited Mask Preview Mode".to_string();
+        } else {
+            self.mask_preview_layer_id = Some(layer_id);
+            self.uv_view_mask_mode = true;
+            self.brush_engine.settings.target = PaintTarget::Mask;
+            let name = self.project.layers.iter().find(|l| l.id == layer_id).map(|l| l.name.clone()).unwrap_or_default();
+            self.status_message = format!("Mask Preview: '{}' [Alt+Click mask or press M to return to Material]", name);
+        }
+        self.project.gpu_sync_needed = true;
+        self.need_cpu_composite_sync = true;
+        self.update_uv_texture(ctx);
+    }
+
+    /// Exit mask preview mode and restore full material shading
+    pub fn exit_mask_preview(&mut self, ctx: &egui::Context) {
+        if self.mask_preview_layer_id.is_some() {
+            self.mask_preview_layer_id = None;
+            self.uv_view_mask_mode = false;
+            self.status_message = "Exited Mask Preview Mode".to_string();
+            self.project.gpu_sync_needed = true;
+            self.need_cpu_composite_sync = true;
+            self.update_uv_texture(ctx);
+        }
+    }
+
     /// Update 3D viewport texture in egui
     fn update_viewport_texture(&mut self, ctx: &egui::Context) {
         self.renderer.render(
@@ -854,7 +915,11 @@ impl PaintcraftApp {
         let view_mode = self.view_mode;
         let is_mask_mode = self.uv_view_mask_mode;
         let active_mask_buf = if is_mask_mode {
-            self.project.active_layer().and_then(|l| if l.has_mask { Some(l.mask_buf.clone()) } else { None })
+            if let Some(preview_id) = self.mask_preview_layer_id {
+                self.project.layers.iter().find(|l| l.id == preview_id && l.has_mask).map(|l| l.mask_buf.clone())
+            } else {
+                self.project.active_layer().and_then(|l| if l.has_mask { Some(l.mask_buf.clone()) } else { None })
+            }
         } else {
             None
         };
@@ -1014,7 +1079,11 @@ impl PaintcraftApp {
 
         let is_mask_mode = self.uv_view_mask_mode;
         let active_mask_buf = if is_mask_mode {
-            self.project.active_layer().and_then(|l| if l.has_mask { Some(l.mask_buf.clone()) } else { None })
+            if let Some(preview_id) = self.mask_preview_layer_id {
+                self.project.layers.iter().find(|l| l.id == preview_id && l.has_mask).map(|l| l.mask_buf.clone())
+            } else {
+                self.project.active_layer().and_then(|l| if l.has_mask { Some(l.mask_buf.clone()) } else { None })
+            }
         } else {
             None
         };
@@ -3205,190 +3274,215 @@ impl eframe::App for PaintcraftApp {
 
         // --- GLOBAL KEYBOARD SHORTCUTS ---
         let input = ctx.input(|i| i.clone());
+        let has_cmd = input.modifiers.command || input.modifiers.ctrl || input.modifiers.mac_cmd;
+        let has_alt = input.modifiers.alt;
 
-        // Substance 3D Painter Standard Viewport Shortcuts (F1: Split, F2: 3D, F3: 2D)
-        if input.key_pressed(egui::Key::F1) {
-            self.layout = ViewLayout::SplitDualView;
-            self.status_message = "Viewport Layout: 3D | 2D Split View [F1]".to_string();
-        }
-        if input.key_pressed(egui::Key::F2) {
-            self.layout = ViewLayout::View3DOnly;
-            self.status_message = "Viewport Layout: 3D Viewport Only [F2]".to_string();
-        }
-        if input.key_pressed(egui::Key::F3) {
-            self.layout = ViewLayout::View2DOnly;
-            self.status_message = "Viewport Layout: 2D UV Canvas Only [F3]".to_string();
-        }
+        // When user is typing into text edits or modals, bypass single-key shortcuts so inputs never clash
+        if !ctx.wants_keyboard_input() {
+            // Substance 3D Painter Standard Viewport Shortcuts (F1: Split, F2: 3D, F3: 2D)
+            if input.key_pressed(egui::Key::F1) {
+                self.layout = ViewLayout::SplitDualView;
+                self.status_message = "Viewport Layout: 3D | 2D Split View [F1]".to_string();
+            }
+            if input.key_pressed(egui::Key::F2) {
+                self.layout = ViewLayout::View3DOnly;
+                self.status_message = "Viewport Layout: 3D Viewport Only [F2]".to_string();
+            }
+            if input.key_pressed(egui::Key::F3) {
+                self.layout = ViewLayout::View2DOnly;
+                self.status_message = "Viewport Layout: 2D UV Canvas Only [F3]".to_string();
+            }
 
-        // Performance Diagnostic HUD Toggle: F12
-        if input.key_pressed(egui::Key::F12) {
-            self.perf_metrics.show_debug_hud = !self.perf_metrics.show_debug_hud;
-            self.status_message = format!("Performance Diagnostic HUD: {} [F12]", if self.perf_metrics.show_debug_hud { "ON" } else { "OFF" });
-        }
+            // Performance Diagnostic HUD Toggle: F12
+            if input.key_pressed(egui::Key::F12) {
+                self.perf_metrics.show_debug_hud = !self.perf_metrics.show_debug_hud;
+                self.status_message = format!("Performance Diagnostic HUD: {} [F12]", if self.perf_metrics.show_debug_hud { "ON" } else { "OFF" });
+            }
 
-        // Wireframe Overlay Toggle: F4
-        if input.key_pressed(egui::Key::F4) {
-            self.renderer.show_wireframe = !self.renderer.show_wireframe;
-            self.show_uv_wireframe = self.renderer.show_wireframe;
-            self.status_message = format!("Wireframe Overlay: {}", if self.renderer.show_wireframe { "ON" } else { "OFF" });
-        }
+            // Wireframe Overlay Toggle: F4
+            if input.key_pressed(egui::Key::F4) {
+                self.renderer.show_wireframe = !self.renderer.show_wireframe;
+                self.show_uv_wireframe = self.renderer.show_wireframe;
+                self.status_message = format!("Wireframe Overlay: {}", if self.renderer.show_wireframe { "ON" } else { "OFF" });
+            }
 
-        // Progressive Path Tracer Viewport (Iray Mode): F10
-        if input.key_pressed(egui::Key::F10) {
-            self.iray_mode = !self.iray_mode;
-            if self.iray_mode {
-                if let Some(pt) = &mut self.path_tracer {
-                    pt.reset();
+            // Progressive Path Tracer Viewport (Iray Mode): F10
+            if input.key_pressed(egui::Key::F10) {
+                self.iray_mode = !self.iray_mode;
+                if self.iray_mode {
+                    if let Some(pt) = &mut self.path_tracer {
+                        pt.reset();
+                    }
+                    self.status_message = "Iray Mode: Path Tracer Active [F10 or Esc to Exit]".to_string();
+                } else {
+                    self.status_message = "Iray Mode: Exited to Real-Time Viewport".to_string();
                 }
-                self.status_message = "Iray Mode: Path Tracer Active [F10 or Esc to Exit]".to_string();
-            } else {
-                self.status_message = "Iray Mode: Exited to Real-Time Viewport".to_string();
             }
-        }
 
-        // Escape exits Iray mode if active
-        if self.iray_mode && input.key_pressed(egui::Key::Escape) {
-            self.iray_mode = false;
-            self.status_message = "Iray Mode: Exited to Real-Time Viewport".to_string();
-        }
-
-        // Undo: Ctrl+Z
-        if input.modifiers.command && input.key_pressed(egui::Key::Z) && !input.modifiers.shift {
-            self.flush_pending_gpu_readbacks(ctx);
-            if let Some(desc) = self.history.undo(&mut self.project) {
-                self.status_message = format!("Undo: {}", desc);
-                self.project.gpu_sync_needed = true;
-                if let Some(wgpu) = &mut self.wgpu_viewport {
-                    wgpu.sync_textures(&mut self.project);
+            // Escape exits Mask Preview mode or Iray mode
+            if input.key_pressed(egui::Key::Escape) {
+                if self.mask_preview_layer_id.is_some() {
+                    self.exit_mask_preview(ctx);
+                } else if self.iray_mode {
+                    self.iray_mode = false;
+                    self.status_message = "Iray Mode: Exited to Real-Time Viewport".to_string();
                 }
-                ctx.request_repaint();
             }
-        }
-        // Redo: Ctrl+Y or Ctrl+Shift+Z
-        if (input.modifiers.command && input.key_pressed(egui::Key::Y))
-            || (input.modifiers.command && input.modifiers.shift && input.key_pressed(egui::Key::Z))
-        {
-            self.flush_pending_gpu_readbacks(ctx);
-            if let Some(desc) = self.history.redo(&mut self.project) {
-                self.status_message = format!("Redo: {}", desc);
-                self.project.gpu_sync_needed = true;
-                if let Some(wgpu) = &mut self.wgpu_viewport {
-                    wgpu.sync_textures(&mut self.project);
+
+            // Delete selected layer: Delete or Backspace key
+            if input.key_pressed(egui::Key::Delete) || input.key_pressed(egui::Key::Backspace) {
+                self.delete_selected_layer(ctx);
+            }
+
+            // Undo: Ctrl+Z
+            if has_cmd && input.key_pressed(egui::Key::Z) && !input.modifiers.shift {
+                self.flush_pending_gpu_readbacks(ctx);
+                if let Some(desc) = self.history.undo(&mut self.project) {
+                    self.status_message = format!("Undo: {}", desc);
+                    self.project.gpu_sync_needed = true;
+                    if let Some(wgpu) = &mut self.wgpu_viewport {
+                        wgpu.sync_textures(&mut self.project);
+                    }
+                    ctx.request_repaint();
                 }
-                ctx.request_repaint();
             }
-        }
-
-        // Zen Mode: Tab (Hides all panels for immersive fullscreen painting)
-        if input.key_pressed(egui::Key::Tab) {
-            self.zen_mode = !self.zen_mode;
-            self.status_message = if self.zen_mode {
-                "Zen Mode Enabled [Tab to Exit]".to_string()
-            } else {
-                "Zen Mode Disabled".to_string()
-            };
-        }
-
-        // Tools: 1 = Paint, 2/E = Eraser, 3 = Projection, 4/G = FillBucket, 5 = Smudge, 6 = Clone, P/I = Picker
-        if !input.modifiers.command && !input.modifiers.alt {
-            if input.key_pressed(egui::Key::Num1) {
-                self.brush_engine.settings.mode = ToolMode::Brush;
-                self.status_message = "Tool: Paint Brush [1]".to_string();
+            // Redo: Ctrl+Y or Ctrl+Shift+Z
+            if (has_cmd && input.key_pressed(egui::Key::Y))
+                || (has_cmd && input.modifiers.shift && input.key_pressed(egui::Key::Z))
+            {
+                self.flush_pending_gpu_readbacks(ctx);
+                if let Some(desc) = self.history.redo(&mut self.project) {
+                    self.status_message = format!("Redo: {}", desc);
+                    self.project.gpu_sync_needed = true;
+                    if let Some(wgpu) = &mut self.wgpu_viewport {
+                        wgpu.sync_textures(&mut self.project);
+                    }
+                    ctx.request_repaint();
+                }
             }
-            if input.key_pressed(egui::Key::Num2) || input.key_pressed(egui::Key::E) {
-                self.brush_engine.settings.mode = ToolMode::Eraser;
-                self.status_message = "Tool: Eraser [2/E]".to_string();
+
+            // Zen Mode: Tab (Hides all panels for immersive fullscreen painting)
+            if input.key_pressed(egui::Key::Tab) {
+                self.zen_mode = !self.zen_mode;
+                self.status_message = if self.zen_mode {
+                    "Zen Mode Enabled [Tab to Exit]".to_string()
+                } else {
+                    "Zen Mode Disabled".to_string()
+                };
             }
-            if input.key_pressed(egui::Key::Num3) {
-                self.brush_engine.settings.mode = ToolMode::Projection;
-                self.status_message = "Tool: Projection Painting [3]".to_string();
+
+            // Layer Duplicate: Ctrl+D
+            if has_cmd && input.key_pressed(egui::Key::D) {
+                let act_idx = self.project.active_layer_idx;
+                if let Some(new_idx) = self.project.duplicate_layer(act_idx) {
+                    let layer_clone = Box::new(self.project.layers[new_idx].clone());
+                    self.history.push("Duplicate Layer", HistoryAction::AddLayer {
+                        layer_idx: new_idx,
+                        layer: layer_clone,
+                        prev_active: act_idx,
+                    });
+                    self.status_message = format!("Duplicated layer #{} [Ctrl+D]", new_idx);
+                }
             }
-            if input.key_pressed(egui::Key::Num4) || input.key_pressed(egui::Key::G) {
-                self.brush_engine.settings.mode = ToolMode::FillBucket;
-                self.status_message = "Tool: Polygon Fill / Bucket [4/G]".to_string();
+
+            // New Project: Ctrl+N
+            if has_cmd && input.key_pressed(egui::Key::N) {
+                self.show_new_project_modal = true;
             }
-            if input.key_pressed(egui::Key::Num5) {
-                self.brush_engine.settings.mode = ToolMode::Smudge;
-                self.status_message = "Tool: Smudge [5]".to_string();
+
+            // Bake Mesh Maps: Ctrl+Shift+B
+            if has_cmd && input.modifiers.shift && input.key_pressed(egui::Key::B) {
+                self.show_bake_modal = true;
             }
-            if input.key_pressed(egui::Key::Num6) {
-                self.brush_engine.settings.mode = ToolMode::Clone;
-                self.status_message = "Tool: Clone [6]".to_string();
+
+            // Export Textures: Ctrl+E
+            if has_cmd && input.key_pressed(egui::Key::E) {
+                self.show_export_modal = true;
             }
-            if input.key_pressed(egui::Key::P) || input.key_pressed(egui::Key::I) {
-                self.brush_engine.settings.mode = ToolMode::Eyedropper;
-                self.status_message = "Tool: Material Picker [P/I]".to_string();
+
+            // Save As: Ctrl+Shift+S
+            if has_cmd && input.modifiers.shift && input.key_pressed(egui::Key::S) {
+                self.show_save_modal = true;
             }
-        }
-
-        // Layer Duplicate: Ctrl+D
-        if input.modifiers.command && input.key_pressed(egui::Key::D) {
-            let act_idx = self.project.active_layer_idx;
-            if let Some(new_idx) = self.project.duplicate_layer(act_idx) {
-                let layer_clone = Box::new(self.project.layers[new_idx].clone());
-                self.history.push("Duplicate Layer", HistoryAction::AddLayer {
-                    layer_idx: new_idx,
-                    layer: layer_clone,
-                    prev_active: act_idx,
-                });
-                self.status_message = format!("Duplicated layer #{} [Ctrl+D]", new_idx);
+            // Quick Save: Ctrl+S
+            else if has_cmd && input.key_pressed(egui::Key::S) {
+                let path = PathBuf::from(&self.project_file_path);
+                if let Err(e) = self.project.save_to_file(&path) {
+                    self.status_message = format!("Save Error: {}", e);
+                } else {
+                    self.add_recent_project(&self.project_file_path.clone());
+                    self.status_message = format!("Project saved to {}", self.project_file_path);
+                }
             }
-        }
 
-        // New Project: Ctrl+N
-        if input.modifiers.command && input.key_pressed(egui::Key::N) {
-            self.show_new_project_modal = true;
-        }
+            // Tools and View modes (single-key shortcuts without Ctrl / Alt modifiers)
+            if !has_cmd && !has_alt {
+                if input.key_pressed(egui::Key::Num1) {
+                    self.brush_engine.settings.mode = ToolMode::Brush;
+                    self.status_message = "Tool: Paint Brush [1]".to_string();
+                }
+                if input.key_pressed(egui::Key::Num2) || input.key_pressed(egui::Key::E) {
+                    self.brush_engine.settings.mode = ToolMode::Eraser;
+                    self.status_message = "Tool: Eraser [2/E]".to_string();
+                }
+                if input.key_pressed(egui::Key::Num3) {
+                    self.brush_engine.settings.mode = ToolMode::Projection;
+                    self.status_message = "Tool: Projection Painting [3]".to_string();
+                }
+                if input.key_pressed(egui::Key::Num4) || input.key_pressed(egui::Key::G) {
+                    self.brush_engine.settings.mode = ToolMode::FillBucket;
+                    self.status_message = "Tool: Polygon Fill / Bucket [4/G]".to_string();
+                }
+                if input.key_pressed(egui::Key::Num5) {
+                    self.brush_engine.settings.mode = ToolMode::Smudge;
+                    self.status_message = "Tool: Smudge [5]".to_string();
+                }
+                if input.key_pressed(egui::Key::Num6) {
+                    self.brush_engine.settings.mode = ToolMode::Clone;
+                    self.status_message = "Tool: Clone [6]".to_string();
+                }
+                if input.key_pressed(egui::Key::P) || input.key_pressed(egui::Key::I) {
+                    self.brush_engine.settings.mode = ToolMode::Eyedropper;
+                    self.status_message = "Tool: Material Picker [P/I]".to_string();
+                }
 
-        // Bake Mesh Maps: Ctrl+Shift+B
-        if input.modifiers.command && input.modifiers.shift && input.key_pressed(egui::Key::B) {
-            self.show_bake_modal = true;
-        }
+                // View Mode: M = Lit Material (PBR) and exit mask preview
+                if input.key_pressed(egui::Key::M) {
+                    if self.mask_preview_layer_id.is_some() {
+                        self.exit_mask_preview(ctx);
+                    }
+                    self.view_mode = ViewportChannelMode::Material;
+                    self.status_message = "View Mode: Lit Material (PBR) [M]".to_string();
+                }
+                // C / Shift+C = Material Channels
+                if input.key_pressed(egui::Key::C) {
+                    if self.mask_preview_layer_id.is_some() {
+                        self.exit_mask_preview(ctx);
+                    }
+                    self.cycle_material_channel(!input.modifiers.shift);
+                }
+                // B / Shift+B = Baked Mesh Maps
+                if input.key_pressed(egui::Key::B) {
+                    if self.mask_preview_layer_id.is_some() {
+                        self.exit_mask_preview(ctx);
+                    }
+                    self.cycle_mesh_map(!input.modifiers.shift);
+                }
 
-        // Export Textures: Ctrl+E or Ctrl+Shift+E
-        if input.modifiers.command && input.key_pressed(egui::Key::E) {
-            self.show_export_modal = true;
-        }
+                // Mask Color Swap: X
+                if input.key_pressed(egui::Key::X) {
+                    self.brush_engine.settings.mask_paint_value =
+                        if self.brush_engine.settings.mask_paint_value > 0.5 { 0.0 } else { 1.0 };
+                    self.status_message = format!("Mask Paint Value: {:.1} [X]", self.brush_engine.settings.mask_paint_value);
+                }
 
-        // View Mode: M = Lit Material (PBR), C / Shift+C = Material Channels, B / Shift+B = Baked Mesh Maps
-        if input.key_pressed(egui::Key::M) && !input.modifiers.command && !input.modifiers.alt {
-            self.view_mode = ViewportChannelMode::Material;
-            self.status_message = "View Mode: Lit Material (PBR) [M]".to_string();
-        }
-        if input.key_pressed(egui::Key::C) && !input.modifiers.command && !input.modifiers.alt {
-            self.cycle_material_channel(!input.modifiers.shift);
-        }
-        if input.key_pressed(egui::Key::B) && !input.modifiers.command && !input.modifiers.alt {
-            self.cycle_mesh_map(!input.modifiers.shift);
-        }
-
-        // Mask Color Swap: X
-        if input.key_pressed(egui::Key::X) && !input.modifiers.command {
-            self.brush_engine.settings.mask_paint_value =
-                if self.brush_engine.settings.mask_paint_value > 0.5 { 0.0 } else { 1.0 };
-            self.status_message = format!("Mask Paint Value: {:.1} [X]", self.brush_engine.settings.mask_paint_value);
-        }
-
-        // Brush Radius: [ and ]
-        if input.key_pressed(egui::Key::OpenBracket) {
-            self.brush_engine.settings.radius = (self.brush_engine.settings.radius - 4.0).max(2.0);
-        }
-        if input.key_pressed(egui::Key::CloseBracket) {
-            self.brush_engine.settings.radius = (self.brush_engine.settings.radius + 4.0).min(200.0);
-        }
-
-        // Save As: Ctrl+Shift+S
-        if input.modifiers.command && input.modifiers.shift && input.key_pressed(egui::Key::S) {
-            self.show_save_modal = true;
-        }
-        // Quick Save: Ctrl+S
-        else if input.modifiers.command && input.key_pressed(egui::Key::S) {
-            let path = PathBuf::from(&self.project_file_path);
-            if let Err(e) = self.project.save_to_file(&path) {
-                self.status_message = format!("Save Error: {}", e);
-            } else {
-                self.add_recent_project(&self.project_file_path.clone());
-                self.status_message = format!("Project saved to {}", self.project_file_path);
+                // Brush Radius: [ and ]
+                if input.key_pressed(egui::Key::OpenBracket) {
+                    self.brush_engine.settings.radius = (self.brush_engine.settings.radius - 4.0).max(2.0);
+                }
+                if input.key_pressed(egui::Key::CloseBracket) {
+                    self.brush_engine.settings.radius = (self.brush_engine.settings.radius + 4.0).min(200.0);
+                }
             }
         }
 
@@ -5605,6 +5699,9 @@ impl PaintcraftApp {
             let t_sync = std::time::Instant::now();
             if let Some(wgpu) = &mut self.wgpu_viewport {
                 wgpu.sync_textures(&mut self.project);
+                if let Some(preview_id) = self.mask_preview_layer_id {
+                    wgpu.sync_mask_preview_full(&self.project, preview_id);
+                }
             }
             self.perf_metrics.gpu_sync_ms = t_sync.elapsed().as_secs_f32() * 1000.0;
             self.project.gpu_sync_needed = false;
@@ -6084,7 +6181,7 @@ impl PaintcraftApp {
             self.camera.zoom(input.raw_scroll_delta.y * 0.02 * self.camera_zoom_speed);
         }
 
-        if input.key_pressed(eframe::egui::Key::F) {
+        if response.hovered() && !ctx.wants_keyboard_input() && input.key_pressed(eframe::egui::Key::F) && !input.modifiers.command && !input.modifiers.ctrl {
             self.camera.reset();
         }
 
@@ -6826,6 +6923,35 @@ impl PaintcraftApp {
                 &label,
                 egui::FontId::proportional(11.5),
                 egui::Color32::WHITE,
+            );
+        }
+
+        // Draw Mask Preview HUD banner if active
+        if let Some(preview_id) = self.mask_preview_layer_id {
+            let layer_name = self.project.layers.iter().find(|l| l.id == preview_id).map(|l| l.name.as_str()).unwrap_or("Mask");
+            let banner_w = 340.0;
+            let banner_h = 28.0;
+            let banner_rect = egui::Rect::from_min_size(
+                rect.left_top() + egui::vec2(12.0, 12.0),
+                egui::vec2(banner_w, banner_h),
+            );
+            ui.painter().rect_filled(
+                banner_rect,
+                egui::Rounding::same(5.0),
+                egui::Color32::from_rgba_unmultiplied(22, 24, 30, 230),
+            );
+            ui.painter().rect_stroke(
+                banner_rect,
+                egui::Rounding::same(5.0),
+                egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(243, 94, 24)),
+            );
+            let banner_text = format!("Mask Preview: {} [Alt+Click mask or M to exit]", layer_name);
+            ui.painter().text(
+                banner_rect.center(),
+                egui::Align2::CENTER_CENTER,
+                banner_text,
+                egui::FontId::proportional(11.5),
+                egui::Color32::from_rgb(240, 242, 248),
             );
         }
     }
@@ -10296,6 +10422,71 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
+
+    #[test]
+    fn test_layer_deletion_and_history_action() {
+        let mut proj = Project::new_default(64, 64);
+        assert_eq!(proj.layers.len(), 1);
+
+        let new_idx = proj.add_paint_layer(Some("Detail Paint".to_string()));
+        assert_eq!(proj.layers.len(), 2);
+        assert_eq!(new_idx, 1);
+
+        let mut history = HistoryManager::new();
+        let prev_active = proj.active_layer_idx;
+        let removed = proj.delete_layer(new_idx).expect("layer should be deleted");
+        assert_eq!(removed.name, "Detail Paint");
+        assert_eq!(proj.layers.len(), 1);
+
+        history.push("Delete Layer", HistoryAction::DeleteLayer {
+            layer_idx: new_idx,
+            layer: Box::new(removed),
+            prev_active,
+        });
+        assert!(history.can_undo());
+
+        // Undo deletion through history manager
+        let undo_res = history.undo(&mut proj);
+        assert!(undo_res.is_some());
+        assert_eq!(proj.layers.len(), 2);
+        assert_eq!(proj.layers[1].name, "Detail Paint");
+    }
+
+    #[test]
+    fn test_layer_mask_creation_and_evaluation() {
+        let mut proj = Project::new_default(64, 64);
+        let layer = &mut proj.layers[0];
+        assert!(!layer.has_mask);
+
+        layer.add_black_mask();
+        assert!(layer.has_mask);
+        assert_eq!(layer.mask_buf.get_pixel(0, 0), 0.0);
+        assert_eq!(layer.mask_buf.get_pixel(32, 32), 0.0);
+
+        layer.add_white_mask();
+        assert!(layer.has_mask);
+        assert_eq!(layer.mask_buf.get_pixel(0, 0), 1.0);
+        assert_eq!(layer.mask_buf.get_pixel(32, 32), 1.0);
+    }
+
+    #[test]
+    fn test_fill_height_propagation_to_normal_buffer() {
+        let mut layer = crate::layer::Layer::new_fill_layer(
+            1,
+            "Height Test".to_string(),
+            32,
+            32,
+            glam::Vec4::new(0.5, 0.5, 0.5, 1.0),
+            0.5,
+            0.0,
+        );
+        layer.set_fill_height(0.85);
+        layer.evaluate_fill_advanced(None, None, None, None);
+
+        assert!((layer.height_buf.get_pixel(0, 0) - 0.85).abs() < 1e-4);
+        let normal_px = layer.normal_buf.get_pixel(0, 0);
+        assert!((normal_px.w - 0.85).abs() < 1e-4);
+    }
 }
 
 
@@ -10518,10 +10709,16 @@ impl PaintcraftApp {
                         }
     
                         // Layer Stack Toolbar
-                        let opt_icons = self.icons.as_ref();
+                        let icon_ids = self.icons.as_ref().map(|ic| (
+                            ic.layer_paint.id(),
+                            ic.layer_fill.id(),
+                            ic.layer_folder.id(),
+                            ic.layer_eye.id(),
+                        ));
+                        let mut delete_layer_requested = false;
                         ui.horizontal(|ui| {
-                            let btn_paint = if let Some(icons) = opt_icons {
-                                egui::Button::image_and_text((icons.layer_paint.id(), egui::vec2(13.0, 13.0)), "Paint")
+                            let btn_paint = if let Some((paint_id, _, _, _)) = icon_ids {
+                                egui::Button::image_and_text((paint_id, egui::vec2(13.0, 13.0)), "Paint")
                             } else {
                                 egui::Button::new("+ Paint")
                             };
@@ -10538,8 +10735,8 @@ impl PaintcraftApp {
                                 self.status_message = "Added Paint Layer.".to_string();
                             }
 
-                            let btn_fill = if let Some(icons) = opt_icons {
-                                egui::Button::image_and_text((icons.layer_fill.id(), egui::vec2(13.0, 13.0)), "Fill")
+                            let btn_fill = if let Some((_, fill_id, _, _)) = icon_ids {
+                                egui::Button::image_and_text((fill_id, egui::vec2(13.0, 13.0)), "Fill")
                             } else {
                                 egui::Button::new("+ Fill")
                             };
@@ -10561,8 +10758,8 @@ impl PaintcraftApp {
                                 self.status_message = "Added Fill Layer.".to_string();
                             }
 
-                            let btn_folder = if let Some(icons) = opt_icons {
-                                egui::Button::image_and_text((icons.layer_folder.id(), egui::vec2(13.0, 13.0)), "Folder")
+                            let btn_folder = if let Some((_, _, folder_id, _)) = icon_ids {
+                                egui::Button::image_and_text((folder_id, egui::vec2(13.0, 13.0)), "Folder")
                             } else {
                                 egui::Button::new("+ Folder")
                             };
@@ -10578,11 +10775,62 @@ impl PaintcraftApp {
                                 self.status_message = "Added Layer Folder.".to_string();
                             }
 
-                            if ui.button("Filters...").on_hover_text("Apply filter (Blur, Levels, Invert, Sharpen)").clicked() {
-                                self.show_filter_modal = true;
+                            #[derive(Clone, Copy)]
+                            enum MaskAddAction {
+                                Black,
+                                White,
+                                Curvature,
+                                Grunge,
+                            }
+                            let mut mask_add_action = None;
+
+                            ui.menu_button("+ Mask", |ui| {
+                                if ui.button("Black Mask (Hide All)").clicked() {
+                                    mask_add_action = Some(MaskAddAction::Black);
+                                    ui.close_menu();
+                                }
+                                if ui.button("White Mask (Reveal All)").clicked() {
+                                    mask_add_action = Some(MaskAddAction::White);
+                                    ui.close_menu();
+                                }
+                                if ui.button("Edge Wear Mask (Curvature)").clicked() {
+                                    mask_add_action = Some(MaskAddAction::Curvature);
+                                    ui.close_menu();
+                                }
+                                if ui.button("Grunge Mask").clicked() {
+                                    mask_add_action = Some(MaskAddAction::Grunge);
+                                    ui.close_menu();
+                                }
+                            });
+
+                            if let Some(action) = mask_add_action {
+                                let curv = self.project.curvature_map.clone();
+                                if let Some(layer) = self.project.layers.get_mut(act_idx) {
+                                    match action {
+                                        MaskAddAction::Black => {
+                                            layer.add_black_mask();
+                                            self.brush_engine.settings.target = PaintTarget::Mask;
+                                            self.brush_engine.settings.mask_paint_value = 1.0;
+                                        }
+                                        MaskAddAction::White => {
+                                            layer.add_white_mask();
+                                            self.brush_engine.settings.target = PaintTarget::Mask;
+                                            self.brush_engine.settings.mask_paint_value = 0.0;
+                                        }
+                                        MaskAddAction::Curvature => {
+                                            layer.add_curvature_mask(curv.as_ref());
+                                            self.brush_engine.settings.target = PaintTarget::Mask;
+                                        }
+                                        MaskAddAction::Grunge => {
+                                            layer.add_grunge_mask();
+                                            self.brush_engine.settings.target = PaintTarget::Mask;
+                                        }
+                                    }
+                                }
+                                self.project.rebuild_composite();
                             }
 
-                            if ui.button("Duplicate").on_hover_text("Duplicate selected layer").clicked() {
+                            if ui.button("Dup").on_hover_text("Duplicate selected layer").clicked() {
                                 if let Some(new_idx) = self.project.duplicate_layer(act_idx) {
                                     let layer_clone = Box::new(self.project.layers[new_idx].clone());
                                     self.history.push("Duplicate Layer", HistoryAction::AddLayer {
@@ -10594,7 +10842,34 @@ impl PaintcraftApp {
                                 }
                             }
 
-                            if ui.button("Save as Mat").on_hover_text("Save selected layer as a reusable PBR material in the Shelf").clicked() {
+                            if ui.button("Del").on_hover_text("Delete selected layer (Delete or Backspace)").clicked() {
+                                delete_layer_requested = true;
+                            }
+
+                            let mut save_as_mat_requested = false;
+                            ui.menu_button("...", |ui| {
+                                if ui.button("Move Layer Up").clicked() {
+                                    self.project.move_layer_up(act_idx);
+                                    self.project.rebuild_composite();
+                                    ui.close_menu();
+                                }
+                                if ui.button("Move Layer Down").clicked() {
+                                    self.project.move_layer_down(act_idx);
+                                    self.project.rebuild_composite();
+                                    ui.close_menu();
+                                }
+                                ui.separator();
+                                if ui.button("Filters...").on_hover_text("Apply filter (Blur, Levels, Invert, Sharpen)").clicked() {
+                                    self.show_filter_modal = true;
+                                    ui.close_menu();
+                                }
+                                if ui.button("Save as Shelf Material").on_hover_text("Save selected layer as a reusable PBR material in the Shelf").clicked() {
+                                    save_as_mat_requested = true;
+                                    ui.close_menu();
+                                }
+                            });
+
+                            if save_as_mat_requested {
                                 if let Some(layer) = self.project.layers.get(act_idx) {
                                     let name = layer.name.clone();
                                     let clean_id = name.trim().replace(' ', "_").to_lowercase();
@@ -10624,85 +10899,16 @@ impl PaintcraftApp {
                                     }
                                 }
                             }
-    
-                            #[derive(Clone, Copy)]
-                            enum MaskAddAction {
-                                Black,
-                                White,
-                                Curvature,
-                                Grunge,
-                            }
-                            let mut mask_add_action = None;
-    
-                            ui.menu_button("+ Mask", |ui| {
-                                if ui.button("Black Mask (Hide All)").clicked() {
-                                    mask_add_action = Some(MaskAddAction::Black);
-                                    ui.close_menu();
-                                }
-                                if ui.button("White Mask (Reveal All)").clicked() {
-                                    mask_add_action = Some(MaskAddAction::White);
-                                    ui.close_menu();
-                                }
-                                if ui.button("Edge Wear Mask (Curvature)").clicked() {
-                                    mask_add_action = Some(MaskAddAction::Curvature);
-                                    ui.close_menu();
-                                }
-                                if ui.button("Grunge Mask").clicked() {
-                                    mask_add_action = Some(MaskAddAction::Grunge);
-                                    ui.close_menu();
-                                }
-                            });
-    
-                            if let Some(action) = mask_add_action {
-                                let curv = self.project.curvature_map.clone();
-                                if let Some(layer) = self.project.layers.get_mut(act_idx) {
-                                    match action {
-                                        MaskAddAction::Black => {
-                                            layer.add_black_mask();
-                                            self.brush_engine.settings.target = PaintTarget::Mask;
-                                            self.brush_engine.settings.mask_paint_value = 1.0;
-                                        }
-                                        MaskAddAction::White => {
-                                            layer.add_white_mask();
-                                            self.brush_engine.settings.target = PaintTarget::Mask;
-                                            self.brush_engine.settings.mask_paint_value = 0.0;
-                                        }
-                                        MaskAddAction::Curvature => {
-                                            layer.add_curvature_mask(curv.as_ref());
-                                            self.brush_engine.settings.target = PaintTarget::Mask;
-                                        }
-                                        MaskAddAction::Grunge => {
-                                            layer.add_grunge_mask();
-                                            self.brush_engine.settings.target = PaintTarget::Mask;
-                                        }
-                                    }
-                                }
-                                self.project.rebuild_composite();
-                            }
-    
-                            if ui.button("Up").on_hover_text("Move layer up").clicked() {
-                                self.project.move_layer_up(act_idx);
-                                self.project.rebuild_composite();
-                            }
-                            if ui.button("Down").on_hover_text("Move layer down").clicked() {
-                                self.project.move_layer_down(act_idx);
-                                self.project.rebuild_composite();
-                            }
-                            if ui.button("Del").on_hover_text("Delete selected layer").clicked() {
-                                let prev_active = self.project.active_layer_idx;
-                                if let Some(removed_layer) = self.project.delete_layer(act_idx) {
-                                    self.history.push("Delete Layer", HistoryAction::DeleteLayer {
-                                        layer_idx: act_idx,
-                                        layer: Box::new(removed_layer),
-                                        prev_active,
-                                    });
-                                    self.status_message = format!("Deleted layer #{}", act_idx + 1);
-                                }
-                            }
                         });
+
+                        if delete_layer_requested {
+                            let ctx = ui.ctx().clone();
+                            self.delete_selected_layer(&ctx);
+                        }
     
                         ui.separator();
     
+                        let mut toggle_mask_preview_id = None;
                         // Dedicated Scroll Area for Layer Stack
                         egui::ScrollArea::vertical()
                             .id_source("layers_stack_scroll")
@@ -10797,14 +11003,14 @@ impl PaintcraftApp {
 
                                                 // 2. Visibility toggle
                                                 let (eye_rect, eye_resp) = ui.allocate_exact_size(egui::vec2(15.0, 15.0), egui::Sense::click());
-                                                if let Some(icons) = opt_icons {
+                                                if let Some((_, _, _, eye_id)) = icon_ids {
                                                     let tint = if layer.visible {
                                                         Color32::WHITE
                                                     } else {
                                                         Color32::from_rgba_unmultiplied(100, 105, 115, 110)
                                                     };
                                                     ui.painter().image(
-                                                        icons.layer_eye.id(),
+                                                        eye_id,
                                                         eye_rect,
                                                         egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
                                                         tint,
@@ -10843,11 +11049,11 @@ impl PaintcraftApp {
                                                     egui::Stroke::new(1.0_f32, Color32::from_rgb(58, 62, 72))
                                                 };
                                                 ui.painter().rect(mat_rect, 2.0, mat_bg, mat_stroke);
-                                                if let Some(icons) = opt_icons {
+                                                if let Some((paint_id, fill_id, folder_id, _)) = icon_ids {
                                                     let icon_tex = match layer.layer_type {
-                                                        LayerType::Paint => Some(icons.layer_paint.id()),
-                                                        LayerType::Folder => Some(icons.layer_folder.id()),
-                                                        LayerType::Fill => Some(icons.layer_fill.id()),
+                                                        LayerType::Paint => Some(paint_id),
+                                                        LayerType::Folder => Some(folder_id),
+                                                        LayerType::Fill => Some(fill_id),
                                                     };
                                                     if let Some(tex) = icon_tex {
                                                         let icon_inset = egui::Rect::from_center_size(mat_rect.center(), egui::vec2(12.0, 12.0));
@@ -10880,17 +11086,34 @@ impl PaintcraftApp {
                                                         Color32::from_rgb(110, 115, 125),
                                                     );
                                                     let (mask_rect, mask_resp) = ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::click());
-                                                    let mask_stroke = if is_active && is_target_mask {
+                                                    let is_mask_previewing = self.mask_preview_layer_id == Some(layer.id);
+                                                    let mask_stroke = if is_mask_previewing {
+                                                        egui::Stroke::new(2.0_f32, Color32::from_rgb(0, 210, 255))
+                                                    } else if is_active && is_target_mask {
                                                         egui::Stroke::new(1.8_f32, Color32::from_rgb(243, 94, 24))
                                                     } else {
                                                         egui::Stroke::new(1.0_f32, Color32::from_rgb(65, 70, 80))
                                                     };
                                                     ui.painter().rect(mask_rect, 2.0, Color32::from_rgb(20, 22, 26), mask_stroke);
-                                                    // Draw small mask shape
-                                                    ui.painter().circle_filled(mask_rect.center(), 5.0, Color32::from_rgb(235, 235, 240));
-                                                    if mask_resp.on_hover_text("Target Mask (Click to activate mask editing)").clicked() {
-                                                        self.project.active_layer_idx = i;
-                                                        self.brush_engine.settings.target = PaintTarget::Mask;
+                                                    let circle_color = if is_mask_previewing {
+                                                        Color32::from_rgb(0, 210, 255)
+                                                    } else {
+                                                        Color32::from_rgb(235, 235, 240)
+                                                    };
+                                                    ui.painter().circle_filled(mask_rect.center(), 5.0, circle_color);
+
+                                                    let hover_text = if is_mask_previewing {
+                                                        "Mask Preview Active • Alt+Click to exit preview"
+                                                    } else {
+                                                        "Target Mask (Click to edit • Alt+Click to isolate preview on 3D mesh)"
+                                                    };
+                                                    if mask_resp.on_hover_text(hover_text).clicked() {
+                                                        if ui.input(|i| i.modifiers.alt) {
+                                                            toggle_mask_preview_id = Some(layer.id);
+                                                        } else {
+                                                            self.project.active_layer_idx = i;
+                                                            self.brush_engine.settings.target = PaintTarget::Mask;
+                                                        }
                                                     }
                                                 } else {
                                                     if ui.small_button("+M").on_hover_text("Add layer mask").clicked() {
@@ -10935,14 +11158,6 @@ impl PaintcraftApp {
                                                     if name_resp.double_clicked() {
                                                         self.renaming_layer_idx = Some(i);
                                                         self.rename_buffer = layer.name.clone();
-                                                    }
-
-                                                    // Small edit button on active layer
-                                                    if is_active {
-                                                        if ui.small_button("Edit").on_hover_text("Rename layer").clicked() {
-                                                            self.renaming_layer_idx = Some(i);
-                                                            self.rename_buffer = layer.name.clone();
-                                                        }
                                                     }
                                                 }
 
@@ -11045,6 +11260,11 @@ impl PaintcraftApp {
                                     self.project.gpu_sync_needed = true;
                                 }
                             });
+
+                        if let Some(mask_id) = toggle_mask_preview_id {
+                            let ctx = ui.ctx().clone();
+                            self.toggle_mask_preview(mask_id, &ctx);
+                        }
         });
     }
 

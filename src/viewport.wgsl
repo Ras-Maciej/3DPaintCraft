@@ -257,17 +257,24 @@ fn fs_main(@builtin(front_facing) is_front: bool, in: VertexOutput) -> FragmentO
     var layer_n = norm_sample.rgb * 2.0 - 1.0;
     let center_h = norm_sample.a;
 
-    // Sobel height bump perturbation from composite height in alpha channel
+    // 8-neighbor Sobel height bump perturbation from composite height in alpha channel
     let tex_dims = vec2<f32>(textureDimensions(tex_normal));
     let inv_dim = 1.0 / max(tex_dims, vec2<f32>(1.0));
 
-    let h_r = textureSample(tex_normal, samp_linear, in.uv + vec2<f32>(inv_dim.x, 0.0)).a;
-    let h_l = textureSample(tex_normal, samp_linear, in.uv - vec2<f32>(inv_dim.x, 0.0)).a;
-    let h_u = textureSample(tex_normal, samp_linear, in.uv + vec2<f32>(0.0, inv_dim.y)).a;
-    let h_d = textureSample(tex_normal, samp_linear, in.uv - vec2<f32>(0.0, inv_dim.y)).a;
+    let h_tr = textureSample(tex_normal, samp_linear, in.uv + vec2<f32>(inv_dim.x, inv_dim.y)).a;
+    let h_mr = textureSample(tex_normal, samp_linear, in.uv + vec2<f32>(inv_dim.x, 0.0)).a;
+    let h_br = textureSample(tex_normal, samp_linear, in.uv + vec2<f32>(inv_dim.x, -inv_dim.y)).a;
+    let h_tl = textureSample(tex_normal, samp_linear, in.uv + vec2<f32>(-inv_dim.x, inv_dim.y)).a;
+    let h_ml = textureSample(tex_normal, samp_linear, in.uv + vec2<f32>(-inv_dim.x, 0.0)).a;
+    let h_bl = textureSample(tex_normal, samp_linear, in.uv + vec2<f32>(-inv_dim.x, -inv_dim.y)).a;
+    let h_tc = textureSample(tex_normal, samp_linear, in.uv + vec2<f32>(0.0, inv_dim.y)).a;
+    let h_bc = textureSample(tex_normal, samp_linear, in.uv + vec2<f32>(0.0, -inv_dim.y)).a;
 
-    let dh_dx = (h_r - h_l) * 4.0;
-    let dh_dy = (h_u - h_d) * 4.0;
+    let sobel_x = (h_tr + 2.0 * h_mr + h_br) - (h_tl + 2.0 * h_ml + h_bl);
+    let sobel_y = (h_tr + 2.0 * h_tc + h_tl) - (h_br + 2.0 * h_bc + h_bl);
+
+    let dh_dx = sobel_x * 2.0;
+    let dh_dy = sobel_y * 2.0;
     let bump_n = normalize(vec3<f32>(-dh_dx, -dh_dy, 1.0));
 
     // Reoriented Normal Mapping (RNM) blending between bump_n and layer_n

@@ -832,6 +832,11 @@ impl BrushEngine {
         if do_h || (is_eraser && self.settings.channels.height) {
             layer.update_normal_from_height_rect(min_x as u32, min_y as u32, max_x as u32, max_y as u32, 4.0);
         }
+
+        if do_color { layer.dirty_flags.color = true; }
+        if do_r { layer.dirty_flags.roughness = true; }
+        if do_m { layer.dirty_flags.metallic = true; }
+        if do_h || (is_eraser && self.settings.channels.height) || self.settings.channels.normal { layer.dirty_flags.normal = true; }
     }
 
 pub fn barycentric_3d(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> (f32, f32, f32) {
@@ -1264,6 +1269,11 @@ pub fn barycentric_3d(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> (f32, f32, f32) {
             if do_h || (is_eraser && self.settings.channels.height) {
                 layer.update_normal_from_height_rect(r_min_x, r_min_y, r_max_x, r_max_y, 4.0);
             }
+
+            if do_color { layer.dirty_flags.color = true; }
+            if do_r { layer.dirty_flags.roughness = true; }
+            if do_m { layer.dirty_flags.metallic = true; }
+            if do_h || (is_eraser && self.settings.channels.height) || self.settings.channels.normal { layer.dirty_flags.normal = true; }
 
             if let Some((dx0, dy0, dx1, dy1)) = layer.dirty_rect {
                 layer.dirty_rect = Some((

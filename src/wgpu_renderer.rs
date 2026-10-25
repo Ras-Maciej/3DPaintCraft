@@ -1485,6 +1485,58 @@ impl WgpuViewport {
         }
     }
 
+    /// Upload layer mask as grayscale material for Alt+Left Click mask preview mode
+    pub fn sync_mask_preview_full(&mut self, project: &crate::project::Project, layer_id: u64) {
+        if let Some(layer) = project.layers.iter().find(|l| l.id == layer_id) {
+            if layer.has_mask {
+                let w = project.texture_width;
+                let h = project.texture_height;
+                let size = wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 };
+                use rayon::prelude::*;
+                let mask_rgba: Vec<glam::Vec4> = if layer.mask_buf.is_sparse() {
+                    let v = layer.mask_buf.default_val;
+                    let val = if layer.mask_inverted { 1.0 - v } else { v };
+                    vec![glam::Vec4::new(val, val, val, 1.0); (w * h) as usize]
+                } else {
+                    layer.mask_buf.data.par_iter().map(|&m| {
+                        let val = if layer.mask_inverted { 1.0 - m } else { m };
+                        glam::Vec4::new(val, val, val, 1.0)
+                    }).collect()
+                };
+                self.queue.write_texture(
+                    wgpu::ImageCopyTexture { texture: &self.tex_base_color, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                    bytemuck::cast_slice(&mask_rgba),
+                    wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(w * 16), rows_per_image: Some(h) },
+                    size,
+                );
+
+                let flat_normal = vec![glam::Vec4::new(0.5, 0.5, 1.0, 0.5); (w * h) as usize];
+                self.queue.write_texture(
+                    wgpu::ImageCopyTexture { texture: &self.tex_normal, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                    bytemuck::cast_slice(&flat_normal),
+                    wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(w * 16), rows_per_image: Some(h) },
+                    size,
+                );
+
+                let matte_roughness = vec![0.85f32; (w * h) as usize];
+                self.queue.write_texture(
+                    wgpu::ImageCopyTexture { texture: &self.tex_roughness, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                    bytemuck::cast_slice(&matte_roughness),
+                    wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(w * 4), rows_per_image: Some(h) },
+                    size,
+                );
+
+                let zero_metallic = vec![0.0f32; (w * h) as usize];
+                self.queue.write_texture(
+                    wgpu::ImageCopyTexture { texture: &self.tex_metallic, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                    bytemuck::cast_slice(&zero_metallic),
+                    wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(w * 4), rows_per_image: Some(h) },
+                    size,
+                );
+            }
+        }
+    }
+
     /// Fast sub-region upload of extended PBR channels (emission, opacity, clearcoat, anisotropy)
     /// streaming only the bounding-box rectangle over PCIe to avoid full-screen texture re-uploads.
     pub fn sync_extended_dirty_rect(

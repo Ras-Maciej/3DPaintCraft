@@ -138,24 +138,35 @@ fn cs_stamp(@builtin(global_invocation_id) global_id: vec3<u32>) {
         // Eraser mode
         let new_a = max(cur_col.a * (1.0 - best_weight), 0.0);
         textureStore(out_color, pixel_coord, vec4<f32>(cur_col.rgb, new_a));
-        textureStore(out_normal, pixel_coord, cur_norm);
+        let erase_h = mix(cur_norm.a, 0.5, best_weight);
+        textureStore(out_normal, pixel_coord, vec4<f32>(cur_norm.rgb, erase_h));
         textureStore(out_roughness, pixel_coord, vec4<f32>(cur_r, 0.0, 0.0, 0.0));
         textureStore(out_metallic, pixel_coord, vec4<f32>(cur_m, 0.0, 0.0, 0.0));
     } else {
         // Paint mode with channel gating
-        let mask = select(brush.channel_mask, 7u, brush.channel_mask == 0u);
+        let mask = select(brush.channel_mask, 15u, brush.channel_mask == 0u);
         let do_color = (mask & 1u) != 0u;
         let do_roughness = (mask & 2u) != 0u;
         let do_metallic = (mask & 4u) != 0u;
+        let do_height = (mask & 8u) != 0u;
+
+        let stroke_weight = best_weight;
+        let new_a = clamp(cur_col.a + stroke_weight * (1.0 - cur_col.a), 0.0, 1.0);
 
         if (do_color) {
             let new_rgb = mix(cur_col.rgb, brush.paint_color.rgb, best_weight);
-            let new_a = clamp(cur_col.a + best_weight * (1.0 - cur_col.a), 0.0, 1.0);
             textureStore(out_color, pixel_coord, vec4<f32>(new_rgb, new_a));
         } else {
-            textureStore(out_color, pixel_coord, cur_col);
+            let target_a = select(cur_col.a, new_a, (do_roughness || do_metallic || do_height));
+            textureStore(out_color, pixel_coord, vec4<f32>(cur_col.rgb, target_a));
         }
-        textureStore(out_normal, pixel_coord, cur_norm);
+
+        if (do_height) {
+            let new_h = mix(cur_norm.a, brush.params.z, best_weight);
+            textureStore(out_normal, pixel_coord, vec4<f32>(cur_norm.rgb, new_h));
+        } else {
+            textureStore(out_normal, pixel_coord, cur_norm);
+        }
 
         if (do_roughness) {
             let new_r = mix(cur_r, brush.params.x, best_weight);
