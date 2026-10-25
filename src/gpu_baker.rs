@@ -195,6 +195,7 @@ impl GpuBaker {
         RgbaBuffer {
             width,
             height,
+            default_val: Vec4::ZERO,
             data: rgba_data,
         }
     }
@@ -555,6 +556,7 @@ impl GpuBaker {
         let mut scalar_buf = ScalarBuffer {
             width,
             height,
+            default_val: 0.5,
             data: scalar_data,
         };
 
@@ -625,7 +627,7 @@ impl GpuBaker {
             if c.w < 0.5 { -1.0 } else { c.x.clamp(0.0, 1.0) }
         }).collect();
 
-        let mut scalar_buf = ScalarBuffer { width, height, data: scalar_data };
+        let mut scalar_buf = ScalarBuffer { width, height, default_val: 1.0, data: scalar_data };
         Self::dilate_scalar(&mut scalar_buf, 16, -1.0);
         scalar_buf.data.par_iter_mut().for_each(|v| {
             if *v < 0.0 { *v = 1.0; }
@@ -683,7 +685,7 @@ impl GpuBaker {
             if c.w < 0.5 { -1.0 } else { c.x.clamp(0.0, 1.0) }
         }).collect();
 
-        let mut scalar_buf = ScalarBuffer { width, height, data: scalar_data };
+        let mut scalar_buf = ScalarBuffer { width, height, default_val, data: scalar_data };
         Self::dilate_scalar(&mut scalar_buf, 16, -1.0);
         scalar_buf.data.par_iter_mut().for_each(|v| {
             if *v < 0.0 { *v = default_val; }

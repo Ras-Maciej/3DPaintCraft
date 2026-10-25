@@ -122,6 +122,8 @@ impl ChannelFlags {
 pub struct RgbaBuffer {
     pub width: u32,
     pub height: u32,
+    #[serde(default)]
+    pub default_val: Vec4,
     pub data: Vec<Vec4>,
 }
 
@@ -131,14 +133,59 @@ impl RgbaBuffer {
         Self {
             width,
             height,
+            default_val: default_color,
             data: vec![default_color; size],
         }
+    }
+
+    /// Creates a sparse virtual texture buffer with zero heap allocations (0 bytes allocated).
+    /// All pixel lookups and bilinear samples return default_val in O(1) time without memory access.
+    pub fn new_sparse(width: u32, height: u32, default_val: Vec4) -> Self {
+        Self {
+            width,
+            height,
+            default_val,
+            data: Vec::new(),
+        }
+    }
+
+    #[inline]
+    pub fn is_sparse(&self) -> bool {
+        self.data.is_empty() && (self.width > 0 && self.height > 0)
+    }
+
+    #[inline]
+    pub fn ensure_allocated(&mut self) {
+        if self.data.is_empty() && self.width > 0 && self.height > 0 {
+            let size = (self.width * self.height) as usize;
+            self.data = vec![self.default_val; size];
+        }
+    }
+
+    #[inline]
+    pub fn materialize(&mut self) {
+        self.ensure_allocated();
+    }
+
+    #[inline]
+    pub fn make_sparse(&mut self, default_val: Vec4) {
+        self.default_val = default_val;
+        self.data = Vec::new();
+    }
+
+    #[inline]
+    pub fn heap_memory_bytes(&self) -> usize {
+        self.data.capacity() * std::mem::size_of::<Vec4>()
     }
 
     #[inline]
     pub fn get_pixel(&self, x: u32, y: u32) -> Vec4 {
         if x < self.width && y < self.height {
-            self.data[(y * self.width + x) as usize]
+            if self.data.is_empty() {
+                self.default_val
+            } else {
+                self.data[(y * self.width + x) as usize]
+            }
         } else {
             Vec4::ZERO
         }
@@ -147,12 +194,22 @@ impl RgbaBuffer {
     #[inline]
     pub fn set_pixel(&mut self, x: u32, y: u32, color: Vec4) {
         if x < self.width && y < self.height {
+            if self.data.is_empty() {
+                if color == self.default_val {
+                    return;
+                }
+                self.materialize();
+            }
             self.data[(y * self.width + x) as usize] = color;
         }
     }
 
     /// Sample with bilinear interpolation in UV coordinates [0.0, 1.0]
     pub fn sample_bilinear(&self, uv: Vec2) -> Vec4 {
+        if self.data.is_empty() {
+            return self.default_val;
+        }
+
         let u = (uv.x.rem_euclid(1.0)) * (self.width as f32);
         let v = (uv.y.rem_euclid(1.0)) * (self.height as f32);
 
@@ -178,6 +235,11 @@ impl RgbaBuffer {
     /// Resize buffer with bilinear filtering
     pub fn resize_bilinear(&mut self, new_width: u32, new_height: u32) {
         if self.width == new_width && self.height == new_height {
+            return;
+        }
+        if self.data.is_empty() {
+            self.width = new_width;
+            self.height = new_height;
             return;
         }
         let mut new_data = Vec::with_capacity((new_width * new_height) as usize);
@@ -209,12 +271,12 @@ impl RgbaBuffer {
                 p[3] as f32 / 255.0,
             )
         }).collect();
-        Ok(Self { width, height, data })
+        Ok(Self { width, height, default_val: Vec4::ZERO, data })
     }
 
     /// Separable 1D Gaussian blur
     pub fn filter_gaussian_blur(&mut self, radius: f32) {
-        if radius < 0.5 { return; }
+        if radius < 0.5 || self.data.is_empty() { return; }
         let w = self.width as usize;
         let h = self.height as usize;
         let r = radius.ceil() as i32;
@@ -255,6 +317,9 @@ impl RgbaBuffer {
 
     /// Levels adjustment on RGB channels
     pub fn filter_levels(&mut self, in_black: f32, in_white: f32, gamma: f32, out_black: f32, out_white: f32) {
+        if self.data.is_empty() {
+            self.materialize();
+        }
         let inv_range = 1.0 / (in_white - in_black).max(1e-4);
         let inv_gamma = 1.0 / gamma.max(0.01);
         let out_range = out_white - out_black;
@@ -271,6 +336,10 @@ impl RgbaBuffer {
 
     /// Invert RGB channels
     pub fn filter_invert(&mut self) {
+        if self.data.is_empty() {
+            self.default_val = Vec4::new(1.0 - self.default_val.x, 1.0 - self.default_val.y, 1.0 - self.default_val.z, self.default_val.w);
+            return;
+        }
         for c in &mut self.data {
             *c = Vec4::new(1.0 - c.x, 1.0 - c.y, 1.0 - c.z, c.w);
         }
@@ -278,6 +347,9 @@ impl RgbaBuffer {
 
     /// Sharpen via unsharp mask
     pub fn filter_sharpen(&mut self, strength: f32) {
+        if self.data.is_empty() {
+            return;
+        }
         let mut blurred = self.clone();
         blurred.filter_gaussian_blur(1.5);
         for (orig, blur) in self.data.iter_mut().zip(blurred.data.iter()) {
@@ -289,6 +361,9 @@ impl RgbaBuffer {
 
     /// Contrast and brightness adjustment on RGB channels
     pub fn filter_contrast_brightness(&mut self, contrast: f32, brightness: f32) {
+        if self.data.is_empty() {
+            self.materialize();
+        }
         for c in &mut self.data {
             let rgb = c.truncate();
             let with_b = (rgb + Vec3::splat(brightness)).clamp(Vec3::ZERO, Vec3::ONE);
@@ -299,6 +374,9 @@ impl RgbaBuffer {
 
     /// High-pass filter isolating high-frequency detail
     pub fn filter_high_pass(&mut self, radius: f32) {
+        if self.data.is_empty() {
+            self.materialize();
+        }
         let mut blurred = self.clone();
         blurred.filter_gaussian_blur(radius);
         for (orig, blur) in self.data.iter_mut().zip(blurred.data.iter()) {
@@ -314,6 +392,8 @@ impl RgbaBuffer {
 pub struct ScalarBuffer {
     pub width: u32,
     pub height: u32,
+    #[serde(default)]
+    pub default_val: f32,
     pub data: Vec<f32>,
 }
 
@@ -323,14 +403,59 @@ impl ScalarBuffer {
         Self {
             width,
             height,
+            default_val: default_value,
             data: vec![default_value; size],
         }
+    }
+
+    /// Creates a sparse virtual scalar buffer with zero heap allocations (0 bytes allocated).
+    /// All pixel lookups and bilinear samples return default_val in O(1) time without memory access.
+    pub fn new_sparse(width: u32, height: u32, default_val: f32) -> Self {
+        Self {
+            width,
+            height,
+            default_val,
+            data: Vec::new(),
+        }
+    }
+
+    #[inline]
+    pub fn is_sparse(&self) -> bool {
+        self.data.is_empty() && (self.width > 0 && self.height > 0)
+    }
+
+    #[inline]
+    pub fn ensure_allocated(&mut self) {
+        if self.data.is_empty() && self.width > 0 && self.height > 0 {
+            let size = (self.width * self.height) as usize;
+            self.data = vec![self.default_val; size];
+        }
+    }
+
+    #[inline]
+    pub fn materialize(&mut self) {
+        self.ensure_allocated();
+    }
+
+    #[inline]
+    pub fn make_sparse(&mut self, default_val: f32) {
+        self.default_val = default_val;
+        self.data = Vec::new();
+    }
+
+    #[inline]
+    pub fn heap_memory_bytes(&self) -> usize {
+        self.data.capacity() * std::mem::size_of::<f32>()
     }
 
     #[inline]
     pub fn get_pixel(&self, x: u32, y: u32) -> f32 {
         if x < self.width && y < self.height {
-            self.data[(y * self.width + x) as usize]
+            if self.data.is_empty() {
+                self.default_val
+            } else {
+                self.data[(y * self.width + x) as usize]
+            }
         } else {
             0.0
         }
@@ -339,17 +464,31 @@ impl ScalarBuffer {
     #[inline]
     pub fn set_pixel(&mut self, x: u32, y: u32, value: f32) {
         if x < self.width && y < self.height {
+            if self.data.is_empty() {
+                if (value - self.default_val).abs() < 1e-6 {
+                    return;
+                }
+                self.materialize();
+            }
             self.data[(y * self.width + x) as usize] = value;
         }
     }
 
     pub fn invert(&mut self) {
+        if self.data.is_empty() {
+            self.default_val = (1.0 - self.default_val).clamp(0.0, 1.0);
+            return;
+        }
         for v in &mut self.data {
             *v = (1.0 - *v).clamp(0.0, 1.0);
         }
     }
 
     pub fn sample_bilinear(&self, uv: Vec2) -> f32 {
+        if self.data.is_empty() {
+            return self.default_val;
+        }
+
         let u = (uv.x.rem_euclid(1.0)) * (self.width as f32);
         let v = (uv.y.rem_euclid(1.0)) * (self.height as f32);
 
@@ -377,6 +516,11 @@ impl ScalarBuffer {
         if self.width == new_width && self.height == new_height {
             return;
         }
+        if self.data.is_empty() {
+            self.width = new_width;
+            self.height = new_height;
+            return;
+        }
         let mut new_data = Vec::with_capacity((new_width * new_height) as usize);
         for y in 0..new_height {
             for x in 0..new_width {
@@ -400,12 +544,12 @@ impl ScalarBuffer {
         let width = gray.width();
         let height = gray.height();
         let data: Vec<f32> = gray.pixels().map(|p| p[0] as f32 / 255.0).collect();
-        Ok(Self { width, height, data })
+        Ok(Self { width, height, default_val: 0.0, data })
     }
 
     /// Separable 1D Gaussian blur
     pub fn filter_gaussian_blur(&mut self, radius: f32) {
-        if radius < 0.5 { return; }
+        if radius < 0.5 || self.data.is_empty() { return; }
         let w = self.width as usize;
         let h = self.height as usize;
         let r = radius.ceil() as i32;
@@ -446,6 +590,9 @@ impl ScalarBuffer {
 
     /// Levels adjustment
     pub fn filter_levels(&mut self, in_black: f32, in_white: f32, gamma: f32, out_black: f32, out_white: f32) {
+        if self.data.is_empty() {
+            self.materialize();
+        }
         let inv_range = 1.0 / (in_white - in_black).max(1e-4);
         let inv_gamma = 1.0 / gamma.max(0.01);
         let out_range = out_white - out_black;
@@ -458,6 +605,10 @@ impl ScalarBuffer {
 
     /// Invert values
     pub fn filter_invert(&mut self) {
+        if self.data.is_empty() {
+            self.default_val = (1.0 - self.default_val).clamp(0.0, 1.0);
+            return;
+        }
         for v in &mut self.data {
             *v = 1.0 - *v;
         }
@@ -465,6 +616,9 @@ impl ScalarBuffer {
 
     /// Sharpen via unsharp mask
     pub fn filter_sharpen(&mut self, strength: f32) {
+        if self.data.is_empty() {
+            return;
+        }
         let mut blurred = self.clone();
         blurred.filter_gaussian_blur(1.5);
         for (orig, blur) in self.data.iter_mut().zip(blurred.data.iter()) {
@@ -475,6 +629,9 @@ impl ScalarBuffer {
 
     /// Contrast and brightness adjustment on scalar values
     pub fn filter_contrast_brightness(&mut self, contrast: f32, brightness: f32) {
+        if self.data.is_empty() {
+            self.materialize();
+        }
         for v in &mut self.data {
             let with_b = (*v + brightness).clamp(0.0, 1.0);
             *v = ((with_b - 0.5) * contrast + 0.5).clamp(0.0, 1.0);
@@ -483,6 +640,9 @@ impl ScalarBuffer {
 
     /// High-pass filter isolating high-frequency detail
     pub fn filter_high_pass(&mut self, radius: f32) {
+        if self.data.is_empty() {
+            self.materialize();
+        }
         let mut blurred = self.clone();
         blurred.filter_gaussian_blur(radius);
         for (orig, blur) in self.data.iter_mut().zip(blurred.data.iter()) {
@@ -506,5 +666,34 @@ mod tests {
         assert!((buf.get_pixel(0, 0) - 0.75).abs() < 1e-5);
         assert!((buf.get_pixel(1, 0) - 1.0).abs() < 1e-5);
         assert!((buf.get_pixel(0, 1) - 0.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_sparse_buffer_allocations() {
+        // 4K sparse buffers must allocate 0 heap bytes
+        let mut rgba_sparse = RgbaBuffer::new_sparse(4096, 4096, Vec4::new(0.5, 0.5, 0.5, 1.0));
+        assert!(rgba_sparse.is_sparse());
+        assert_eq!(rgba_sparse.heap_memory_bytes(), 0);
+        assert_eq!(rgba_sparse.get_pixel(2048, 2048), Vec4::new(0.5, 0.5, 0.5, 1.0));
+        assert_eq!(rgba_sparse.sample_bilinear(Vec2::new(0.5, 0.5)), Vec4::new(0.5, 0.5, 0.5, 1.0));
+
+        // Resizing sparse buffer takes 0 allocations
+        rgba_sparse.resize_bilinear(8192, 8192);
+        assert_eq!(rgba_sparse.width, 8192);
+        assert_eq!(rgba_sparse.heap_memory_bytes(), 0);
+
+        // Setting a pixel materializes on-demand
+        rgba_sparse.set_pixel(100, 100, Vec4::ONE);
+        assert!(!rgba_sparse.is_sparse());
+        assert_eq!(rgba_sparse.get_pixel(100, 100), Vec4::ONE);
+        assert_eq!(rgba_sparse.get_pixel(0, 0), Vec4::new(0.5, 0.5, 0.5, 1.0));
+
+        let mut scalar_sparse = ScalarBuffer::new_sparse(4096, 4096, 0.7);
+        assert!(scalar_sparse.is_sparse());
+        assert_eq!(scalar_sparse.heap_memory_bytes(), 0);
+        assert_eq!(scalar_sparse.get_pixel(1024, 1024), 0.7);
+        scalar_sparse.invert();
+        assert_eq!(scalar_sparse.get_pixel(1024, 1024), 0.3);
+        assert_eq!(scalar_sparse.heap_memory_bytes(), 0);
     }
 }

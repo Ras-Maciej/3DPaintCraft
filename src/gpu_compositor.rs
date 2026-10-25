@@ -176,6 +176,98 @@ impl GpuCompositor {
         }
     }
 
+fn write_rgba_buffer(
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    buf: &crate::channel::RgbaBuffer,
+    origin: wgpu::Origin3d,
+    size: wgpu::Extent3d,
+    doc_width: u32,
+) {
+    if buf.is_sparse() {
+        let chunk_rows = 128.min(size.height);
+        let chunk = vec![buf.default_val; (size.width * chunk_rows) as usize];
+        let chunk_bytes: &[u8] = bytemuck::cast_slice(&chunk);
+        let bytes_per_row = size.width * 16;
+        let mut y = 0;
+        while y < size.height {
+            let rows = chunk_rows.min(size.height - y);
+            let chunk_size = wgpu::Extent3d {
+                width: size.width,
+                height: rows,
+                depth_or_array_layers: 1,
+            };
+            let chunk_origin = wgpu::Origin3d {
+                x: origin.x,
+                y: origin.y + y,
+                z: origin.z,
+            };
+            queue.write_texture(
+                wgpu::ImageCopyTexture { texture, mip_level: 0, origin: chunk_origin, aspect: wgpu::TextureAspect::All },
+                chunk_bytes,
+                wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(bytes_per_row), rows_per_image: Some(rows) },
+                chunk_size,
+            );
+            y += rows;
+        }
+    } else {
+        let byte_offset = ((origin.y * doc_width + origin.x) as u64) * 16;
+        let bytes_per_row = doc_width * 16;
+        queue.write_texture(
+            wgpu::ImageCopyTexture { texture, mip_level: 0, origin, aspect: wgpu::TextureAspect::All },
+            bytemuck::cast_slice(&buf.data),
+            wgpu::ImageDataLayout { offset: byte_offset, bytes_per_row: Some(bytes_per_row), rows_per_image: None },
+            size,
+        );
+    }
+}
+
+fn write_scalar_buffer(
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    buf: &crate::channel::ScalarBuffer,
+    origin: wgpu::Origin3d,
+    size: wgpu::Extent3d,
+    doc_width: u32,
+) {
+    if buf.is_sparse() {
+        let chunk_rows = 128.min(size.height);
+        let chunk = vec![buf.default_val; (size.width * chunk_rows) as usize];
+        let chunk_bytes: &[u8] = bytemuck::cast_slice(&chunk);
+        let bytes_per_row = size.width * 4;
+        let mut y = 0;
+        while y < size.height {
+            let rows = chunk_rows.min(size.height - y);
+            let chunk_size = wgpu::Extent3d {
+                width: size.width,
+                height: rows,
+                depth_or_array_layers: 1,
+            };
+            let chunk_origin = wgpu::Origin3d {
+                x: origin.x,
+                y: origin.y + y,
+                z: origin.z,
+            };
+            queue.write_texture(
+                wgpu::ImageCopyTexture { texture, mip_level: 0, origin: chunk_origin, aspect: wgpu::TextureAspect::All },
+                chunk_bytes,
+                wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(bytes_per_row), rows_per_image: Some(rows) },
+                chunk_size,
+            );
+            y += rows;
+        }
+    } else {
+        let byte_offset = ((origin.y * doc_width + origin.x) as u64) * 4;
+        let bytes_per_row = doc_width * 4;
+        queue.write_texture(
+            wgpu::ImageCopyTexture { texture, mip_level: 0, origin, aspect: wgpu::TextureAspect::All },
+            bytemuck::cast_slice(&buf.data),
+            wgpu::ImageDataLayout { offset: byte_offset, bytes_per_row: Some(bytes_per_row), rows_per_image: None },
+            size,
+        );
+    }
+}
+
     #[allow(dead_code)]
     pub fn update_layer_full(&self, cpu_layer: &crate::layer::Layer, gpu_layer: &GpuLayer, width: u32, height: u32) {
         self.update_layer_full_selective(cpu_layer, gpu_layer, width, height, cpu_layer.dirty_flags);
@@ -190,40 +282,21 @@ impl GpuCompositor {
         flags: crate::layer::LayerDirtyFlags,
     ) {
         let size = wgpu::Extent3d { width, height, depth_or_array_layers: 1 };
+        let origin = wgpu::Origin3d::ZERO;
         if flags.color {
-            self.queue.write_texture(
-                wgpu::ImageCopyTexture { texture: &gpu_layer.base_color, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-                bytemuck::cast_slice(&cpu_layer.base_color_buf.data),
-                wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(4 * 4 * width), rows_per_image: Some(height) }, size
-            );
+            Self::write_rgba_buffer(&self.queue, &gpu_layer.base_color, &cpu_layer.base_color_buf, origin, size, width);
         }
         if flags.normal {
-            self.queue.write_texture(
-                wgpu::ImageCopyTexture { texture: &gpu_layer.normal, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-                bytemuck::cast_slice(&cpu_layer.normal_buf.data),
-                wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(4 * 4 * width), rows_per_image: Some(height) }, size
-            );
+            Self::write_rgba_buffer(&self.queue, &gpu_layer.normal, &cpu_layer.normal_buf, origin, size, width);
         }
         if flags.roughness {
-            self.queue.write_texture(
-                wgpu::ImageCopyTexture { texture: &gpu_layer.roughness, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-                bytemuck::cast_slice(&cpu_layer.roughness_buf.data),
-                wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(4 * width), rows_per_image: Some(height) }, size
-            );
+            Self::write_scalar_buffer(&self.queue, &gpu_layer.roughness, &cpu_layer.roughness_buf, origin, size, width);
         }
         if flags.metallic {
-            self.queue.write_texture(
-                wgpu::ImageCopyTexture { texture: &gpu_layer.metallic, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-                bytemuck::cast_slice(&cpu_layer.metallic_buf.data),
-                wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(4 * width), rows_per_image: Some(height) }, size
-            );
+            Self::write_scalar_buffer(&self.queue, &gpu_layer.metallic, &cpu_layer.metallic_buf, origin, size, width);
         }
         if flags.mask && cpu_layer.has_mask {
-            self.queue.write_texture(
-                wgpu::ImageCopyTexture { texture: &gpu_layer.mask, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-                bytemuck::cast_slice(&cpu_layer.mask_buf.data),
-                wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(4 * width), rows_per_image: Some(height) }, size
-            );
+            Self::write_scalar_buffer(&self.queue, &gpu_layer.mask, &cpu_layer.mask_buf, origin, size, width);
         }
     }
 
@@ -246,50 +319,20 @@ impl GpuCompositor {
                 let size = wgpu::Extent3d { width: rect_w, height: rect_h, depth_or_array_layers: 1 };
                 let origin = wgpu::Origin3d { x: x0, y: y0, z: 0 };
 
-                let byte_offset_16 = ((y0 * width + x0) as u64) * 16;
-                let bytes_per_row_16 = width * 16;
-                let byte_offset_4 = ((y0 * width + x0) as u64) * 4;
-                let bytes_per_row_4 = width * 4;
-
                 if flags.color {
-                    self.queue.write_texture(
-                        wgpu::ImageCopyTexture { texture: &gpu_layer.base_color, mip_level: 0, origin, aspect: wgpu::TextureAspect::All },
-                        bytemuck::cast_slice(&cpu_layer.base_color_buf.data),
-                        wgpu::ImageDataLayout { offset: byte_offset_16, bytes_per_row: Some(bytes_per_row_16), rows_per_image: None },
-                        size,
-                    );
+                    Self::write_rgba_buffer(&self.queue, &gpu_layer.base_color, &cpu_layer.base_color_buf, origin, size, width);
                 }
                 if flags.normal {
-                    self.queue.write_texture(
-                        wgpu::ImageCopyTexture { texture: &gpu_layer.normal, mip_level: 0, origin, aspect: wgpu::TextureAspect::All },
-                        bytemuck::cast_slice(&cpu_layer.normal_buf.data),
-                        wgpu::ImageDataLayout { offset: byte_offset_16, bytes_per_row: Some(bytes_per_row_16), rows_per_image: None },
-                        size,
-                    );
+                    Self::write_rgba_buffer(&self.queue, &gpu_layer.normal, &cpu_layer.normal_buf, origin, size, width);
                 }
                 if flags.roughness {
-                    self.queue.write_texture(
-                        wgpu::ImageCopyTexture { texture: &gpu_layer.roughness, mip_level: 0, origin, aspect: wgpu::TextureAspect::All },
-                        bytemuck::cast_slice(&cpu_layer.roughness_buf.data),
-                        wgpu::ImageDataLayout { offset: byte_offset_4, bytes_per_row: Some(bytes_per_row_4), rows_per_image: None },
-                        size,
-                    );
+                    Self::write_scalar_buffer(&self.queue, &gpu_layer.roughness, &cpu_layer.roughness_buf, origin, size, width);
                 }
                 if flags.metallic {
-                    self.queue.write_texture(
-                        wgpu::ImageCopyTexture { texture: &gpu_layer.metallic, mip_level: 0, origin, aspect: wgpu::TextureAspect::All },
-                        bytemuck::cast_slice(&cpu_layer.metallic_buf.data),
-                        wgpu::ImageDataLayout { offset: byte_offset_4, bytes_per_row: Some(bytes_per_row_4), rows_per_image: None },
-                        size,
-                    );
+                    Self::write_scalar_buffer(&self.queue, &gpu_layer.metallic, &cpu_layer.metallic_buf, origin, size, width);
                 }
                 if flags.mask && cpu_layer.has_mask {
-                    self.queue.write_texture(
-                        wgpu::ImageCopyTexture { texture: &gpu_layer.mask, mip_level: 0, origin, aspect: wgpu::TextureAspect::All },
-                        bytemuck::cast_slice(&cpu_layer.mask_buf.data),
-                        wgpu::ImageDataLayout { offset: byte_offset_4, bytes_per_row: Some(bytes_per_row_4), rows_per_image: None },
-                        size,
-                    );
+                    Self::write_scalar_buffer(&self.queue, &gpu_layer.mask, &cpu_layer.mask_buf, origin, size, width);
                 }
             }
         }
@@ -307,31 +350,12 @@ impl GpuCompositor {
         let metallic = self.device.create_texture(&desc_r);
         let mask = self.device.create_texture(&desc_r);
 
-        self.queue.write_texture(
-            wgpu::ImageCopyTexture { texture: &base_color, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-            bytemuck::cast_slice(&cpu_layer.base_color_buf.data),
-            wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(4 * 4 * width), rows_per_image: Some(height) }, size
-        );
-        self.queue.write_texture(
-            wgpu::ImageCopyTexture { texture: &normal, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-            bytemuck::cast_slice(&cpu_layer.normal_buf.data),
-            wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(4 * 4 * width), rows_per_image: Some(height) }, size
-        );
-        self.queue.write_texture(
-            wgpu::ImageCopyTexture { texture: &roughness, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-            bytemuck::cast_slice(&cpu_layer.roughness_buf.data),
-            wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(4 * width), rows_per_image: Some(height) }, size
-        );
-        self.queue.write_texture(
-            wgpu::ImageCopyTexture { texture: &metallic, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-            bytemuck::cast_slice(&cpu_layer.metallic_buf.data),
-            wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(4 * width), rows_per_image: Some(height) }, size
-        );
-        self.queue.write_texture(
-            wgpu::ImageCopyTexture { texture: &mask, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-            bytemuck::cast_slice(&cpu_layer.mask_buf.data),
-            wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(4 * width), rows_per_image: Some(height) }, size
-        );
+        let origin = wgpu::Origin3d::ZERO;
+        Self::write_rgba_buffer(&self.queue, &base_color, &cpu_layer.base_color_buf, origin, size, width);
+        Self::write_rgba_buffer(&self.queue, &normal, &cpu_layer.normal_buf, origin, size, width);
+        Self::write_scalar_buffer(&self.queue, &roughness, &cpu_layer.roughness_buf, origin, size, width);
+        Self::write_scalar_buffer(&self.queue, &metallic, &cpu_layer.metallic_buf, origin, size, width);
+        Self::write_scalar_buffer(&self.queue, &mask, &cpu_layer.mask_buf, origin, size, width);
 
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Layer BG"),

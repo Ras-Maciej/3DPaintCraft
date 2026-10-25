@@ -604,20 +604,20 @@ impl Layer {
             fill_emissive_tex: None,
             fill_opacity_tex: None,
 
-            // Transparent paint buffers
-            base_color_buf: RgbaBuffer::new(width, height, Vec4::ZERO),
-            roughness_buf: ScalarBuffer::new(width, height, 0.5),
-            metallic_buf: ScalarBuffer::new(width, height, 0.0),
-            height_buf: ScalarBuffer::new(width, height, 0.5),
-            normal_buf: RgbaBuffer::new(width, height, Vec4::new(0.5, 0.5, 1.0, 0.5)),
-            emissive_buf: RgbaBuffer::new(width, height, Vec4::ZERO),
-            opacity_buf: ScalarBuffer::new(width, height, 1.0),
-            clearcoat_buf: ScalarBuffer::new(width, height, 0.0),
-            anisotropy_buf: ScalarBuffer::new(width, height, 0.0),
-            anisotropy_angle_buf: ScalarBuffer::new(width, height, 0.0),
+            // Sparse virtual paint buffers (0 bytes allocated until actively painted)
+            base_color_buf: RgbaBuffer::new_sparse(width, height, Vec4::ZERO),
+            roughness_buf: ScalarBuffer::new_sparse(width, height, 0.5),
+            metallic_buf: ScalarBuffer::new_sparse(width, height, 0.0),
+            height_buf: ScalarBuffer::new_sparse(width, height, 0.5),
+            normal_buf: RgbaBuffer::new_sparse(width, height, Vec4::new(0.5, 0.5, 1.0, 0.5)),
+            emissive_buf: RgbaBuffer::new_sparse(width, height, Vec4::ZERO),
+            opacity_buf: ScalarBuffer::new_sparse(width, height, 1.0),
+            clearcoat_buf: ScalarBuffer::new_sparse(width, height, 0.0),
+            anisotropy_buf: ScalarBuffer::new_sparse(width, height, 0.0),
+            anisotropy_angle_buf: ScalarBuffer::new_sparse(width, height, 0.0),
 
             has_mask: false,
-            mask_buf: ScalarBuffer::new(width, height, 1.0),
+            mask_buf: ScalarBuffer::new_sparse(width, height, 1.0),
             mask_inverted: false,
             base_mask_value: 1.0,
             mask_effects: Vec::new(),
@@ -778,7 +778,7 @@ impl Layer {
     pub fn set_fill_roughness(&mut self, val: f32) {
         self.fill_roughness = val;
         if self.fill_roughness_tex.is_none() && self.fill_generator == ProceduralGenerator::None && !self.triplanar {
-            self.roughness_buf.data.fill(val);
+            self.roughness_buf.make_sparse(val);
             self.mark_dirty_channel(ChannelType::Roughness);
         }
     }
@@ -786,7 +786,7 @@ impl Layer {
     pub fn set_fill_metallic(&mut self, val: f32) {
         self.fill_metallic = val;
         if self.fill_metallic_tex.is_none() && self.fill_generator == ProceduralGenerator::None && !self.triplanar {
-            self.metallic_buf.data.fill(val);
+            self.metallic_buf.make_sparse(val);
             self.mark_dirty_channel(ChannelType::Metallic);
         }
     }
@@ -794,7 +794,7 @@ impl Layer {
     pub fn set_fill_color(&mut self, val: Vec4) {
         self.fill_color = val;
         if self.fill_color_tex.is_none() && self.fill_generator == ProceduralGenerator::None && !self.triplanar {
-            self.base_color_buf.data.fill(val);
+            self.base_color_buf.make_sparse(val);
             self.mark_dirty_channel(ChannelType::BaseColor);
         }
     }
@@ -802,7 +802,7 @@ impl Layer {
     pub fn set_fill_clearcoat(&mut self, val: f32) {
         self.fill_clearcoat = val;
         if self.fill_generator == ProceduralGenerator::None && !self.triplanar {
-            self.clearcoat_buf.data.fill(val);
+            self.clearcoat_buf.make_sparse(val);
             self.mark_dirty_full();
         }
     }
@@ -810,7 +810,7 @@ impl Layer {
     pub fn set_fill_emissive(&mut self, val: Vec4) {
         self.fill_emissive = val;
         if self.fill_emissive_tex.is_none() && self.fill_generator == ProceduralGenerator::None && !self.triplanar {
-            self.emissive_buf.data.fill(val);
+            self.emissive_buf.make_sparse(val);
             self.mark_dirty_full();
         }
     }
@@ -818,7 +818,7 @@ impl Layer {
     pub fn set_fill_opacity(&mut self, val: f32) {
         self.fill_opacity = val;
         if self.fill_opacity_tex.is_none() && self.fill_generator == ProceduralGenerator::None && !self.triplanar {
-            self.opacity_buf.data.fill(val);
+            self.opacity_buf.make_sparse(val);
             self.mark_dirty_full();
         }
     }
@@ -993,37 +993,37 @@ impl Layer {
     /// If selective buffer snapshot was used, empty buffers in snapshot will not overwrite
     /// existing layer data.
     pub fn restore_stroke_snapshot(&mut self, snapshot: &Layer) {
-        if !snapshot.base_color_buf.data.is_empty() {
+        if snapshot.base_color_buf.width > 0 {
             self.base_color_buf = snapshot.base_color_buf.clone();
         }
-        if !snapshot.roughness_buf.data.is_empty() {
+        if snapshot.roughness_buf.width > 0 {
             self.roughness_buf = snapshot.roughness_buf.clone();
         }
-        if !snapshot.metallic_buf.data.is_empty() {
+        if snapshot.metallic_buf.width > 0 {
             self.metallic_buf = snapshot.metallic_buf.clone();
         }
-        if !snapshot.height_buf.data.is_empty() {
+        if snapshot.height_buf.width > 0 {
             self.height_buf = snapshot.height_buf.clone();
         }
-        if !snapshot.normal_buf.data.is_empty() {
+        if snapshot.normal_buf.width > 0 {
             self.normal_buf = snapshot.normal_buf.clone();
         }
-        if !snapshot.emissive_buf.data.is_empty() {
+        if snapshot.emissive_buf.width > 0 {
             self.emissive_buf = snapshot.emissive_buf.clone();
         }
-        if !snapshot.opacity_buf.data.is_empty() {
+        if snapshot.opacity_buf.width > 0 {
             self.opacity_buf = snapshot.opacity_buf.clone();
         }
-        if !snapshot.clearcoat_buf.data.is_empty() {
+        if snapshot.clearcoat_buf.width > 0 {
             self.clearcoat_buf = snapshot.clearcoat_buf.clone();
         }
-        if !snapshot.anisotropy_buf.data.is_empty() {
+        if snapshot.anisotropy_buf.width > 0 {
             self.anisotropy_buf = snapshot.anisotropy_buf.clone();
         }
-        if !snapshot.anisotropy_angle_buf.data.is_empty() {
+        if snapshot.anisotropy_angle_buf.width > 0 {
             self.anisotropy_angle_buf = snapshot.anisotropy_angle_buf.clone();
         }
-        if !snapshot.mask_buf.data.is_empty() {
+        if snapshot.mask_buf.width > 0 {
             self.mask_buf = snapshot.mask_buf.clone();
         }
         self.has_mask = snapshot.has_mask;
@@ -1036,6 +1036,57 @@ impl Layer {
         self.dirty_flags = snapshot.dirty_flags;
     }
 
+    /// Ensures active painted channels are materialized on demand from sparse state
+    pub fn ensure_allocated_for_paint(
+        &mut self,
+        target: crate::brush::PaintTarget,
+        channels: crate::channel::ChannelFlags,
+        is_eraser: bool,
+    ) {
+        if target == crate::brush::PaintTarget::Mask {
+            self.mask_buf.ensure_allocated();
+            return;
+        }
+
+        self.base_color_buf.ensure_allocated();
+
+        if is_eraser {
+            self.height_buf.ensure_allocated();
+            self.emissive_buf.ensure_allocated();
+            self.opacity_buf.ensure_allocated();
+            self.clearcoat_buf.ensure_allocated();
+            self.anisotropy_buf.ensure_allocated();
+            self.anisotropy_angle_buf.ensure_allocated();
+        } else {
+            if channels.roughness { self.roughness_buf.ensure_allocated(); }
+            if channels.metallic { self.metallic_buf.ensure_allocated(); }
+            if channels.height { self.height_buf.ensure_allocated(); }
+            if channels.emission { self.emissive_buf.ensure_allocated(); }
+            if channels.opacity { self.opacity_buf.ensure_allocated(); }
+            if channels.clearcoat { self.clearcoat_buf.ensure_allocated(); }
+            if channels.anisotropy {
+                self.anisotropy_buf.ensure_allocated();
+                self.anisotropy_angle_buf.ensure_allocated();
+            }
+        }
+    }
+
+    /// Total heap raster buffer memory allocated by this layer in bytes.
+    /// Sparse virtual textures consume 0 bytes.
+    pub fn raster_memory_bytes(&self) -> usize {
+        self.base_color_buf.heap_memory_bytes()
+            + self.roughness_buf.heap_memory_bytes()
+            + self.metallic_buf.heap_memory_bytes()
+            + self.height_buf.heap_memory_bytes()
+            + self.normal_buf.heap_memory_bytes()
+            + self.emissive_buf.heap_memory_bytes()
+            + self.opacity_buf.heap_memory_bytes()
+            + self.clearcoat_buf.heap_memory_bytes()
+            + self.anisotropy_buf.heap_memory_bytes()
+            + self.anisotropy_angle_buf.heap_memory_bytes()
+            + self.mask_buf.heap_memory_bytes()
+    }
+
     /// Begin recording a stroke with sparse tile deltas.
     /// Allocates zero buffer clones at stroke start.
     pub fn begin_stroke_recording(
@@ -1043,6 +1094,7 @@ impl Layer {
         target: crate::brush::PaintTarget,
         channels: crate::channel::ChannelFlags,
     ) {
+        self.ensure_allocated_for_paint(target, channels, false);
         self.stroke_undo_buffer = Some(TileUndoBuffer {
             target,
             channels,
@@ -1180,9 +1232,15 @@ impl Layer {
 
         let base_color = if !is_mask && channels.base_color {
             let mut v = Vec::with_capacity(total);
-            for y in y0..y1 {
-                let start = y * doc_w + x0;
-                v.extend_from_slice(&self.base_color_buf.data[start..start + w]);
+            if self.base_color_buf.is_sparse() {
+                v.resize(total, self.base_color_buf.default_val);
+            } else if self.base_color_buf.data.len() >= doc_w * doc_h {
+                for y in y0..y1 {
+                    let start = y * doc_w + x0;
+                    v.extend_from_slice(&self.base_color_buf.data[start..start + w]);
+                }
+            } else {
+                v.resize(total, self.base_color_buf.default_val);
             }
             Some(v)
         } else {
@@ -1191,9 +1249,15 @@ impl Layer {
 
         let normal = if !is_mask && (channels.normal || channels.height) {
             let mut v = Vec::with_capacity(total);
-            for y in y0..y1 {
-                let start = y * doc_w + x0;
-                v.extend_from_slice(&self.normal_buf.data[start..start + w]);
+            if self.normal_buf.is_sparse() {
+                v.resize(total, self.normal_buf.default_val);
+            } else if self.normal_buf.data.len() >= doc_w * doc_h {
+                for y in y0..y1 {
+                    let start = y * doc_w + x0;
+                    v.extend_from_slice(&self.normal_buf.data[start..start + w]);
+                }
+            } else {
+                v.resize(total, self.normal_buf.default_val);
             }
             Some(v)
         } else {
@@ -1202,9 +1266,15 @@ impl Layer {
 
         let emissive = if !is_mask && channels.emission {
             let mut v = Vec::with_capacity(total);
-            for y in y0..y1 {
-                let start = y * doc_w + x0;
-                v.extend_from_slice(&self.emissive_buf.data[start..start + w]);
+            if self.emissive_buf.is_sparse() {
+                v.resize(total, self.emissive_buf.default_val);
+            } else if self.emissive_buf.data.len() >= doc_w * doc_h {
+                for y in y0..y1 {
+                    let start = y * doc_w + x0;
+                    v.extend_from_slice(&self.emissive_buf.data[start..start + w]);
+                }
+            } else {
+                v.resize(total, self.emissive_buf.default_val);
             }
             Some(v)
         } else {
@@ -1213,9 +1283,15 @@ impl Layer {
 
         let roughness = if !is_mask && channels.roughness {
             let mut v = Vec::with_capacity(total);
-            for y in y0..y1 {
-                let start = y * doc_w + x0;
-                v.extend_from_slice(&self.roughness_buf.data[start..start + w]);
+            if self.roughness_buf.is_sparse() {
+                v.resize(total, self.roughness_buf.default_val);
+            } else if self.roughness_buf.data.len() >= doc_w * doc_h {
+                for y in y0..y1 {
+                    let start = y * doc_w + x0;
+                    v.extend_from_slice(&self.roughness_buf.data[start..start + w]);
+                }
+            } else {
+                v.resize(total, self.roughness_buf.default_val);
             }
             Some(v)
         } else {
@@ -1224,9 +1300,15 @@ impl Layer {
 
         let metallic = if !is_mask && channels.metallic {
             let mut v = Vec::with_capacity(total);
-            for y in y0..y1 {
-                let start = y * doc_w + x0;
-                v.extend_from_slice(&self.metallic_buf.data[start..start + w]);
+            if self.metallic_buf.is_sparse() {
+                v.resize(total, self.metallic_buf.default_val);
+            } else if self.metallic_buf.data.len() >= doc_w * doc_h {
+                for y in y0..y1 {
+                    let start = y * doc_w + x0;
+                    v.extend_from_slice(&self.metallic_buf.data[start..start + w]);
+                }
+            } else {
+                v.resize(total, self.metallic_buf.default_val);
             }
             Some(v)
         } else {
@@ -1235,9 +1317,15 @@ impl Layer {
 
         let height_buf = if !is_mask && channels.height {
             let mut v = Vec::with_capacity(total);
-            for y in y0..y1 {
-                let start = y * doc_w + x0;
-                v.extend_from_slice(&self.height_buf.data[start..start + w]);
+            if self.height_buf.is_sparse() {
+                v.resize(total, self.height_buf.default_val);
+            } else if self.height_buf.data.len() >= doc_w * doc_h {
+                for y in y0..y1 {
+                    let start = y * doc_w + x0;
+                    v.extend_from_slice(&self.height_buf.data[start..start + w]);
+                }
+            } else {
+                v.resize(total, self.height_buf.default_val);
             }
             Some(v)
         } else {
@@ -1246,9 +1334,15 @@ impl Layer {
 
         let opacity = if !is_mask && channels.opacity {
             let mut v = Vec::with_capacity(total);
-            for y in y0..y1 {
-                let start = y * doc_w + x0;
-                v.extend_from_slice(&self.opacity_buf.data[start..start + w]);
+            if self.opacity_buf.is_sparse() {
+                v.resize(total, self.opacity_buf.default_val);
+            } else if self.opacity_buf.data.len() >= doc_w * doc_h {
+                for y in y0..y1 {
+                    let start = y * doc_w + x0;
+                    v.extend_from_slice(&self.opacity_buf.data[start..start + w]);
+                }
+            } else {
+                v.resize(total, self.opacity_buf.default_val);
             }
             Some(v)
         } else {
@@ -1257,9 +1351,15 @@ impl Layer {
 
         let clearcoat = if !is_mask && channels.clearcoat {
             let mut v = Vec::with_capacity(total);
-            for y in y0..y1 {
-                let start = y * doc_w + x0;
-                v.extend_from_slice(&self.clearcoat_buf.data[start..start + w]);
+            if self.clearcoat_buf.is_sparse() {
+                v.resize(total, self.clearcoat_buf.default_val);
+            } else if self.clearcoat_buf.data.len() >= doc_w * doc_h {
+                for y in y0..y1 {
+                    let start = y * doc_w + x0;
+                    v.extend_from_slice(&self.clearcoat_buf.data[start..start + w]);
+                }
+            } else {
+                v.resize(total, self.clearcoat_buf.default_val);
             }
             Some(v)
         } else {
@@ -1268,9 +1368,15 @@ impl Layer {
 
         let anisotropy = if !is_mask && channels.anisotropy {
             let mut v = Vec::with_capacity(total);
-            for y in y0..y1 {
-                let start = y * doc_w + x0;
-                v.extend_from_slice(&self.anisotropy_buf.data[start..start + w]);
+            if self.anisotropy_buf.is_sparse() {
+                v.resize(total, self.anisotropy_buf.default_val);
+            } else if self.anisotropy_buf.data.len() >= doc_w * doc_h {
+                for y in y0..y1 {
+                    let start = y * doc_w + x0;
+                    v.extend_from_slice(&self.anisotropy_buf.data[start..start + w]);
+                }
+            } else {
+                v.resize(total, self.anisotropy_buf.default_val);
             }
             Some(v)
         } else {
@@ -1279,9 +1385,15 @@ impl Layer {
 
         let anisotropy_angle = if !is_mask && channels.anisotropy {
             let mut v = Vec::with_capacity(total);
-            for y in y0..y1 {
-                let start = y * doc_w + x0;
-                v.extend_from_slice(&self.anisotropy_angle_buf.data[start..start + w]);
+            if self.anisotropy_angle_buf.is_sparse() {
+                v.resize(total, self.anisotropy_angle_buf.default_val);
+            } else if self.anisotropy_angle_buf.data.len() >= doc_w * doc_h {
+                for y in y0..y1 {
+                    let start = y * doc_w + x0;
+                    v.extend_from_slice(&self.anisotropy_angle_buf.data[start..start + w]);
+                }
+            } else {
+                v.resize(total, self.anisotropy_angle_buf.default_val);
             }
             Some(v)
         } else {
@@ -1289,7 +1401,9 @@ impl Layer {
         };
 
         let (mask, mask_paint_buf, mask_paint_alpha) = if is_mask {
-            let m_v = if self.mask_buf.data.len() >= doc_w * doc_h {
+            let m_v = if self.mask_buf.is_sparse() {
+                Some(vec![self.mask_buf.default_val; total])
+            } else if self.mask_buf.data.len() >= doc_w * doc_h {
                 let mut v = Vec::with_capacity(total);
                 for y in y0..y1 {
                     let start = y * doc_w + x0;
@@ -1297,7 +1411,7 @@ impl Layer {
                 }
                 Some(v)
             } else {
-                None
+                Some(vec![self.mask_buf.default_val; total])
             };
 
             let mut mp_b = None;
@@ -1370,6 +1484,7 @@ impl Layer {
         let actual_w = w.min(doc_w - x0);
 
         if let Some(src) = &tile.base_color {
+            self.base_color_buf.ensure_allocated();
             if self.base_color_buf.data.len() >= doc_w * doc_h {
                 for y_idx in 0..actual_h {
                     let dst_start = (y0 + y_idx) * doc_w + x0;
@@ -1381,6 +1496,7 @@ impl Layer {
         }
 
         if let Some(src) = &tile.normal {
+            self.normal_buf.ensure_allocated();
             if self.normal_buf.data.len() >= doc_w * doc_h {
                 for y_idx in 0..actual_h {
                     let dst_start = (y0 + y_idx) * doc_w + x0;
@@ -1392,6 +1508,7 @@ impl Layer {
         }
 
         if let Some(src) = &tile.emissive {
+            self.emissive_buf.ensure_allocated();
             if self.emissive_buf.data.len() >= doc_w * doc_h {
                 for y_idx in 0..actual_h {
                     let dst_start = (y0 + y_idx) * doc_w + x0;
@@ -1403,6 +1520,7 @@ impl Layer {
         }
 
         if let Some(src) = &tile.roughness {
+            self.roughness_buf.ensure_allocated();
             if self.roughness_buf.data.len() >= doc_w * doc_h {
                 for y_idx in 0..actual_h {
                     let dst_start = (y0 + y_idx) * doc_w + x0;
@@ -1414,6 +1532,7 @@ impl Layer {
         }
 
         if let Some(src) = &tile.metallic {
+            self.metallic_buf.ensure_allocated();
             if self.metallic_buf.data.len() >= doc_w * doc_h {
                 for y_idx in 0..actual_h {
                     let dst_start = (y0 + y_idx) * doc_w + x0;
@@ -1425,6 +1544,7 @@ impl Layer {
         }
 
         if let Some(src) = &tile.height_buf {
+            self.height_buf.ensure_allocated();
             if self.height_buf.data.len() >= doc_w * doc_h {
                 for y_idx in 0..actual_h {
                     let dst_start = (y0 + y_idx) * doc_w + x0;
@@ -1436,6 +1556,7 @@ impl Layer {
         }
 
         if let Some(src) = &tile.opacity {
+            self.opacity_buf.ensure_allocated();
             if self.opacity_buf.data.len() >= doc_w * doc_h {
                 for y_idx in 0..actual_h {
                     let dst_start = (y0 + y_idx) * doc_w + x0;
@@ -1447,6 +1568,7 @@ impl Layer {
         }
 
         if let Some(src) = &tile.clearcoat {
+            self.clearcoat_buf.ensure_allocated();
             if self.clearcoat_buf.data.len() >= doc_w * doc_h {
                 for y_idx in 0..actual_h {
                     let dst_start = (y0 + y_idx) * doc_w + x0;
@@ -1458,6 +1580,7 @@ impl Layer {
         }
 
         if let Some(src) = &tile.anisotropy {
+            self.anisotropy_buf.ensure_allocated();
             if self.anisotropy_buf.data.len() >= doc_w * doc_h {
                 for y_idx in 0..actual_h {
                     let dst_start = (y0 + y_idx) * doc_w + x0;
@@ -1469,6 +1592,7 @@ impl Layer {
         }
 
         if let Some(src) = &tile.anisotropy_angle {
+            self.anisotropy_angle_buf.ensure_allocated();
             if self.anisotropy_angle_buf.data.len() >= doc_w * doc_h {
                 for y_idx in 0..actual_h {
                     let dst_start = (y0 + y_idx) * doc_w + x0;
@@ -1480,6 +1604,7 @@ impl Layer {
         }
 
         if let Some(src) = &tile.mask {
+            self.mask_buf.ensure_allocated();
             if self.mask_buf.data.len() >= doc_w * doc_h {
                 for y_idx in 0..actual_h {
                     let dst_start = (y0 + y_idx) * doc_w + x0;
@@ -1584,7 +1709,7 @@ impl Layer {
         self.has_mask = true;
         self.mask_inverted = false;
         self.base_mask_value = 0.0;
-        self.mask_buf.data.fill(0.0);
+        self.mask_buf.make_sparse(0.0);
         self.mask_effects.clear();
         self.mark_dirty_full();
     }
@@ -1593,7 +1718,7 @@ impl Layer {
         self.has_mask = true;
         self.mask_inverted = false;
         self.base_mask_value = 1.0;
-        self.mask_buf.data.fill(1.0);
+        self.mask_buf.make_sparse(1.0);
         self.mask_effects.clear();
         self.mark_dirty_full();
     }
@@ -1708,7 +1833,7 @@ impl Layer {
         let v = value.clamp(0.0, 1.0);
         self.has_mask = true;
         self.base_mask_value = v;
-        self.mask_buf.data.fill(v);
+        self.mask_buf.make_sparse(v);
         self.mask_effects.clear();
         self.mark_dirty_full();
     }
@@ -3209,19 +3334,30 @@ impl Layer {
             && self.fill_opacity_tex.is_none()
             && self.fill_normal_tex.is_none()
         {
-            self.base_color_buf.data.fill(self.fill_color);
-            self.roughness_buf.data.fill(self.fill_roughness);
-            self.metallic_buf.data.fill(self.fill_metallic);
-            self.height_buf.data.fill(self.fill_height);
-            self.emissive_buf.data.fill(self.fill_emissive);
-            self.opacity_buf.data.fill(self.fill_opacity);
-            self.clearcoat_buf.data.fill(self.fill_clearcoat);
-            self.anisotropy_buf.data.fill(self.fill_anisotropy);
-            self.anisotropy_angle_buf.data.fill(self.fill_anisotropy_angle);
-            self.normal_buf.data.fill(glam::Vec4::new(0.5, 0.5, 1.0, 1.0));
+            self.base_color_buf.make_sparse(self.fill_color);
+            self.roughness_buf.make_sparse(self.fill_roughness);
+            self.metallic_buf.make_sparse(self.fill_metallic);
+            self.height_buf.make_sparse(self.fill_height);
+            self.emissive_buf.make_sparse(self.fill_emissive);
+            self.opacity_buf.make_sparse(self.fill_opacity);
+            self.clearcoat_buf.make_sparse(self.fill_clearcoat);
+            self.anisotropy_buf.make_sparse(self.fill_anisotropy);
+            self.anisotropy_angle_buf.make_sparse(self.fill_anisotropy_angle);
+            self.normal_buf.make_sparse(glam::Vec4::new(0.5, 0.5, 1.0, 1.0));
             self.mark_dirty_full();
             return;
         }
+
+        self.clearcoat_buf.ensure_allocated();
+        self.anisotropy_buf.ensure_allocated();
+        self.anisotropy_angle_buf.ensure_allocated();
+        self.base_color_buf.ensure_allocated();
+        self.roughness_buf.ensure_allocated();
+        self.metallic_buf.ensure_allocated();
+        self.height_buf.ensure_allocated();
+        self.emissive_buf.ensure_allocated();
+        self.opacity_buf.ensure_allocated();
+        self.normal_buf.ensure_allocated();
 
         self.clearcoat_buf.data.fill(self.fill_clearcoat);
         self.anisotropy_buf.data.fill(self.fill_anisotropy);
@@ -3591,7 +3727,7 @@ impl Layer {
         if self.fill_normal_tex.is_some() || self.fill_height_tex.is_some() || self.fill_generator != ProceduralGenerator::None {
             self.update_normal_from_height(self.fill_normal_strength);
         } else {
-            self.normal_buf.data.fill(glam::Vec4::new(0.5, 0.5, 1.0, 1.0));
+            self.normal_buf.make_sparse(glam::Vec4::new(0.5, 0.5, 1.0, 1.0));
         }
         self.mark_dirty_full();
     }
@@ -3603,6 +3739,9 @@ impl Layer {
         if w < 2 || h < 2 {
             return;
         }
+
+        self.normal_buf.ensure_allocated();
+        self.height_buf.ensure_allocated();
 
         let rad = self.uv_rotation.to_radians();
         let (sin_r, cos_r) = rad.sin_cos();
@@ -3676,6 +3815,9 @@ impl Layer {
         if w < 2 || h < 2 {
             return;
         }
+
+        self.normal_buf.ensure_allocated();
+        self.height_buf.ensure_allocated();
 
         let x_start = min_x.saturating_sub(1);
         let x_end = (max_x + 1).min(w - 1);
@@ -3913,11 +4055,20 @@ impl CompositeTextureSet {
                         layer_op *= folder.opacity;
                     }
                     let is_paint_layer = layer.layer_type == LayerType::Paint;
+                    if is_paint_layer && layer.base_color_buf.is_sparse() && layer.base_color_buf.default_val.w <= 1e-4 {
+                        continue;
+                    }
 
                     for x in min_x..=max_x {
                         let idx2 = y * w + x;
                         let mut mask_val = if layer.has_mask {
-                            let m = layer.mask_buf.data[idx2];
+                            let m = if layer.mask_buf.is_sparse() {
+                                layer.mask_buf.default_val
+                            } else if idx2 < layer.mask_buf.data.len() {
+                                layer.mask_buf.data[idx2]
+                            } else {
+                                1.0
+                            };
                             if layer.mask_inverted { 1.0 - m } else { m }
                         } else {
                             1.0
@@ -3925,14 +4076,26 @@ impl CompositeTextureSet {
 
                         if let Some(folder) = parent_folder {
                             if folder.has_mask {
-                                let fm = folder.mask_buf.data[idx2];
+                                let fm = if folder.mask_buf.is_sparse() {
+                                    folder.mask_buf.default_val
+                                } else if idx2 < folder.mask_buf.data.len() {
+                                    folder.mask_buf.data[idx2]
+                                } else {
+                                    1.0
+                                };
                                 let f_val = if folder.mask_inverted { 1.0 - fm } else { fm };
                                 mask_val *= f_val;
                             }
                         }
 
                         let paint_alpha = if is_paint_layer {
-                            layer.base_color_buf.data[idx2].w
+                            if layer.base_color_buf.is_sparse() {
+                                layer.base_color_buf.default_val.w
+                            } else if idx2 < layer.base_color_buf.data.len() {
+                                layer.base_color_buf.data[idx2].w
+                            } else {
+                                0.0
+                            }
                         } else {
                             1.0
                         };
@@ -3943,7 +4106,13 @@ impl CompositeTextureSet {
                         if flags.base_color {
                             let op = effective_opacity * ch_ops.base_color;
                             if op > 1e-4 {
-                                let src = layer.base_color_buf.data[idx2];
+                                let src = if layer.base_color_buf.is_sparse() {
+                                    layer.base_color_buf.default_val
+                                } else if idx2 < layer.base_color_buf.data.len() {
+                                    layer.base_color_buf.data[idx2]
+                                } else {
+                                    glam::Vec4::ZERO
+                                };
                                 base_row[x] = ch_modes.base_color.blend_color(base_row[x], src, op);
                             }
                         }
@@ -3951,7 +4120,13 @@ impl CompositeTextureSet {
                         if flags.roughness {
                             let op = effective_opacity * ch_ops.roughness;
                             if op > 1e-4 {
-                                let src = layer.roughness_buf.data[idx2];
+                                let src = if layer.roughness_buf.is_sparse() {
+                                    layer.roughness_buf.default_val
+                                } else if idx2 < layer.roughness_buf.data.len() {
+                                    layer.roughness_buf.data[idx2]
+                                } else {
+                                    0.5
+                                };
                                 rough_row[x] = ch_modes.roughness.blend_scalar(rough_row[x], src, op);
                             }
                         }
@@ -3959,7 +4134,13 @@ impl CompositeTextureSet {
                         if flags.metallic {
                             let op = effective_opacity * ch_ops.metallic;
                             if op > 1e-4 {
-                                let src = layer.metallic_buf.data[idx2];
+                                let src = if layer.metallic_buf.is_sparse() {
+                                    layer.metallic_buf.default_val
+                                } else if idx2 < layer.metallic_buf.data.len() {
+                                    layer.metallic_buf.data[idx2]
+                                } else {
+                                    0.0
+                                };
                                 metal_row[x] = ch_modes.metallic.blend_scalar(metal_row[x], src, op);
                             }
                         }
@@ -3967,7 +4148,13 @@ impl CompositeTextureSet {
                         if flags.normal {
                             let op = effective_opacity * ch_ops.normal;
                             if op > 1e-4 {
-                                let src = layer.normal_buf.data[idx2];
+                                let src = if layer.normal_buf.is_sparse() {
+                                    layer.normal_buf.default_val
+                                } else if idx2 < layer.normal_buf.data.len() {
+                                    layer.normal_buf.data[idx2]
+                                } else {
+                                    glam::Vec4::new(0.5, 0.5, 1.0, 1.0)
+                                };
                                 norm_row[x] = ch_modes.normal.blend_color(norm_row[x], src, op);
                             }
                         }
@@ -3975,7 +4162,13 @@ impl CompositeTextureSet {
                         if flags.height {
                             let op = effective_opacity * ch_ops.height;
                             if op > 1e-4 {
-                                let src = layer.height_buf.data[idx2];
+                                let src = if layer.height_buf.is_sparse() {
+                                    layer.height_buf.default_val
+                                } else if idx2 < layer.height_buf.data.len() {
+                                    layer.height_buf.data[idx2]
+                                } else {
+                                    0.5
+                                };
                                 height_row[x] = ch_modes.height.blend_scalar(height_row[x], src, op);
                             }
                         }
@@ -3983,7 +4176,13 @@ impl CompositeTextureSet {
                         if flags.emission {
                             let op = effective_opacity * ch_ops.emission;
                             if op > 1e-4 {
-                                let src = layer.emissive_buf.data[idx2];
+                                let src = if layer.emissive_buf.is_sparse() {
+                                    layer.emissive_buf.default_val
+                                } else if idx2 < layer.emissive_buf.data.len() {
+                                    layer.emissive_buf.data[idx2]
+                                } else {
+                                    glam::Vec4::ZERO
+                                };
                                 emissive_row[x] = ch_modes.emission.blend_color(emissive_row[x], src, op);
                             }
                         }
@@ -3991,7 +4190,13 @@ impl CompositeTextureSet {
                         if flags.opacity {
                             let op = effective_opacity * ch_ops.opacity;
                             if op > 1e-4 {
-                                let src = layer.opacity_buf.data[idx2];
+                                let src = if layer.opacity_buf.is_sparse() {
+                                    layer.opacity_buf.default_val
+                                } else if idx2 < layer.opacity_buf.data.len() {
+                                    layer.opacity_buf.data[idx2]
+                                } else {
+                                    1.0
+                                };
                                 opacity_row[x] = ch_modes.opacity.blend_scalar(opacity_row[x], src, op);
                             }
                         }
@@ -3999,7 +4204,13 @@ impl CompositeTextureSet {
                         if flags.clearcoat {
                             let op = effective_opacity * ch_ops.clearcoat;
                             if op > 1e-4 {
-                                let src = layer.clearcoat_buf.data[idx2];
+                                let src = if layer.clearcoat_buf.is_sparse() {
+                                    layer.clearcoat_buf.default_val
+                                } else if idx2 < layer.clearcoat_buf.data.len() {
+                                    layer.clearcoat_buf.data[idx2]
+                                } else {
+                                    0.0
+                                };
                                 clearcoat_row[x] = ch_modes.clearcoat.blend_scalar(clearcoat_row[x], src, op);
                             }
                         }
@@ -4007,9 +4218,21 @@ impl CompositeTextureSet {
                         if flags.anisotropy {
                             let op = effective_opacity * ch_ops.anisotropy;
                             if op > 1e-4 {
-                                let src_a = layer.anisotropy_buf.data[idx2];
+                                let src_a = if layer.anisotropy_buf.is_sparse() {
+                                    layer.anisotropy_buf.default_val
+                                } else if idx2 < layer.anisotropy_buf.data.len() {
+                                    layer.anisotropy_buf.data[idx2]
+                                } else {
+                                    0.0
+                                };
                                 aniso_row[x] = ch_modes.anisotropy.blend_scalar(aniso_row[x], src_a, op);
-                                let src_ang = layer.anisotropy_angle_buf.data[idx2];
+                                let src_ang = if layer.anisotropy_angle_buf.is_sparse() {
+                                    layer.anisotropy_angle_buf.default_val
+                                } else if idx2 < layer.anisotropy_angle_buf.data.len() {
+                                    layer.anisotropy_angle_buf.data[idx2]
+                                } else {
+                                    0.0
+                                };
                                 aniso_ang_row[x] = ch_modes.anisotropy.blend_scalar(aniso_ang_row[x], src_ang, op);
                             }
                         }
@@ -4688,6 +4911,8 @@ mod tests {
     fn test_selective_stroke_snapshot_zero_alloc() {
         let mut layer = Layer::new_fill_layer(1, "TestLayer".to_string(), 64, 64, Vec4::ONE, 0.5, 0.0);
         layer.add_white_mask();
+        layer.base_color_buf.ensure_allocated();
+        layer.mask_buf.ensure_allocated();
 
         // 1. Snapshot for Mask painting: material buffers should be zero-allocated (empty)
         let mask_snapshot = layer.clone_stroke_snapshot_selective(Some(crate::brush::PaintTarget::Mask), None);
@@ -4852,6 +5077,79 @@ mod tests {
         // Verify outside the rectangle: rect_comp retains base layer
         assert_eq!(rect_comp.base_color.get_pixel(0, 0), Vec4::new(1.0, 0.0, 0.0, 1.0));
         assert_eq!(rect_comp.base_color.get_pixel(50, 50), Vec4::new(1.0, 0.0, 0.0, 1.0));
+    }
+
+    #[test]
+    fn test_sparse_virtual_texturing_memory_savings() {
+        let dim_4k = 4096;
+        let mut layers = Vec::new();
+
+        // 1. Create a 10-layer 4K project (5 paint layers, 3 fill layers, 2 folders)
+        for i in 0..5 {
+            layers.push(Layer::new_paint_layer(i as u64, format!("Paint Layer {}", i), dim_4k, dim_4k));
+        }
+        for i in 5..8 {
+            layers.push(Layer::new_fill_layer(
+                i as u64,
+                format!("Fill Layer {}", i),
+                dim_4k,
+                dim_4k,
+                Vec4::new(0.5, 0.5, 0.5, 1.0),
+                0.3,
+                0.7,
+            ));
+        }
+        for i in 8..10 {
+            layers.push(Layer::new_folder_layer(i as u64, format!("Folder {}", i), dim_4k, dim_4k));
+        }
+
+        // 2. Assert zero heap memory allocated across all 10 4K layers
+        // (Flat allocation would have consumed 10 * 1.34 GB = 13.4 GB of RAM)
+        let total_raster_bytes: usize = layers.iter().map(|l| l.raster_memory_bytes()).sum();
+        assert_eq!(
+            total_raster_bytes, 0,
+            "10 unpainted 4K layers must consume exactly 0 bytes of heap memory, got {}",
+            total_raster_bytes
+        );
+
+        // 3. Constant O(1) sampling on untouched 4K layers without allocating memory
+        assert_eq!(layers[0].base_color_buf.get_pixel(2048, 2048), Vec4::ZERO);
+        assert_eq!(layers[5].roughness_buf.get_pixel(100, 100), 0.3);
+        assert_eq!(layers[5].metallic_buf.get_pixel(100, 100), 0.7);
+        assert_eq!(layers[0].raster_memory_bytes(), 0);
+        assert_eq!(layers[5].raster_memory_bytes(), 0);
+
+        // 4. Test selective materialization when painting on a specific channel
+        let mut test_layer = Layer::new_paint_layer(100, "SelectivePaint".to_string(), 1024, 1024);
+        assert_eq!(test_layer.raster_memory_bytes(), 0);
+
+        let mut channels = ChannelFlags::default();
+        channels.base_color = true;
+        channels.roughness = true;
+        channels.metallic = false;
+        channels.height = false;
+        channels.normal = false;
+        channels.emission = false;
+        channels.opacity = false;
+        channels.clearcoat = false;
+        channels.anisotropy = false;
+
+        test_layer.ensure_allocated_for_paint(crate::brush::PaintTarget::Material, channels, false);
+
+        // Only Base Color (16 bytes/px) and Roughness (4 bytes/px) should materialize
+        let expected_bytes = (1024 * 1024 * 16) + (1024 * 1024 * 4);
+        assert_eq!(test_layer.base_color_buf.data.len(), 1024 * 1024);
+        assert_eq!(test_layer.roughness_buf.data.len(), 1024 * 1024);
+        assert_eq!(test_layer.metallic_buf.data.len(), 0);
+        assert_eq!(test_layer.height_buf.data.len(), 0);
+        assert_eq!(test_layer.normal_buf.data.len(), 0);
+        assert_eq!(test_layer.emissive_buf.data.len(), 0);
+        assert_eq!(test_layer.opacity_buf.data.len(), 0);
+        assert_eq!(test_layer.clearcoat_buf.data.len(), 0);
+        assert_eq!(test_layer.anisotropy_buf.data.len(), 0);
+        assert_eq!(test_layer.anisotropy_angle_buf.data.len(), 0);
+        assert_eq!(test_layer.mask_buf.data.len(), 0);
+        assert_eq!(test_layer.raster_memory_bytes(), expected_bytes);
     }
 }
 

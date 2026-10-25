@@ -1417,7 +1417,7 @@ impl WgpuViewport {
         let byte_offset_4 = ((y0 * w + x0) as u64) * 4;
         let bytes_per_row_4 = w * 4;
 
-        if channels.emission && layer.emissive_buf.width == w as u32 && layer.emissive_buf.height == h as u32 {
+        if channels.emission && !layer.emissive_buf.is_sparse() && layer.emissive_buf.width == w as u32 && layer.emissive_buf.height == h as u32 {
             self.queue.write_texture(
                 wgpu::ImageCopyTexture { texture: &self.tex_emissive, mip_level: 0, origin, aspect: wgpu::TextureAspect::All },
                 bytemuck::cast_slice(&layer.emissive_buf.data),
@@ -1426,7 +1426,7 @@ impl WgpuViewport {
             );
         }
 
-        if channels.opacity && layer.opacity_buf.width == w as u32 && layer.opacity_buf.height == h as u32 {
+        if channels.opacity && !layer.opacity_buf.is_sparse() && layer.opacity_buf.width == w as u32 && layer.opacity_buf.height == h as u32 {
             self.queue.write_texture(
                 wgpu::ImageCopyTexture { texture: &self.tex_opacity, mip_level: 0, origin, aspect: wgpu::TextureAspect::All },
                 bytemuck::cast_slice(&layer.opacity_buf.data),
@@ -1435,7 +1435,7 @@ impl WgpuViewport {
             );
         }
 
-        if channels.clearcoat && layer.clearcoat_buf.width == w as u32 && layer.clearcoat_buf.height == h as u32 {
+        if channels.clearcoat && !layer.clearcoat_buf.is_sparse() && layer.clearcoat_buf.width == w as u32 && layer.clearcoat_buf.height == h as u32 {
             self.queue.write_texture(
                 wgpu::ImageCopyTexture { texture: &self.tex_clearcoat, mip_level: 0, origin, aspect: wgpu::TextureAspect::All },
                 bytemuck::cast_slice(&layer.clearcoat_buf.data),

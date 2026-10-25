@@ -481,6 +481,11 @@ impl BrushEngine {
         let is_clone = self.settings.mode == ToolMode::Clone;
         let is_mask_target = self.settings.target == PaintTarget::Mask;
         
+        layer.ensure_allocated_for_paint(self.settings.target, self.settings.channels, is_eraser);
+        if is_smudge || is_clone {
+            layer.base_color_buf.ensure_allocated();
+        }
+
         let (paint_buf_ptr, paint_alpha_ptr) = if is_mask_target {
             layer.has_mask = true;
             if !layer.mask_effects.is_empty() {
@@ -526,14 +531,13 @@ impl BrushEngine {
 
         // Smudge carrier update
         if is_smudge {
-            let cx = center_x.clamp(0, w - 1) as usize;
-            let cy = center_y.clamp(0, h - 1) as usize;
-            let center_idx = cy * (w as usize) + cx;
-            let cur_col = layer.base_color_buf.data[center_idx];
-            let cur_r = layer.roughness_buf.data[center_idx];
-            let cur_m = layer.metallic_buf.data[center_idx];
-            let cur_h = layer.height_buf.data[center_idx];
-            let cur_emis = layer.emissive_buf.data[center_idx];
+            let cx = center_x.clamp(0, w - 1) as u32;
+            let cy = center_y.clamp(0, h - 1) as u32;
+            let cur_col = layer.base_color_buf.get_pixel(cx, cy);
+            let cur_r = layer.roughness_buf.get_pixel(cx, cy);
+            let cur_m = layer.metallic_buf.get_pixel(cx, cy);
+            let cur_h = layer.height_buf.get_pixel(cx, cy);
+            let cur_emis = layer.emissive_buf.get_pixel(cx, cy);
 
             let str_val = self.settings.smudge_strength.clamp(0.05, 1.0);
             if let Some(sc) = self.smudge_color {
@@ -638,15 +642,14 @@ impl BrushEngine {
                 let idx = buf_y_offset + (px as usize);
 
                 let (eff_base_col, eff_r, eff_m, eff_h, eff_emis) = if let Some((scx, scy)) = clone_source_center {
-                    let src_x = (scx + (px - center_x)).rem_euclid(w) as usize;
-                    let src_y = (scy + (py - center_y)).rem_euclid(h) as usize;
-                    let src_idx = src_y * (w as usize) + src_x;
+                    let src_x = (scx + (px - center_x)).rem_euclid(w) as u32;
+                    let src_y = (scy + (py - center_y)).rem_euclid(h) as u32;
                     (
-                        layer.base_color_buf.data[src_idx],
-                        layer.roughness_buf.data[src_idx],
-                        layer.metallic_buf.data[src_idx],
-                        layer.height_buf.data[src_idx],
-                        layer.emissive_buf.data[src_idx],
+                        layer.base_color_buf.get_pixel(src_x, src_y),
+                        layer.roughness_buf.get_pixel(src_x, src_y),
+                        layer.metallic_buf.get_pixel(src_x, src_y),
+                        layer.height_buf.get_pixel(src_x, src_y),
+                        layer.emissive_buf.get_pixel(src_x, src_y),
                     )
                 } else if is_smudge {
                     (
@@ -795,6 +798,11 @@ pub fn barycentric_3d(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> (f32, f32, f32) {
         let is_smudge = self.settings.mode == ToolMode::Smudge;
         let is_clone = self.settings.mode == ToolMode::Clone;
         let is_mask_target = self.settings.target == PaintTarget::Mask;
+
+        layer.ensure_allocated_for_paint(self.settings.target, self.settings.channels, is_eraser);
+        if is_smudge || is_clone {
+            layer.base_color_buf.ensure_allocated();
+        }
 
         let (paint_buf_ptr, paint_alpha_ptr) = if is_mask_target {
             layer.has_mask = true;
