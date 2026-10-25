@@ -832,14 +832,13 @@ pub fn barycentric_3d(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> (f32, f32, f32) {
             let t0 = triangles[0];
             let i0 = mesh.indices[t0 as usize * 3] as usize;
             let uv0 = mesh.vertices[i0].uv;
-            let cx = ((uv0.x.rem_euclid(1.0) * w_f).round() as i32).clamp(0, w - 1) as usize;
-            let cy = ((uv0.y.rem_euclid(1.0) * h_f).round() as i32).clamp(0, h - 1) as usize;
-            let sample_idx = cy * (w as usize) + cx;
-            let cur_col = layer.base_color_buf.data[sample_idx];
-            let cur_r = layer.roughness_buf.data[sample_idx];
-            let cur_m = layer.metallic_buf.data[sample_idx];
-            let cur_h = layer.height_buf.data[sample_idx];
-            let cur_emis = layer.emissive_buf.data[sample_idx];
+            let cx = ((uv0.x.rem_euclid(1.0) * w_f).round() as i32).clamp(0, w - 1) as u32;
+            let cy = ((uv0.y.rem_euclid(1.0) * h_f).round() as i32).clamp(0, h - 1) as u32;
+            let cur_col = layer.base_color_buf.get_pixel(cx, cy);
+            let cur_r = layer.roughness_buf.get_pixel(cx, cy);
+            let cur_m = layer.metallic_buf.get_pixel(cx, cy);
+            let cur_h = layer.height_buf.get_pixel(cx, cy);
+            let cur_emis = layer.emissive_buf.get_pixel(cx, cy);
 
             let str_val = self.settings.smudge_strength.clamp(0.05, 1.0);
             if let Some(sc) = self.smudge_color {
@@ -1438,6 +1437,12 @@ pub fn barycentric_3d(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> (f32, f32, f32) {
         let clamped_max_x = (max_x + pad).min(doc_w as i32 - 1);
         let clamped_max_y = (max_y + pad).min(doc_h as i32 - 1);
 
+        let mut channel_mask = 0u32;
+        if self.settings.channels.base_color { channel_mask |= 1; }
+        if self.settings.channels.roughness { channel_mask |= 2; }
+        if self.settings.channels.metallic { channel_mask |= 4; }
+        if self.settings.channels.height { channel_mask |= 8; }
+
         let uniform = crate::gpu_brush::GpuBrushUniform {
             hit_pos: [hit_pos.x, hit_pos.y, hit_pos.z, world_radius],
             hit_normal: [hit_normal.x, hit_normal.y, hit_normal.z, self.settings.hardness],
@@ -1448,12 +1453,56 @@ pub fn barycentric_3d(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> (f32, f32, f32) {
             tex_size: [doc_w as f32, doc_h as f32],
             flags: [if self.settings.mode == ToolMode::Eraser { 1 } else { 0 }, if self.settings.target == PaintTarget::Mask { 1 } else { 0 }],
             tri_count: gpu_triangles.len() as u32,
-            _pad0: 0,
+            channel_mask,
             _pad1: 0,
             _pad2: 0,
         };
 
         Some((uniform, gpu_triangles))
+    }
+
+    /// Collect 2D UV stamping uniform parameters for GPU compute shader execution
+    pub fn build_gpu_stamp_data_2d(
+        &self,
+        center_uv: Vec2,
+        doc_w: u32,
+        doc_h: u32,
+    ) -> Option<crate::gpu_brush::GpuBrushUniform> {
+        let w_f = doc_w as f32;
+        let h_f = doc_h as f32;
+        let px = center_uv.x * w_f;
+        let py = center_uv.y * h_f;
+        let rad = self.settings.radius;
+
+        let clamped_min_x = (px - rad).floor().max(0.0) as i32;
+        let clamped_min_y = (py - rad).floor().max(0.0) as i32;
+        let clamped_max_x = (px + rad).ceil().min(w_f - 1.0) as i32;
+        let clamped_max_y = (py + rad).ceil().min(h_f - 1.0) as i32;
+
+        if clamped_min_x > clamped_max_x || clamped_min_y > clamped_max_y {
+            return None;
+        }
+
+        let mut channel_mask = 0u32;
+        if self.settings.channels.base_color { channel_mask |= 1; }
+        if self.settings.channels.roughness { channel_mask |= 2; }
+        if self.settings.channels.metallic { channel_mask |= 4; }
+        if self.settings.channels.height { channel_mask |= 8; }
+
+        Some(crate::gpu_brush::GpuBrushUniform {
+            hit_pos: [px, py, 0.0, rad],
+            hit_normal: [0.0, 0.0, 1.0, self.settings.hardness],
+            paint_color: [self.settings.paint_color.x, self.settings.paint_color.y, self.settings.paint_color.z, self.settings.paint_color.w],
+            params: [self.settings.paint_roughness, self.settings.paint_metallic, self.settings.paint_height, self.settings.flow * self.settings.opacity],
+            bounds_min: [clamped_min_x, clamped_min_y],
+            bounds_max: [clamped_max_x, clamped_max_y],
+            tex_size: [w_f, h_f],
+            flags: [if self.settings.mode == ToolMode::Eraser { 1 } else { 0 }, if self.settings.target == PaintTarget::Mask { 1 } else { 0 }],
+            tri_count: 0,
+            channel_mask,
+            _pad1: 0,
+            _pad2: 0,
+        })
     }
 }
 

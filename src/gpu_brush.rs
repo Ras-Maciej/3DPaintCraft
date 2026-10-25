@@ -17,7 +17,7 @@ pub struct GpuBrushUniform {
     pub tex_size: [f32; 2],    // width, height
     pub flags: [u32; 2],       // x = is_eraser, y = is_mask_target
     pub tri_count: u32,
-    pub _pad0: u32,
+    pub channel_mask: u32,
     pub _pad1: u32,
     pub _pad2: u32,
 }
@@ -317,20 +317,22 @@ impl GpuBrushEngine {
         self.scratch_metallic_view = sc_m_v;
     }
 
-    /// Dispatch GPU 3D Projection Stamping into a GPU Layer in VRAM
+    /// Dispatch GPU Projection or 2D Stamping into a GPU Layer in VRAM
     pub fn stamp_3d_gpu(
         &mut self,
         gpu_layer: &crate::gpu_compositor::GpuLayer,
         uniforms: &GpuBrushUniform,
         triangles: &[GpuBrushTriangle],
     ) {
-        if triangles.is_empty() {
+        if uniforms.tri_count > 0 && triangles.is_empty() {
             return;
         }
 
         let tri_count = triangles.len().min(self.max_triangles);
         self.queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[*uniforms]));
-        self.queue.write_buffer(&self.triangle_buffer, 0, bytemuck::cast_slice(&triangles[..tri_count]));
+        if tri_count > 0 {
+            self.queue.write_buffer(&self.triangle_buffer, 0, bytemuck::cast_slice(&triangles[..tri_count]));
+        }
 
         let in_col_view = gpu_layer.base_color.create_view(&Default::default());
         let in_norm_view = gpu_layer.normal.create_view(&Default::default());
@@ -490,5 +492,227 @@ impl GpuBrushEngine {
         );
 
         self.queue.submit(std::iter::once(encoder.finish()));
+    }
+
+    /// Read back a modified sub-rectangle from a GPU layer directly into the CPU Layer
+    /// for history undo tracking and file persistence.
+    pub fn readback_layer_rect(
+        &self,
+        gpu_layer: &crate::gpu_compositor::GpuLayer,
+        cpu_layer: &mut crate::layer::Layer,
+        min_x: u32,
+        min_y: u32,
+        max_x: u32,
+        max_y: u32,
+        channels: crate::channel::ChannelFlags,
+    ) {
+        let min_x = min_x.min(self.width.saturating_sub(1));
+        let min_y = min_y.min(self.height.saturating_sub(1));
+        let max_x = max_x.min(self.width.saturating_sub(1));
+        let max_y = max_y.min(self.height.saturating_sub(1));
+
+        let rect_w = (max_x.saturating_sub(min_x) + 1).min(self.width.saturating_sub(min_x));
+        let rect_h = (max_y.saturating_sub(min_y) + 1).min(self.height.saturating_sub(min_y));
+
+        if rect_w == 0 || rect_h == 0 {
+            return;
+        }
+
+        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+
+        // Ensure target CPU buffers are allocated
+        cpu_layer.ensure_allocated_for_paint(crate::brush::PaintTarget::Material, channels, false);
+
+        let copy_size = wgpu::Extent3d {
+            width: rect_w,
+            height: rect_h,
+            depth_or_array_layers: 1,
+        };
+        let origin = wgpu::Origin3d { x: min_x, y: min_y, z: 0 };
+
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("GPU Readback Encoder"),
+        });
+
+        // 1. Readback Base Color (RGBA32Float)
+        let unpadded_bytes_rgba = rect_w * 16;
+        let padded_bytes_rgba = ((unpadded_bytes_rgba + align - 1) / align) * align;
+        let staging_rgba = if channels.base_color {
+            let buf = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Staging BaseColor"),
+                size: (padded_bytes_rgba * rect_h) as u64,
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            encoder.copy_texture_to_buffer(
+                wgpu::ImageCopyTexture {
+                    texture: &gpu_layer.base_color,
+                    mip_level: 0,
+                    origin,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::ImageCopyBuffer {
+                    buffer: &buf,
+                    layout: wgpu::ImageDataLayout {
+                        offset: 0,
+                        bytes_per_row: Some(padded_bytes_rgba),
+                        rows_per_image: Some(rect_h),
+                    },
+                },
+                copy_size,
+            );
+            Some(buf)
+        } else {
+            None
+        };
+
+        // 2. Readback Roughness (R32Float)
+        let unpadded_bytes_scalar = rect_w * 4;
+        let padded_bytes_scalar = ((unpadded_bytes_scalar + align - 1) / align) * align;
+        let staging_roughness = if channels.roughness {
+            let buf = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Staging Roughness"),
+                size: (padded_bytes_scalar * rect_h) as u64,
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            encoder.copy_texture_to_buffer(
+                wgpu::ImageCopyTexture {
+                    texture: &gpu_layer.roughness,
+                    mip_level: 0,
+                    origin,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::ImageCopyBuffer {
+                    buffer: &buf,
+                    layout: wgpu::ImageDataLayout {
+                        offset: 0,
+                        bytes_per_row: Some(padded_bytes_scalar),
+                        rows_per_image: Some(rect_h),
+                    },
+                },
+                copy_size,
+            );
+            Some(buf)
+        } else {
+            None
+        };
+
+        // 3. Readback Metallic (R32Float)
+        let staging_metallic = if channels.metallic {
+            let buf = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Staging Metallic"),
+                size: (padded_bytes_scalar * rect_h) as u64,
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            encoder.copy_texture_to_buffer(
+                wgpu::ImageCopyTexture {
+                    texture: &gpu_layer.metallic,
+                    mip_level: 0,
+                    origin,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::ImageCopyBuffer {
+                    buffer: &buf,
+                    layout: wgpu::ImageDataLayout {
+                        offset: 0,
+                        bytes_per_row: Some(padded_bytes_scalar),
+                        rows_per_image: Some(rect_h),
+                    },
+                },
+                copy_size,
+            );
+            Some(buf)
+        } else {
+            None
+        };
+
+        self.queue.submit(std::iter::once(encoder.finish()));
+
+        // Map and copy to CPU layer
+        let layer_w = cpu_layer.base_color_buf.width as usize;
+
+        if let Some(buf) = &staging_rgba {
+            let slice = buf.slice(..);
+            let (tx, rx) = std::sync::mpsc::channel();
+            slice.map_async(wgpu::MapMode::Read, move |res| { let _ = tx.send(res); });
+            self.device.poll(wgpu::Maintain::Wait);
+            if rx.recv().ok().and_then(|r| r.ok()).is_some() {
+                let mapped = slice.get_mapped_range();
+                for y in 0..rect_h {
+                    let src_start = (y * padded_bytes_rgba) as usize;
+                    let src_end = src_start + unpadded_bytes_rgba as usize;
+                    let row_bytes = &mapped[src_start..src_end];
+                    let float_slice: &[f32] = bytemuck::cast_slice(row_bytes);
+                    let dst_row_start = (min_y + y) as usize * layer_w + min_x as usize;
+                    for (i, chunk) in float_slice.chunks_exact(4).enumerate() {
+                        if dst_row_start + i < cpu_layer.base_color_buf.data.len() {
+                            cpu_layer.base_color_buf.data[dst_row_start + i] =
+                                glam::Vec4::new(chunk[0], chunk[1], chunk[2], chunk[3]);
+                        }
+                    }
+                }
+                drop(mapped);
+                buf.unmap();
+            }
+        }
+
+        if let Some(buf) = &staging_roughness {
+            let slice = buf.slice(..);
+            let (tx, rx) = std::sync::mpsc::channel();
+            slice.map_async(wgpu::MapMode::Read, move |res| { let _ = tx.send(res); });
+            self.device.poll(wgpu::Maintain::Wait);
+            if rx.recv().ok().and_then(|r| r.ok()).is_some() {
+                let mapped = slice.get_mapped_range();
+                for y in 0..rect_h {
+                    let src_start = (y * padded_bytes_scalar) as usize;
+                    let src_end = src_start + unpadded_bytes_scalar as usize;
+                    let row_bytes = &mapped[src_start..src_end];
+                    let float_slice: &[f32] = bytemuck::cast_slice(row_bytes);
+                    let dst_row_start = (min_y + y) as usize * layer_w + min_x as usize;
+                    for (i, &val) in float_slice.iter().enumerate() {
+                        if dst_row_start + i < cpu_layer.roughness_buf.data.len() {
+                            cpu_layer.roughness_buf.data[dst_row_start + i] = val;
+                        }
+                    }
+                }
+                drop(mapped);
+                buf.unmap();
+            }
+        }
+
+        if let Some(buf) = &staging_metallic {
+            let slice = buf.slice(..);
+            let (tx, rx) = std::sync::mpsc::channel();
+            slice.map_async(wgpu::MapMode::Read, move |res| { let _ = tx.send(res); });
+            self.device.poll(wgpu::Maintain::Wait);
+            if rx.recv().ok().and_then(|r| r.ok()).is_some() {
+                let mapped = slice.get_mapped_range();
+                for y in 0..rect_h {
+                    let src_start = (y * padded_bytes_scalar) as usize;
+                    let src_end = src_start + unpadded_bytes_scalar as usize;
+                    let row_bytes = &mapped[src_start..src_end];
+                    let float_slice: &[f32] = bytemuck::cast_slice(row_bytes);
+                    let dst_row_start = (min_y + y) as usize * layer_w + min_x as usize;
+                    for (i, &val) in float_slice.iter().enumerate() {
+                        if dst_row_start + i < cpu_layer.metallic_buf.data.len() {
+                            cpu_layer.metallic_buf.data[dst_row_start + i] = val;
+                        }
+                    }
+                }
+                drop(mapped);
+                buf.unmap();
+            }
+        }
+
+        cpu_layer.dirty_rect = Some((min_x, min_y, max_x, max_y));
+        cpu_layer.dirty_flags = crate::layer::LayerDirtyFlags {
+            color: channels.base_color,
+            roughness: channels.roughness,
+            metallic: channels.metallic,
+            normal: false,
+            mask: false,
+        };
     }
 }

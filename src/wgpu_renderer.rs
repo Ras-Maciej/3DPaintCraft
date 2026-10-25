@@ -1205,7 +1205,6 @@ impl WgpuViewport {
     }
 
     /// Dispatch hardware-accelerated 3D projection stamping on GPU compute cores
-    #[allow(dead_code)]
     pub fn stamp_3d_gpu(
         &mut self,
         active_layer_idx: usize,
@@ -1214,6 +1213,33 @@ impl WgpuViewport {
     ) {
         if let Some(gpu_layer) = self.gpu_layers.get(active_layer_idx) {
             self.gpu_brush.stamp_3d_gpu(gpu_layer, uniforms, triangles);
+        }
+    }
+
+    /// Dispatch hardware-accelerated 2D UV stamping on GPU compute cores
+    pub fn stamp_2d_gpu(
+        &mut self,
+        active_layer_idx: usize,
+        uniforms: &crate::gpu_brush::GpuBrushUniform,
+    ) {
+        if let Some(gpu_layer) = self.gpu_layers.get(active_layer_idx) {
+            self.gpu_brush.stamp_3d_gpu(gpu_layer, uniforms, &[]);
+        }
+    }
+
+    /// Read back modified rectangular region from GPU layer into CPU layer
+    pub fn readback_layer_rect(
+        &self,
+        active_layer_idx: usize,
+        cpu_layer: &mut crate::layer::Layer,
+        min_x: u32,
+        min_y: u32,
+        max_x: u32,
+        max_y: u32,
+        channels: crate::channel::ChannelFlags,
+    ) {
+        if let Some(gpu_layer) = self.gpu_layers.get(active_layer_idx) {
+            self.gpu_brush.readback_layer_rect(gpu_layer, cpu_layer, min_x, min_y, max_x, max_y, channels);
         }
     }
 
@@ -2641,5 +2667,115 @@ mod tests {
         assert!(!viewport.has_cage(), "WgpuViewport must report no active cage after clear");
         viewport.render(vp, eye, 0.0, 0, 0.0, 1.0, &shader, false);
     }
+
+    #[test]
+    fn test_zero_copy_gpu_compute_brush_stamping_and_readback() {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::all(),
+            flags: wgpu::InstanceFlags::empty(),
+            dx12_shader_compiler: Default::default(),
+            gles_minor_version: Default::default(),
+        });
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            compatible_surface: None,
+            force_fallback_adapter: false,
+        }));
+        let adapter = match adapter {
+            Some(a) => a,
+            None => {
+                eprintln!("Skipping test_zero_copy_gpu_compute_brush_stamping_and_readback: no GPU adapter found");
+                return;
+            }
+        };
+
+        let required_features = if adapter.features().contains(wgpu::Features::FLOAT32_FILTERABLE) {
+            wgpu::Features::FLOAT32_FILTERABLE
+        } else {
+            eprintln!("Skipping test_zero_copy_gpu_compute_brush_stamping_and_readback: FLOAT32_FILTERABLE not supported by adapter");
+            return;
+        };
+
+        let (device, queue) = match pollster::block_on(adapter.request_device(
+            &wgpu::DeviceDescriptor {
+                label: Some("GPU Compute Test Device"),
+                required_features,
+                required_limits: wgpu::Limits::default(),
+            },
+            None,
+        )) {
+            Ok(pair) => pair,
+            Err(e) => {
+                eprintln!("Skipping test_zero_copy_gpu_compute_brush_stamping_and_readback: {}", e);
+                return;
+            }
+        };
+
+        let device = std::sync::Arc::new(device);
+        let queue = std::sync::Arc::new(queue);
+        let adapter_arc = std::sync::Arc::new(adapter);
+        let renderer = std::sync::Arc::new(eframe::egui::mutex::RwLock::new(
+            egui_wgpu::Renderer::new(&device, wgpu::TextureFormat::Rgba8UnormSrgb, None, 1),
+        ));
+
+        let render_state = eframe::egui_wgpu::RenderState {
+            device: device.clone(),
+            queue: queue.clone(),
+            target_format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            renderer,
+            available_adapters: std::sync::Arc::new([]),
+            adapter: adapter_arc,
+        };
+
+        let mesh = crate::mesh::Mesh::create_cube_mesh("TestCube", 1.0);
+        let mut viewport = WgpuViewport::new(&render_state, &mesh);
+
+        let res = 256;
+        let mut project = crate::project::Project::new_default(res, res);
+        project.mesh = mesh;
+        viewport.sync_textures(&mut project);
+
+        let mut engine = crate::brush::BrushEngine::new();
+        engine.settings.radius = 16.0;
+        engine.settings.flow = 1.0;
+        engine.settings.opacity = 1.0;
+        engine.settings.paint_color = glam::Vec4::new(0.0, 0.2, 1.0, 1.0);
+        engine.settings.paint_roughness = 0.12;
+        engine.settings.paint_metallic = 0.88;
+        engine.update_cache();
+
+        // 1. Dispatch 2D GPU compute stamp at UV center (0.5, 0.5)
+        let uniform_2d = engine.build_gpu_stamp_data_2d(glam::Vec2::new(0.5, 0.5), res, res)
+            .expect("2D stamp data must be constructed");
+        viewport.stamp_2d_gpu(0, &uniform_2d);
+
+        // 2. Perform incremental GPU composite to update viewport materials directly in VRAM
+        viewport.composite_and_update_active(&project, 0);
+
+        // 3. Readback modified stroke bounding rect to CPU layer
+        let min_x = uniform_2d.bounds_min[0] as u32;
+        let min_y = uniform_2d.bounds_min[1] as u32;
+        let max_x = uniform_2d.bounds_max[0] as u32;
+        let max_y = uniform_2d.bounds_max[1] as u32;
+
+        let layer = &mut project.layers[0];
+        viewport.readback_layer_rect(0, layer, min_x, min_y, max_x, max_y, engine.settings.channels);
+
+        // 4. Assert stamped pixel inside the brush radius received blue color and roughness
+        let center_x = res / 2;
+        let center_y = res / 2;
+        let painted_col = layer.base_color_buf.get_pixel(center_x, center_y);
+        let painted_r = layer.roughness_buf.get_pixel(center_x, center_y);
+        let painted_m = layer.metallic_buf.get_pixel(center_x, center_y);
+
+        assert!(painted_col.z > 0.7, "Center pixel must receive blue color from GPU compute stamp, got b={}", painted_col.z);
+        assert!(painted_r < 0.3, "Center pixel roughness must be updated by GPU stamp, got r={}", painted_r);
+        assert!(painted_m > 0.6, "Center pixel metallic must be updated by GPU stamp, got m={}", painted_m);
+
+        // 5. Assert untouched corner pixel (0, 0) remains base material
+        let corner_col = layer.base_color_buf.get_pixel(0, 0);
+        assert_eq!(corner_col, glam::Vec4::ONE, "Corner pixel outside brush must remain untouched default white");
+    }
 }
+
 

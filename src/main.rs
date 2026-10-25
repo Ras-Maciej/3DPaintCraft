@@ -356,7 +356,7 @@ fn run_system_diagnostics() {
                         tex_size: [res as f32, res as f32],
                         flags: [0, 0],
                         tri_count: 0,
-                        _pad0: 0,
+                        channel_mask: 7,
                         _pad1: 0,
                         _pad2: 0,
                     },

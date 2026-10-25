@@ -210,6 +210,7 @@ pub struct PaintcraftApp {
 
     // Stroke undo tracking
     pub is_stroke_active: bool,
+    pub gpu_stroke_dirty_rect: Option<(u32, u32, u32, u32)>,
 
     // View & layout state
     pub view_mode: ViewportChannelMode,
@@ -559,6 +560,7 @@ impl PaintcraftApp {
             history,
             file_explorer,
             is_stroke_active: false,
+            gpu_stroke_dirty_rect: None,
             view_mode: ViewportChannelMode::Material,
             layout: ViewLayout::View3DOnly,
             viewport_texture: None,
@@ -6014,6 +6016,7 @@ impl PaintcraftApp {
                         };
                         layer.begin_stroke_recording(target, channels);
                         self.is_stroke_active = true;
+                        self.gpu_stroke_dirty_rect = None;
                     }
                     self.polygon_fill_drag_tris.clear();
                 }
@@ -6234,41 +6237,67 @@ impl PaintcraftApp {
                                         }
                                     }
 
-                                    // Keep CPU layer buffer updated for history/undo/save integrity
-                                    let _stroke_pts = if !skip_stroke {
-                                        let layer = &mut self.project.layers[act_idx];
-                                        let mesh = &self.project.mesh;
-                                        self.brush_engine.paint_stroke_3d(layer, mesh, hit.point, hit.normal, world_radius)
-                                    } else {
-                                        Vec::new()
-                                    };
-
-                                    self.brush_engine.settings.paint_color = orig_color;
-
-                                    // Hardware GPU Direct Dirty-Rect Sync: Streams the exact painted pixels to VRAM
-                                    // Guarantees 100% WYSIWYG stroke fidelity while drawing with zero visual shift upon release
                                     let mut gpu_synced = false;
-                                    if let Some(wgpu) = &mut self.wgpu_viewport {
-                                        let active_layer = &mut self.project.layers[act_idx];
-                                        if let Some(d_rect) = active_layer.dirty_rect {
-                                            if self.brush_engine.settings.channels.clearcoat
-                                                || self.brush_engine.settings.channels.emission
-                                                || self.brush_engine.settings.channels.opacity
-                                                || self.brush_engine.settings.channels.anisotropy
-                                            {
-                                                wgpu.sync_extended_dirty_rect(active_layer, d_rect, self.brush_engine.settings.channels);
-                                                self.need_cpu_composite_sync = true;
-                                            }
-                                            if let Some(gpu_layer) = wgpu.gpu_layers.get(act_idx) {
-                                                wgpu.gpu_compositor.update_layer(active_layer, gpu_layer, doc_w, doc_h);
+                                    if !skip_stroke {
+                                        let is_gpu_compute = (self.brush_engine.settings.mode == ToolMode::Brush || self.brush_engine.settings.mode == ToolMode::Eraser)
+                                            && self.wgpu_viewport.is_some();
+
+                                        if is_gpu_compute {
+                                            let wgpu = self.wgpu_viewport.as_mut().unwrap();
+                                            if let Some((uniform, gpu_tris)) = self.brush_engine.build_gpu_stamp_data(
+                                                &self.project.mesh,
+                                                hit.point,
+                                                hit.normal,
+                                                world_radius,
+                                                doc_w,
+                                                doc_h,
+                                            ) {
+                                                let s_min_x = uniform.bounds_min[0].max(0) as u32;
+                                                let s_min_y = uniform.bounds_min[1].max(0) as u32;
+                                                let s_max_x = (uniform.bounds_max[0] as u32).min(doc_w.saturating_sub(1));
+                                                let s_max_y = (uniform.bounds_max[1] as u32).min(doc_h.saturating_sub(1));
+
+                                                self.gpu_stroke_dirty_rect = Some(match self.gpu_stroke_dirty_rect {
+                                                    Some((x0, y0, x1, y1)) => (x0.min(s_min_x), y0.min(s_min_y), x1.max(s_max_x), y1.max(s_max_y)),
+                                                    None => (s_min_x, s_min_y, s_max_x, s_max_y),
+                                                });
+
+                                                wgpu.stamp_3d_gpu(act_idx, &uniform, &gpu_tris);
                                                 wgpu.composite_and_update_active(&self.project, act_idx);
-                                                let rw = (d_rect.2.saturating_sub(d_rect.0) + 1) as u64;
-                                                let rh = (d_rect.3.saturating_sub(d_rect.1) + 1) as u64;
-                                                self.perf_metrics.texture_transfer_bytes = rw * rh * 32;
+                                                self.perf_metrics.texture_transfer_bytes = 0;
                                                 gpu_synced = true;
+                                            }
+                                        } else {
+                                            // Software fallback for specialized carrier tools (e.g. smudge, clone) or CPU mode
+                                            let layer = &mut self.project.layers[act_idx];
+                                            let mesh = &self.project.mesh;
+                                            self.brush_engine.paint_stroke_3d(layer, mesh, hit.point, hit.normal, world_radius);
+
+                                            if let Some(wgpu) = &mut self.wgpu_viewport {
+                                                let active_layer = &mut self.project.layers[act_idx];
+                                                if let Some(d_rect) = active_layer.dirty_rect {
+                                                    if self.brush_engine.settings.channels.clearcoat
+                                                        || self.brush_engine.settings.channels.emission
+                                                        || self.brush_engine.settings.channels.opacity
+                                                        || self.brush_engine.settings.channels.anisotropy
+                                                    {
+                                                        wgpu.sync_extended_dirty_rect(active_layer, d_rect, self.brush_engine.settings.channels);
+                                                        self.need_cpu_composite_sync = true;
+                                                    }
+                                                    if let Some(gpu_layer) = wgpu.gpu_layers.get(act_idx) {
+                                                        wgpu.gpu_compositor.update_layer(active_layer, gpu_layer, doc_w, doc_h);
+                                                        wgpu.composite_and_update_active(&self.project, act_idx);
+                                                        let rw = (d_rect.2.saturating_sub(d_rect.0) + 1) as u64;
+                                                        let rh = (d_rect.3.saturating_sub(d_rect.1) + 1) as u64;
+                                                        self.perf_metrics.texture_transfer_bytes = rw * rh * 32;
+                                                        gpu_synced = true;
+                                                    }
+                                                }
                                             }
                                         }
                                     }
+
+                                    self.brush_engine.settings.paint_color = orig_color;
 
                                     self.perf_metrics.paint_stroke_ms = t_stroke.elapsed().as_secs_f32() * 1000.0;
 
@@ -6291,6 +6320,15 @@ impl PaintcraftApp {
                     }
                 }
             } else if response.drag_stopped() || (!input.pointer.any_down() && self.is_stroke_active) {
+                if let Some((x0, y0, x1, y1)) = self.gpu_stroke_dirty_rect.take() {
+                    let idx = self.project.active_layer_idx;
+                    if let Some(wgpu) = &mut self.wgpu_viewport {
+                        if let Some(layer) = self.project.layers.get_mut(idx) {
+                            wgpu.readback_layer_rect(idx, layer, x0, y0, x1, y1, self.brush_engine.settings.channels);
+                            layer.record_tiles_for_rect(x0, y0, x1, y1);
+                        }
+                    }
+                }
                 self.brush_engine.end_stroke();
                 self.polygon_fill_drag_tris.clear();
                 self.project.rebuild_composite();
@@ -6796,6 +6834,7 @@ impl PaintcraftApp {
                         };
                         layer.begin_stroke_recording(target, channels);
                         self.is_stroke_active = true;
+                        self.gpu_stroke_dirty_rect = None;
                     }
                     self.polygon_fill_drag_tris.clear();
                 }
@@ -6951,31 +6990,59 @@ impl PaintcraftApp {
                                         self.brush_engine.settings.flow = orig_flow * pressure;
                                     }
                                     let t_stroke = std::time::Instant::now();
-                                    self.brush_engine.paint_stroke(&mut self.project.layers[act_idx], glam::Vec2::new(u, v));
+                                    let is_gpu_compute = (self.brush_engine.settings.mode == ToolMode::Brush || self.brush_engine.settings.mode == ToolMode::Eraser)
+                                        && self.wgpu_viewport.is_some();
+
+                                    if is_gpu_compute {
+                                        let doc_w = self.project.texture_width;
+                                        let doc_h = self.project.texture_height;
+                                        let wgpu = self.wgpu_viewport.as_mut().unwrap();
+                                        if let Some(uniform) = self.brush_engine.build_gpu_stamp_data_2d(
+                                            glam::Vec2::new(u, v),
+                                            doc_w,
+                                            doc_h,
+                                        ) {
+                                            let s_min_x = uniform.bounds_min[0].max(0) as u32;
+                                            let s_min_y = uniform.bounds_min[1].max(0) as u32;
+                                            let s_max_x = (uniform.bounds_max[0] as u32).min(doc_w.saturating_sub(1));
+                                            let s_max_y = (uniform.bounds_max[1] as u32).min(doc_h.saturating_sub(1));
+
+                                            self.gpu_stroke_dirty_rect = Some(match self.gpu_stroke_dirty_rect {
+                                                Some((x0, y0, x1, y1)) => (x0.min(s_min_x), y0.min(s_min_y), x1.max(s_max_x), y1.max(s_max_y)),
+                                                None => (s_min_x, s_min_y, s_max_x, s_max_y),
+                                            });
+
+                                            wgpu.stamp_2d_gpu(act_idx, &uniform);
+                                            wgpu.composite_and_update_active(&self.project, act_idx);
+                                            self.perf_metrics.texture_transfer_bytes = 0;
+                                        }
+                                    } else {
+                                        self.brush_engine.paint_stroke(&mut self.project.layers[act_idx], glam::Vec2::new(u, v));
+                                        let d_rect = self.project.layers[act_idx].dirty_rect;
+                                        if let Some((d_x0, d_y0, d_x1, d_y1)) = d_rect {
+                                            self.project.rebuild_composite_rect(
+                                                d_x0 as usize,
+                                                d_y0 as usize,
+                                                d_x1 as usize,
+                                                d_y1 as usize,
+                                            );
+                                            self.update_uv_texture_rect(ctx, d_x0, d_y0, d_x1, d_y1);
+                                            if let Some(wgpu) = &mut self.wgpu_viewport {
+                                                if let Some(gpu_layer) = wgpu.gpu_layers.get(act_idx) {
+                                                    let doc_w = self.project.texture_width;
+                                                    let doc_h = self.project.texture_height;
+                                                    let active_layer = &mut self.project.layers[act_idx];
+                                                    wgpu.gpu_compositor.update_layer(active_layer, gpu_layer, doc_w, doc_h);
+                                                    wgpu.composite_and_update_active(&self.project, act_idx);
+                                                }
+                                            }
+                                        } else {
+                                            self.update_uv_texture(ctx);
+                                        }
+                                    }
                                     self.perf_metrics.paint_stroke_ms = t_stroke.elapsed().as_secs_f32() * 1000.0;
                                     self.brush_engine.settings.radius = orig_rad;
                                     self.brush_engine.settings.flow = orig_flow;
-                                    let d_rect = self.project.layers[act_idx].dirty_rect;
-                                    if let Some((d_x0, d_y0, d_x1, d_y1)) = d_rect {
-                                        self.project.rebuild_composite_rect(
-                                            d_x0 as usize,
-                                            d_y0 as usize,
-                                            d_x1 as usize,
-                                            d_y1 as usize,
-                                        );
-                                        self.update_uv_texture_rect(ctx, d_x0, d_y0, d_x1, d_y1);
-                                        if let Some(wgpu) = &mut self.wgpu_viewport {
-                                            if let Some(gpu_layer) = wgpu.gpu_layers.get(act_idx) {
-                                                let doc_w = self.project.texture_width;
-                                                let doc_h = self.project.texture_height;
-                                                let active_layer = &mut self.project.layers[act_idx];
-                                                wgpu.gpu_compositor.update_layer(active_layer, gpu_layer, doc_w, doc_h);
-                                                wgpu.composite_and_update_active(&self.project, act_idx);
-                                            }
-                                        }
-                                    } else {
-                                        self.update_uv_texture(ctx);
-                                    }
                                     self.project.gpu_sync_needed = false;
                                     self.project.is_dirty = true;
                                     self.last_painted_uv = Some(glam::Vec2::new(u, v));
@@ -6988,6 +7055,15 @@ impl PaintcraftApp {
                     }
                 }
             } else if response.drag_stopped() || (!ui.input(|i| i.pointer.any_down()) && self.is_stroke_active) {
+                if let Some((x0, y0, x1, y1)) = self.gpu_stroke_dirty_rect.take() {
+                    let idx = self.project.active_layer_idx;
+                    if let Some(wgpu) = &mut self.wgpu_viewport {
+                        if let Some(layer) = self.project.layers.get_mut(idx) {
+                            wgpu.readback_layer_rect(idx, layer, x0, y0, x1, y1, self.brush_engine.settings.channels);
+                            layer.record_tiles_for_rect(x0, y0, x1, y1);
+                        }
+                    }
+                }
                 self.brush_engine.end_stroke();
                 self.polygon_fill_drag_tris.clear();
                 if let Some(layer) = self.project.active_layer_mut() {

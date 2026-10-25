@@ -11,7 +11,7 @@ struct BrushUniform {
     tex_size: vec2<f32>,    // width, height
     flags: vec2<u32>,       // x = is_eraser, y = is_mask_target
     tri_count: u32,
-    _pad0: u32,
+    channel_mask: u32,
     _pad1: u32,
     _pad2: u32,
 };
@@ -59,46 +59,62 @@ fn cs_stamp(@builtin(global_invocation_id) global_id: vec3<u32>) {
     var best_weight: f32 = 0.0;
     var hit_found: bool = false;
 
-    let tri_n = brush.tri_count;
-    for (var i = 0u; i < tri_n; i = i + 1u) {
-        let tri = triangles[i];
-        let p0 = tri.uv0;
-        let p1 = tri.uv1;
-        let p2 = tri.uv2;
-
-        let det = (p1.y - p2.y) * (p0.x - p2.x) + (p2.x - p1.x) * (p0.y - p2.y);
-        if (abs(det) < 1e-6) {
-            continue;
+    if (brush.tri_count == 0u) {
+        // 2D UV Stamp Mode: hit_pos.xy = center in pixels, hit_pos.w = radius in pixels
+        let dist = length(vec2<f32>(f32(px), f32(py)) - brush.hit_pos.xy);
+        if (dist <= brush.hit_pos.w) {
+            let norm_dist = clamp(dist / brush.hit_pos.w, 0.0, 1.0);
+            let hardness = brush.hit_normal.w;
+            var falloff: f32 = 1.0;
+            if (norm_dist > hardness) {
+                falloff = 1.0 - (norm_dist - hardness) / max(1.0 - hardness, 0.0001);
+            }
+            best_weight = clamp(falloff * brush.params.w, 0.0, 1.0);
+            hit_found = true;
         }
-        let inv_det = 1.0 / det;
+    } else {
+        // 3D Projection Stamp Mode: query triangles with 3D sphere falloff
+        let tri_n = brush.tri_count;
+        for (var i = 0u; i < tri_n; i = i + 1u) {
+            let tri = triangles[i];
+            let p0 = tri.uv0;
+            let p1 = tri.uv1;
+            let p2 = tri.uv2;
 
-        let w0 = ((p1.y - p2.y) * (uv.x - p2.x) + (p2.x - p1.x) * (uv.y - p2.y)) * inv_det;
-        let w1 = ((p2.y - p0.y) * (uv.x - p2.x) + (p0.x - p2.x) * (uv.y - p2.y)) * inv_det;
-        let w2 = 1.0 - w0 - w1;
+            let det = (p1.y - p2.y) * (p0.x - p2.x) + (p2.x - p1.x) * (p0.y - p2.y);
+            if (abs(det) < 1e-6) {
+                continue;
+            }
+            let inv_det = 1.0 / det;
 
-        if (w0 >= -0.01 && w1 >= -0.01 && w2 >= -0.01) {
-            let cw0 = clamp(w0, 0.0, 1.0);
-            let cw1 = clamp(w1, 0.0, 1.0);
-            let cw2 = clamp(w2, 0.0, 1.0);
+            let w0 = ((p1.y - p2.y) * (uv.x - p2.x) + (p2.x - p1.x) * (uv.y - p2.y)) * inv_det;
+            let w1 = ((p2.y - p0.y) * (uv.x - p2.x) + (p0.x - p2.x) * (uv.y - p2.y)) * inv_det;
+            let w2 = 1.0 - w0 - w1;
 
-            let pos3d = tri.pos0.xyz * cw0 + tri.pos1.xyz * cw1 + tri.pos2.xyz * cw2;
-            let nrm3d = normalize(tri.nrm0.xyz * cw0 + tri.nrm1.xyz * cw1 + tri.nrm2.xyz * cw2);
+            if (w0 >= -0.01 && w1 >= -0.01 && w2 >= -0.01) {
+                let cw0 = clamp(w0, 0.0, 1.0);
+                let cw1 = clamp(w1, 0.0, 1.0);
+                let cw2 = clamp(w2, 0.0, 1.0);
 
-            let dist = length(pos3d - brush.hit_pos.xyz);
-            if (dist <= brush.hit_pos.w) {
-                let n_dot = dot(nrm3d, brush.hit_normal.xyz);
-                if (n_dot >= -0.1) {
-                    let angle_w = clamp(n_dot + 0.1, 0.0, 1.0);
-                    let norm_dist = clamp(dist / brush.hit_pos.w, 0.0, 1.0);
-                    let hardness = brush.hit_normal.w;
-                    var falloff: f32 = 1.0;
-                    if (norm_dist > hardness) {
-                        falloff = 1.0 - (norm_dist - hardness) / max(1.0 - hardness, 0.0001);
-                    }
-                    let w = clamp(falloff * brush.params.w * angle_w, 0.0, 1.0);
-                    if (w > best_weight) {
-                        best_weight = w;
-                        hit_found = true;
+                let pos3d = tri.pos0.xyz * cw0 + tri.pos1.xyz * cw1 + tri.pos2.xyz * cw2;
+                let nrm3d = normalize(tri.nrm0.xyz * cw0 + tri.nrm1.xyz * cw1 + tri.nrm2.xyz * cw2);
+
+                let dist = length(pos3d - brush.hit_pos.xyz);
+                if (dist <= brush.hit_pos.w) {
+                    let n_dot = dot(nrm3d, brush.hit_normal.xyz);
+                    if (n_dot >= -0.1) {
+                        let angle_w = clamp(n_dot + 0.1, 0.0, 1.0);
+                        let norm_dist = clamp(dist / brush.hit_pos.w, 0.0, 1.0);
+                        let hardness = brush.hit_normal.w;
+                        var falloff: f32 = 1.0;
+                        if (norm_dist > hardness) {
+                            falloff = 1.0 - (norm_dist - hardness) / max(1.0 - hardness, 0.0001);
+                        }
+                        let w = clamp(falloff * brush.params.w * angle_w, 0.0, 1.0);
+                        if (w > best_weight) {
+                            best_weight = w;
+                            hit_found = true;
+                        }
                     }
                 }
             }
@@ -126,16 +142,33 @@ fn cs_stamp(@builtin(global_invocation_id) global_id: vec3<u32>) {
         textureStore(out_roughness, pixel_coord, vec4<f32>(cur_r, 0.0, 0.0, 0.0));
         textureStore(out_metallic, pixel_coord, vec4<f32>(cur_m, 0.0, 0.0, 0.0));
     } else {
-        // Paint mode
-        let new_rgb = mix(cur_col.rgb, brush.paint_color.rgb, best_weight);
-        let new_a = clamp(cur_col.a + best_weight * (1.0 - cur_col.a), 0.0, 1.0);
-        textureStore(out_color, pixel_coord, vec4<f32>(new_rgb, new_a));
+        // Paint mode with channel gating
+        let mask = select(brush.channel_mask, 7u, brush.channel_mask == 0u);
+        let do_color = (mask & 1u) != 0u;
+        let do_roughness = (mask & 2u) != 0u;
+        let do_metallic = (mask & 4u) != 0u;
+
+        if (do_color) {
+            let new_rgb = mix(cur_col.rgb, brush.paint_color.rgb, best_weight);
+            let new_a = clamp(cur_col.a + best_weight * (1.0 - cur_col.a), 0.0, 1.0);
+            textureStore(out_color, pixel_coord, vec4<f32>(new_rgb, new_a));
+        } else {
+            textureStore(out_color, pixel_coord, cur_col);
+        }
         textureStore(out_normal, pixel_coord, cur_norm);
 
-        let new_r = mix(cur_r, brush.params.x, best_weight);
-        textureStore(out_roughness, pixel_coord, vec4<f32>(new_r, 0.0, 0.0, 0.0));
+        if (do_roughness) {
+            let new_r = mix(cur_r, brush.params.x, best_weight);
+            textureStore(out_roughness, pixel_coord, vec4<f32>(new_r, 0.0, 0.0, 0.0));
+        } else {
+            textureStore(out_roughness, pixel_coord, vec4<f32>(cur_r, 0.0, 0.0, 0.0));
+        }
 
-        let new_m = mix(cur_m, brush.params.y, best_weight);
-        textureStore(out_metallic, pixel_coord, vec4<f32>(new_m, 0.0, 0.0, 0.0));
+        if (do_metallic) {
+            let new_m = mix(cur_m, brush.params.y, best_weight);
+            textureStore(out_metallic, pixel_coord, vec4<f32>(new_m, 0.0, 0.0, 0.0));
+        } else {
+            textureStore(out_metallic, pixel_coord, vec4<f32>(cur_m, 0.0, 0.0, 0.0));
+        }
     }
 }
