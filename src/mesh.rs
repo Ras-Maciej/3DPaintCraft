@@ -1057,24 +1057,503 @@ impl Mesh {
         Ok(mesh)
     }
 
-    /// Load 3D model from file (auto-detects .obj, .gltf, .glb)
-    pub fn load_file(path: &std::path::Path) -> Result<Self, String> {
-        let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
-        if ext == "obj" {
-            let content = std::fs::read_to_string(path).map_err(|e| format!("Failed to read OBJ file: {}", e))?;
-            let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("Model");
-            Self::from_obj_str(&content, name)
-        } else if ext == "gltf" || ext == "glb" {
-            Self::from_gltf_or_glb_file(path)
-        } else {
-            if let Ok(content) = std::fs::read_to_string(path) {
-                let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("Model");
-                if let Ok(mesh) = Self::from_obj_str(&content, name) {
-                    return Ok(mesh);
+    /// Generate automatic box projection UVs if the mesh lacks UV coordinates
+    pub fn generate_box_uvs_if_missing(&mut self) {
+        let has_valid_uvs = self.vertices.iter().any(|v| v.uv.length_squared() > 1e-6);
+        if !has_valid_uvs {
+            for v in &mut self.vertices {
+                let p = v.position;
+                let n = v.normal.abs();
+                if n.x >= n.y && n.x >= n.z {
+                    v.uv = Vec2::new((p.z + 1.0) * 0.5, (p.y + 1.0) * 0.5);
+                } else if n.y >= n.x && n.y >= n.z {
+                    v.uv = Vec2::new((p.x + 1.0) * 0.5, (p.z + 1.0) * 0.5);
+                } else {
+                    v.uv = Vec2::new((p.x + 1.0) * 0.5, (p.y + 1.0) * 0.5);
                 }
             }
-            Self::from_gltf_or_glb_file(path)
         }
+    }
+
+    /// Load 3D model from file (auto-detects .obj, .gltf, .glb, .ply, .stl)
+    pub fn load_file(path: &std::path::Path) -> Result<Self, String> {
+        let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
+        let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("Model");
+        match ext.as_str() {
+            "obj" => {
+                let content = std::fs::read_to_string(path).map_err(|e| format!("Failed to read OBJ file: {}", e))?;
+                Self::from_obj_str(&content, name)
+            }
+            "gltf" | "glb" => Self::from_gltf_or_glb_file(path),
+            "ply" => {
+                let bytes = std::fs::read(path).map_err(|e| format!("Failed to read PLY file: {}", e))?;
+                Self::from_ply_bytes(&bytes, name)
+            }
+            "stl" => {
+                let bytes = std::fs::read(path).map_err(|e| format!("Failed to read STL file: {}", e))?;
+                Self::from_stl_bytes(&bytes, name)
+            }
+            _ => {
+                if let Ok(bytes) = std::fs::read(path) {
+                    if bytes.starts_with(b"glTF") {
+                        return Self::from_gltf_or_glb_file(path);
+                    }
+                    if bytes.starts_with(b"ply") {
+                        return Self::from_ply_bytes(&bytes, name);
+                    }
+                    if bytes.starts_with(b"solid") || (bytes.len() >= 84 && bytes.len() == 84 + (u32::from_le_bytes([bytes[80], bytes[81], bytes[82], bytes[83]]) as usize) * 50) {
+                        return Self::from_stl_bytes(&bytes, name);
+                    }
+                    if let Ok(content) = std::str::from_utf8(&bytes) {
+                        if let Ok(mesh) = Self::from_obj_str(content, name) {
+                            return Ok(mesh);
+                        }
+                    }
+                }
+                Self::from_gltf_or_glb_file(path)
+            }
+        }
+    }
+
+    /// Load 3D model from Stanford PLY format (supports ASCII and Binary Little-Endian)
+    pub fn from_ply_bytes(bytes: &[u8], name: &str) -> Result<Self, String> {
+        let header_end = bytes.windows(10).position(|w| w == b"end_header")
+            .ok_or_else(|| "Invalid PLY: missing end_header".to_string())?;
+
+        let mut header_data_start = header_end + 10;
+        if header_data_start < bytes.len() && bytes[header_data_start] == b'\r' {
+            header_data_start += 1;
+        }
+        if header_data_start < bytes.len() && bytes[header_data_start] == b'\n' {
+            header_data_start += 1;
+        }
+
+        let header_str = std::str::from_utf8(&bytes[..header_end])
+            .map_err(|e| format!("Invalid PLY header: {}", e))?;
+
+        let mut is_ascii = false;
+        let mut vertex_count = 0usize;
+        let mut face_count = 0usize;
+        let mut current_element = "";
+
+        #[derive(Clone, Debug, PartialEq, Eq)]
+        enum PlyPropType {
+            Float32,
+            Float64,
+            Int8,
+            Uint8,
+            Int16,
+            Uint16,
+            Int32,
+            Uint32,
+        }
+
+        fn parse_prop_type(s: &str) -> Option<PlyPropType> {
+            match s {
+                "float" | "float32" => Some(PlyPropType::Float32),
+                "double" | "float64" => Some(PlyPropType::Float64),
+                "char" | "int8" => Some(PlyPropType::Int8),
+                "uchar" | "uint8" => Some(PlyPropType::Uint8),
+                "short" | "int16" => Some(PlyPropType::Int16),
+                "ushort" | "uint16" => Some(PlyPropType::Uint16),
+                "int" | "int32" => Some(PlyPropType::Int32),
+                "uint" | "uint32" => Some(PlyPropType::Uint32),
+                _ => None,
+            }
+        }
+
+        #[derive(Clone, Debug)]
+        struct PlyProp {
+            name: String,
+            prop_type: PlyPropType,
+        }
+
+        let mut vertex_props: Vec<PlyProp> = Vec::new();
+
+        for line in header_str.lines() {
+            let tokens: Vec<&str> = line.split_whitespace().collect();
+            if tokens.is_empty() {
+                continue;
+            }
+            match tokens[0] {
+                "format" if tokens.len() >= 2 => {
+                    if tokens[1] == "ascii" {
+                        is_ascii = true;
+                    } else if tokens[1] == "binary_little_endian" {
+                        is_ascii = false;
+                    } else {
+                        return Err(format!("Unsupported PLY format: {}", tokens[1]));
+                    }
+                }
+                "element" if tokens.len() >= 3 => {
+                    current_element = tokens[1];
+                    let count = tokens[2].parse::<usize>().unwrap_or(0);
+                    if current_element == "vertex" {
+                        vertex_count = count;
+                    } else if current_element == "face" {
+                        face_count = count;
+                    }
+                }
+                "property" if tokens.len() >= 3 => {
+                    if current_element == "vertex" {
+                        if let Some(pt) = parse_prop_type(tokens[1]) {
+                            vertex_props.push(PlyProp {
+                                name: tokens[2].to_string(),
+                                prop_type: pt,
+                            });
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if vertex_count == 0 {
+            return Err("PLY contains no vertices".to_string());
+        }
+
+        let pos_x_idx = vertex_props.iter().position(|p| p.name == "x");
+        let pos_y_idx = vertex_props.iter().position(|p| p.name == "y");
+        let pos_z_idx = vertex_props.iter().position(|p| p.name == "z");
+        let norm_x_idx = vertex_props.iter().position(|p| p.name == "nx");
+        let norm_y_idx = vertex_props.iter().position(|p| p.name == "ny");
+        let norm_z_idx = vertex_props.iter().position(|p| p.name == "nz");
+        let uv_u_idx = vertex_props.iter().position(|p| p.name == "u" || p.name == "s" || p.name == "texture_u");
+        let uv_v_idx = vertex_props.iter().position(|p| p.name == "v" || p.name == "t" || p.name == "texture_v");
+
+        let mut vertices: Vec<Vertex> = Vec::with_capacity(vertex_count);
+        let mut indices: Vec<u32> = Vec::with_capacity(face_count * 3);
+
+        if is_ascii {
+            let data_str = std::str::from_utf8(&bytes[header_data_start..])
+                .map_err(|e| format!("Invalid UTF-8 in ASCII PLY data: {}", e))?;
+            let mut lines = data_str.lines().filter(|l| !l.trim().is_empty());
+
+            for _ in 0..vertex_count {
+                let line = lines.next().ok_or_else(|| "Unexpected EOF reading PLY vertices".to_string())?;
+                let vals: Vec<&str> = line.split_whitespace().collect();
+                let get_f32 = |opt_idx: Option<usize>| -> f32 {
+                    opt_idx.and_then(|idx| vals.get(idx)).and_then(|s| s.parse::<f32>().ok()).unwrap_or(0.0)
+                };
+
+                let pos = Vec3::new(get_f32(pos_x_idx), get_f32(pos_y_idx), get_f32(pos_z_idx));
+                let normal = Vec3::new(get_f32(norm_x_idx), get_f32(norm_y_idx), get_f32(norm_z_idx));
+                let uv = Vec2::new(get_f32(uv_u_idx), get_f32(uv_v_idx));
+
+                vertices.push(Vertex {
+                    position: pos,
+                    normal: if normal.length_squared() > 1e-6 { normal.normalize() } else { Vec3::ZERO },
+                    uv,
+                    tangent: Vec4::new(1.0, 0.0, 0.0, 1.0),
+                });
+            }
+
+            for _ in 0..face_count {
+                let line = match lines.next() {
+                    Some(l) => l,
+                    None => break,
+                };
+                let tokens: Vec<&str> = line.split_whitespace().collect();
+                if tokens.is_empty() {
+                    continue;
+                }
+                let cnt = tokens[0].parse::<usize>().unwrap_or(0);
+                if tokens.len() >= 1 + cnt && cnt >= 3 {
+                    let f_indices: Vec<u32> = tokens[1..=cnt].iter().filter_map(|t| t.parse::<u32>().ok()).collect();
+                    for i in 1..f_indices.len().saturating_sub(1) {
+                        indices.push(f_indices[0]);
+                        indices.push(f_indices[i]);
+                        indices.push(f_indices[i + 1]);
+                    }
+                }
+            }
+        } else {
+            let mut cursor = header_data_start;
+            for _ in 0..vertex_count {
+                let mut x = 0.0f32;
+                let mut y = 0.0f32;
+                let mut z = 0.0f32;
+                let mut nx = 0.0f32;
+                let mut ny = 0.0f32;
+                let mut nz = 0.0f32;
+                let mut u = 0.0f32;
+                let mut v = 0.0f32;
+
+                for (idx, prop) in vertex_props.iter().enumerate() {
+                    let val_f32 = match prop.prop_type {
+                        PlyPropType::Float32 => {
+                            if cursor + 4 <= bytes.len() {
+                                let f = f32::from_le_bytes(bytes[cursor..cursor + 4].try_into().unwrap());
+                                cursor += 4;
+                                f
+                            } else { 0.0 }
+                        }
+                        PlyPropType::Float64 => {
+                            if cursor + 8 <= bytes.len() {
+                                let f = f64::from_le_bytes(bytes[cursor..cursor + 8].try_into().unwrap()) as f32;
+                                cursor += 8;
+                                f
+                            } else { 0.0 }
+                        }
+                        PlyPropType::Uint8 | PlyPropType::Int8 => {
+                            let b = if cursor < bytes.len() { bytes[cursor] as f32 } else { 0.0 };
+                            cursor += 1;
+                            b
+                        }
+                        PlyPropType::Int16 => {
+                            if cursor + 2 <= bytes.len() {
+                                let s = i16::from_le_bytes(bytes[cursor..cursor + 2].try_into().unwrap()) as f32;
+                                cursor += 2;
+                                s
+                            } else { 0.0 }
+                        }
+                        PlyPropType::Uint16 => {
+                            if cursor + 2 <= bytes.len() {
+                                let s = u16::from_le_bytes(bytes[cursor..cursor + 2].try_into().unwrap()) as f32;
+                                cursor += 2;
+                                s
+                            } else { 0.0 }
+                        }
+                        PlyPropType::Int32 => {
+                            if cursor + 4 <= bytes.len() {
+                                let i = i32::from_le_bytes(bytes[cursor..cursor + 4].try_into().unwrap()) as f32;
+                                cursor += 4;
+                                i
+                            } else { 0.0 }
+                        }
+                        PlyPropType::Uint32 => {
+                            if cursor + 4 <= bytes.len() {
+                                let i = u32::from_le_bytes(bytes[cursor..cursor + 4].try_into().unwrap()) as f32;
+                                cursor += 4;
+                                i
+                            } else { 0.0 }
+                        }
+                    };
+
+                    if Some(idx) == pos_x_idx { x = val_f32; }
+                    else if Some(idx) == pos_y_idx { y = val_f32; }
+                    else if Some(idx) == pos_z_idx { z = val_f32; }
+                    else if Some(idx) == norm_x_idx { nx = val_f32; }
+                    else if Some(idx) == norm_y_idx { ny = val_f32; }
+                    else if Some(idx) == norm_z_idx { nz = val_f32; }
+                    else if Some(idx) == uv_u_idx { u = val_f32; }
+                    else if Some(idx) == uv_v_idx { v = val_f32; }
+                }
+
+                let normal = Vec3::new(nx, ny, nz);
+                vertices.push(Vertex {
+                    position: Vec3::new(x, y, z),
+                    normal: if normal.length_squared() > 1e-6 { normal.normalize() } else { Vec3::ZERO },
+                    uv: Vec2::new(u, v),
+                    tangent: Vec4::new(1.0, 0.0, 0.0, 1.0),
+                });
+            }
+
+            for _ in 0..face_count {
+                if cursor >= bytes.len() {
+                    break;
+                }
+                let cnt = bytes[cursor] as usize;
+                cursor += 1;
+                if cursor + cnt * 4 <= bytes.len() {
+                    let mut face_idxs = Vec::with_capacity(cnt);
+                    for _ in 0..cnt {
+                        let idx = u32::from_le_bytes(bytes[cursor..cursor + 4].try_into().unwrap());
+                        cursor += 4;
+                        face_idxs.push(idx);
+                    }
+                    for i in 1..face_idxs.len().saturating_sub(1) {
+                        indices.push(face_idxs[0]);
+                        indices.push(face_idxs[i]);
+                        indices.push(face_idxs[i + 1]);
+                    }
+                }
+            }
+        }
+
+        let has_normals = vertices.iter().any(|v| v.normal.length_squared() > 1e-6);
+        if !has_normals && indices.len() >= 3 {
+            let mut accum_normals = vec![Vec3::ZERO; vertices.len()];
+            for chunk in indices.chunks_exact(3) {
+                let i0 = chunk[0] as usize;
+                let i1 = chunk[1] as usize;
+                let i2 = chunk[2] as usize;
+                if i0 < vertices.len() && i1 < vertices.len() && i2 < vertices.len() {
+                    let p0 = vertices[i0].position;
+                    let p1 = vertices[i1].position;
+                    let p2 = vertices[i2].position;
+                    let fnorm = (p1 - p0).cross(p2 - p0);
+                    if fnorm.length_squared() > 1e-8 {
+                        let n = fnorm.normalize();
+                        accum_normals[i0] += n;
+                        accum_normals[i1] += n;
+                        accum_normals[i2] += n;
+                    }
+                }
+            }
+            for (v, n) in vertices.iter_mut().zip(accum_normals.iter()) {
+                v.normal = if n.length_squared() > 1e-6 { n.normalize() } else { Vec3::Y };
+            }
+        }
+
+        let mut mesh = Self::new(name.to_string(), vertices, indices);
+        mesh.generate_box_uvs_if_missing();
+        mesh.recompute_bounds();
+        mesh.normalize_to_unit_box();
+        mesh.ensure_tangents();
+        mesh.rebuild_bvh();
+
+        Ok(mesh)
+    }
+
+    /// Load 3D model from Stereolithography STL format (supports Binary and ASCII)
+    pub fn from_stl_bytes(bytes: &[u8], name: &str) -> Result<Self, String> {
+        let is_binary = bytes.len() >= 84 && {
+            let num_tris = u32::from_le_bytes(bytes[80..84].try_into().unwrap()) as usize;
+            bytes.len() == 84 + num_tris * 50
+        };
+
+        let mut vertices: Vec<Vertex> = Vec::new();
+        let mut indices: Vec<u32> = Vec::new();
+        let mut vertex_map: std::collections::HashMap<[i32; 3], u32> = std::collections::HashMap::new();
+
+        if is_binary {
+            let num_tris = u32::from_le_bytes(bytes[80..84].try_into().unwrap()) as usize;
+            let mut offset = 84;
+            for _ in 0..num_tris {
+                if offset + 50 > bytes.len() {
+                    break;
+                }
+                let nx = f32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
+                let ny = f32::from_le_bytes(bytes[offset + 4..offset + 8].try_into().unwrap());
+                let nz = f32::from_le_bytes(bytes[offset + 8..offset + 12].try_into().unwrap());
+                let norm = Vec3::new(nx, ny, nz);
+
+                let mut tri_indices = [0u32; 3];
+                for i in 0..3 {
+                    let v_off = offset + 12 + i * 12;
+                    let x = f32::from_le_bytes(bytes[v_off..v_off + 4].try_into().unwrap());
+                    let y = f32::from_le_bytes(bytes[v_off + 4..v_off + 8].try_into().unwrap());
+                    let z = f32::from_le_bytes(bytes[v_off + 8..v_off + 12].try_into().unwrap());
+                    let pos = Vec3::new(x, y, z);
+                    let key = [
+                        (x * 10000.0).round() as i32,
+                        (y * 10000.0).round() as i32,
+                        (z * 10000.0).round() as i32,
+                    ];
+
+                    let idx = *vertex_map.entry(key).or_insert_with(|| {
+                        let new_idx = vertices.len() as u32;
+                        vertices.push(Vertex {
+                            position: pos,
+                            normal: Vec3::ZERO,
+                            uv: Vec2::ZERO,
+                            tangent: Vec4::new(1.0, 0.0, 0.0, 1.0),
+                        });
+                        new_idx
+                    });
+                    tri_indices[i] = idx;
+                }
+
+                let calculated_norm = if norm.length_squared() > 1e-6 {
+                    norm.normalize()
+                } else {
+                    let p0 = vertices[tri_indices[0] as usize].position;
+                    let p1 = vertices[tri_indices[1] as usize].position;
+                    let p2 = vertices[tri_indices[2] as usize].position;
+                    (p1 - p0).cross(p2 - p0).normalize_or_zero()
+                };
+
+                for &idx in &tri_indices {
+                    vertices[idx as usize].normal += calculated_norm;
+                }
+
+                indices.extend_from_slice(&tri_indices);
+                offset += 50;
+            }
+        } else {
+            let text = std::str::from_utf8(bytes).map_err(|e| format!("Invalid UTF-8 in ASCII STL: {}", e))?;
+            let mut lines = text.lines();
+            let mut current_normal = Vec3::ZERO;
+            let mut face_verts = Vec::with_capacity(3);
+
+            while let Some(line) = lines.next() {
+                let trimmed = line.trim();
+                let lower = trimmed.to_lowercase();
+                if lower.starts_with("facet normal") {
+                    let tokens: Vec<&str> = trimmed.split_whitespace().collect();
+                    if tokens.len() >= 5 {
+                        let nx = tokens[2].parse::<f32>().unwrap_or(0.0);
+                        let ny = tokens[3].parse::<f32>().unwrap_or(0.0);
+                        let nz = tokens[4].parse::<f32>().unwrap_or(0.0);
+                        current_normal = Vec3::new(nx, ny, nz);
+                    }
+                    face_verts.clear();
+                } else if lower.starts_with("vertex") {
+                    let tokens: Vec<&str> = trimmed.split_whitespace().collect();
+                    if tokens.len() >= 4 {
+                        let x = tokens[1].parse::<f32>().unwrap_or(0.0);
+                        let y = tokens[2].parse::<f32>().unwrap_or(0.0);
+                        let z = tokens[3].parse::<f32>().unwrap_or(0.0);
+                        let pos = Vec3::new(x, y, z);
+                        let key = [
+                            (x * 10000.0).round() as i32,
+                            (y * 10000.0).round() as i32,
+                            (z * 10000.0).round() as i32,
+                        ];
+
+                        let idx = *vertex_map.entry(key).or_insert_with(|| {
+                            let new_idx = vertices.len() as u32;
+                            vertices.push(Vertex {
+                                position: pos,
+                                normal: Vec3::ZERO,
+                                uv: Vec2::ZERO,
+                                tangent: Vec4::new(1.0, 0.0, 0.0, 1.0),
+                            });
+                            new_idx
+                        });
+                        face_verts.push(idx);
+                    }
+                } else if lower.starts_with("endfacet") {
+                    if face_verts.len() == 3 {
+                        let norm = if current_normal.length_squared() > 1e-6 {
+                            current_normal.normalize()
+                        } else {
+                            let p0 = vertices[face_verts[0] as usize].position;
+                            let p1 = vertices[face_verts[1] as usize].position;
+                            let p2 = vertices[face_verts[2] as usize].position;
+                            (p1 - p0).cross(p2 - p0).normalize_or_zero()
+                        };
+                        for &idx in &face_verts {
+                            vertices[idx as usize].normal += norm;
+                        }
+                        indices.extend_from_slice(&face_verts);
+                    }
+                    face_verts.clear();
+                }
+            }
+        }
+
+        if vertices.is_empty() || indices.is_empty() {
+            return Err("Failed to extract geometry from STL".to_string());
+        }
+
+        for v in &mut vertices {
+            if v.normal.length_squared() > 1e-6 {
+                v.normal = v.normal.normalize();
+            } else {
+                v.normal = Vec3::Y;
+            }
+        }
+
+        let mut mesh = Self::new(name.to_string(), vertices, indices);
+        mesh.generate_box_uvs_if_missing();
+        mesh.recompute_bounds();
+        mesh.normalize_to_unit_box();
+        mesh.ensure_tangents();
+        mesh.rebuild_bvh();
+
+        Ok(mesh)
     }
 
 fn decode_base64_simple(input: &str) -> Vec<u8> {
@@ -2480,6 +2959,85 @@ f 1/1/1 3/3/1 4/4/1
         // Query sphere stress test on the sphere surface
         let queried_tris = dense_sphere.query_sphere(glam::Vec3::new(0.0, 0.0, 1.0), 0.3);
         assert!(!queried_tris.is_empty(), "Sphere query on surface must find triangles");
+    }
+
+    #[test]
+    fn test_ply_ascii_loader() {
+        let ply_ascii = "\
+ply
+format ascii 1.0
+comment 3D Paintcraft PLY Test
+element vertex 3
+property float x
+property float y
+property float z
+property float nx
+property float ny
+property float nz
+property float s
+property float t
+element face 1
+property list uchar int vertex_indices
+end_header
+0.0 0.0 0.0 0.0 0.0 1.0 0.0 0.0
+1.0 0.0 0.0 0.0 0.0 1.0 1.0 0.0
+0.0 1.0 0.0 0.0 0.0 1.0 0.0 1.0
+3 0 1 2
+";
+        let mesh = Mesh::from_ply_bytes(ply_ascii.as_bytes(), "PlyTriangle").expect("PLY parsing failed");
+        assert_eq!(mesh.vertices.len(), 3);
+        assert_eq!(mesh.indices.len(), 3);
+        assert_eq!(mesh.indices, vec![0, 1, 2]);
+        assert_eq!(mesh.name, "PlyTriangle");
+    }
+
+    #[test]
+    fn test_stl_ascii_and_binary_loader() {
+        // ASCII STL
+        let stl_ascii = "\
+solid TestStl
+  facet normal 0.0 0.0 1.0
+    outer loop
+      vertex 0.0 0.0 0.0
+      vertex 1.0 0.0 0.0
+      vertex 0.0 1.0 0.0
+    endloop
+  endfacet
+endsolid TestStl
+";
+        let mesh_ascii = Mesh::from_stl_bytes(stl_ascii.as_bytes(), "StlAscii").expect("ASCII STL parsing failed");
+        assert_eq!(mesh_ascii.vertices.len(), 3);
+        assert_eq!(mesh_ascii.indices.len(), 3);
+        assert_eq!(mesh_ascii.indices, vec![0, 1, 2]);
+
+        // Binary STL
+        let mut bin_stl = vec![0u8; 84 + 50]; // 1 triangle
+        // 80 bytes header (zeros)
+        // 4 bytes count: 1
+        bin_stl[80..84].copy_from_slice(&1u32.to_le_bytes());
+        // Triangle normal (0, 0, 1)
+        bin_stl[84..88].copy_from_slice(&0.0f32.to_le_bytes());
+        bin_stl[88..92].copy_from_slice(&0.0f32.to_le_bytes());
+        bin_stl[92..96].copy_from_slice(&1.0f32.to_le_bytes());
+        // V1: (0, 0, 0)
+        bin_stl[96..100].copy_from_slice(&0.0f32.to_le_bytes());
+        bin_stl[100..104].copy_from_slice(&0.0f32.to_le_bytes());
+        bin_stl[104..108].copy_from_slice(&0.0f32.to_le_bytes());
+        // V2: (2, 0, 0)
+        bin_stl[108..112].copy_from_slice(&2.0f32.to_le_bytes());
+        bin_stl[112..116].copy_from_slice(&0.0f32.to_le_bytes());
+        bin_stl[116..120].copy_from_slice(&0.0f32.to_le_bytes());
+        // V3: (0, 2, 0)
+        bin_stl[120..124].copy_from_slice(&0.0f32.to_le_bytes());
+        bin_stl[124..128].copy_from_slice(&2.0f32.to_le_bytes());
+        bin_stl[128..132].copy_from_slice(&0.0f32.to_le_bytes());
+        // 2 bytes attribute byte count (zeros)
+
+        let mesh_bin = Mesh::from_stl_bytes(&bin_stl, "StlBinary").expect("Binary STL parsing failed");
+        assert_eq!(mesh_bin.vertices.len(), 3);
+        assert_eq!(mesh_bin.indices.len(), 3);
+        // Verify box projection UVs were automatically generated
+        assert!(mesh_bin.vertices.iter().any(|v| v.uv.length_squared() > 0.0), "STL must have box UVs generated");
     }
 }
 

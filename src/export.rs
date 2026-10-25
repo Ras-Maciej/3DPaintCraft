@@ -11,6 +11,7 @@ pub use crate::packing::{
     BakedMapContext, ChannelSlot, ChannelSource, CustomPackingPreset, CustomTexturePacker,
     PackedColorMode, PackedImageFormat, PackedTextureMap,
 };
+pub use crate::packing::PackedImageFormat as ExportImageFormat;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ExportPreset {
@@ -46,11 +47,13 @@ impl TextureExporter {
         output_dir: &Path,
         flip_v: bool,
         mesh: Option<&crate::mesh::Mesh>,
+        format: ExportImageFormat,
     ) -> Result<Vec<PathBuf>, String> {
         std::fs::create_dir_all(output_dir).map_err(|e| e.to_string())?;
         let mut generated_files = Vec::new();
 
         let clean_name = mesh_name.replace(' ', "_").to_lowercase();
+        let ext = format.extension();
 
         // Convert composite height map to tangent normal bump and blend with layer normals (Adobe 3D Painter standard)
         let combined_normal = textures.generate_combined_normal(4.0);
@@ -58,148 +61,148 @@ impl TextureExporter {
         match preset {
             ExportPreset::Godot4 => {
                 // 1. Albedo
-                let albedo_path = output_dir.join(format!("{}_Albedo.png", clean_name));
-                Self::save_rgba(&textures.base_color, &albedo_path, flip_v)?;
+                let albedo_path = output_dir.join(format!("{}_Albedo.{}", clean_name, ext));
+                Self::save_rgba(&textures.base_color, &albedo_path, flip_v, format)?;
                 generated_files.push(albedo_path);
 
                 // 2. Normal (OpenGL +Y up with blended height bump)
-                let n_path = output_dir.join(format!("{}_Normal.png", clean_name));
-                Self::save_rgba(&combined_normal, &n_path, flip_v)?;
+                let n_path = output_dir.join(format!("{}_Normal.{}", clean_name, ext));
+                Self::save_rgba(&combined_normal, &n_path, flip_v, format)?;
                 generated_files.push(n_path);
 
                 // 3. Packed ORM: R=AO, G=Roughness, B=Metallic
-                let orm_path = output_dir.join(format!("{}_ORM.png", clean_name));
-                Self::save_packed_orm(&textures.ao, &textures.roughness, &textures.metallic, &orm_path, flip_v)?;
+                let orm_path = output_dir.join(format!("{}_ORM.{}", clean_name, ext));
+                Self::save_packed_orm(&textures.ao, &textures.roughness, &textures.metallic, &orm_path, flip_v, format)?;
                 generated_files.push(orm_path);
 
                 // 4. Height / Displacement
-                let height_path = output_dir.join(format!("{}_Height.png", clean_name));
-                Self::save_scalar(&textures.height_map, &height_path, flip_v)?;
+                let height_path = output_dir.join(format!("{}_Height.{}", clean_name, ext));
+                Self::save_scalar(&textures.height_map, &height_path, flip_v, format)?;
                 generated_files.push(height_path);
 
                 // 5. Individual Roughness
-                let rough_path = output_dir.join(format!("{}_Roughness.png", clean_name));
-                Self::save_scalar(&textures.roughness, &rough_path, flip_v)?;
+                let rough_path = output_dir.join(format!("{}_Roughness.{}", clean_name, ext));
+                Self::save_scalar(&textures.roughness, &rough_path, flip_v, format)?;
                 generated_files.push(rough_path);
 
                 // 6. Individual Metallic
-                let metal_path = output_dir.join(format!("{}_Metallic.png", clean_name));
-                Self::save_scalar(&textures.metallic, &metal_path, flip_v)?;
+                let metal_path = output_dir.join(format!("{}_Metallic.{}", clean_name, ext));
+                Self::save_scalar(&textures.metallic, &metal_path, flip_v, format)?;
                 generated_files.push(metal_path);
 
                 // 7. Individual AO
-                let ao_path = output_dir.join(format!("{}_AO.png", clean_name));
-                Self::save_scalar(&textures.ao, &ao_path, flip_v)?;
+                let ao_path = output_dir.join(format!("{}_AO.{}", clean_name, ext));
+                Self::save_scalar(&textures.ao, &ao_path, flip_v, format)?;
                 generated_files.push(ao_path);
 
                 // 8. Emissive
-                let emis_path = output_dir.join(format!("{}_Emissive.png", clean_name));
-                Self::save_rgba(&textures.emissive, &emis_path, flip_v)?;
+                let emis_path = output_dir.join(format!("{}_Emissive.{}", clean_name, ext));
+                Self::save_rgba(&textures.emissive, &emis_path, flip_v, format)?;
                 generated_files.push(emis_path);
 
                 // 9. Opacity
-                let opac_path = output_dir.join(format!("{}_Opacity.png", clean_name));
-                Self::save_scalar(&textures.opacity, &opac_path, flip_v)?;
+                let opac_path = output_dir.join(format!("{}_Opacity.{}", clean_name, ext));
+                Self::save_scalar(&textures.opacity, &opac_path, flip_v, format)?;
                 generated_files.push(opac_path);
             }
 
             ExportPreset::UnrealEngine => {
                 // 1. BaseColor
-                let bc_path = output_dir.join(format!("{}_BaseColor.png", clean_name));
-                Self::save_rgba(&textures.base_color, &bc_path, flip_v)?;
+                let bc_path = output_dir.join(format!("{}_BaseColor.{}", clean_name, ext));
+                Self::save_rgba(&textures.base_color, &bc_path, flip_v, format)?;
                 generated_files.push(bc_path);
 
                 // 2. Normal (DirectX -Y inverted with blended height bump)
-                let n_path = output_dir.join(format!("{}_Normal.png", clean_name));
-                Self::save_normal_directx(&combined_normal, &n_path, flip_v)?;
+                let n_path = output_dir.join(format!("{}_Normal.{}", clean_name, ext));
+                Self::save_normal_directx(&combined_normal, &n_path, flip_v, format)?;
                 generated_files.push(n_path);
 
                 // 3. Packed ORM: R=AO, G=Roughness, B=Metallic
-                let orm_path = output_dir.join(format!("{}_ORM.png", clean_name));
-                Self::save_packed_orm(&textures.ao, &textures.roughness, &textures.metallic, &orm_path, flip_v)?;
+                let orm_path = output_dir.join(format!("{}_ORM.{}", clean_name, ext));
+                Self::save_packed_orm(&textures.ao, &textures.roughness, &textures.metallic, &orm_path, flip_v, format)?;
                 generated_files.push(orm_path);
 
                 // 4. Emissive
-                let emis_path = output_dir.join(format!("{}_Emissive.png", clean_name));
-                Self::save_rgba(&textures.emissive, &emis_path, flip_v)?;
+                let emis_path = output_dir.join(format!("{}_Emissive.{}", clean_name, ext));
+                Self::save_rgba(&textures.emissive, &emis_path, flip_v, format)?;
                 generated_files.push(emis_path);
 
                 // 5. Opacity
-                let opac_path = output_dir.join(format!("{}_Opacity.png", clean_name));
-                Self::save_scalar(&textures.opacity, &opac_path, flip_v)?;
+                let opac_path = output_dir.join(format!("{}_Opacity.{}", clean_name, ext));
+                Self::save_scalar(&textures.opacity, &opac_path, flip_v, format)?;
                 generated_files.push(opac_path);
             }
 
             ExportPreset::BlenderGltf => {
                 // 1. BaseColor
-                let bc_path = output_dir.join(format!("{}_BaseColor.png", clean_name));
-                Self::save_rgba(&textures.base_color, &bc_path, flip_v)?;
+                let bc_path = output_dir.join(format!("{}_BaseColor.{}", clean_name, ext));
+                Self::save_rgba(&textures.base_color, &bc_path, flip_v, format)?;
                 generated_files.push(bc_path);
 
                 // 2. Normal (OpenGL +Y up with blended height bump)
-                let n_path = output_dir.join(format!("{}_Normal.png", clean_name));
-                Self::save_rgba(&combined_normal, &n_path, flip_v)?;
+                let n_path = output_dir.join(format!("{}_Normal.{}", clean_name, ext));
+                Self::save_rgba(&combined_normal, &n_path, flip_v, format)?;
                 generated_files.push(n_path);
 
                 // 3. MetallicRoughness (glTF standard: G = Roughness, B = Metallic)
-                let mr_path = output_dir.join(format!("{}_MetallicRoughness.png", clean_name));
-                Self::save_packed_mr(&textures.roughness, &textures.metallic, &mr_path, flip_v)?;
+                let mr_path = output_dir.join(format!("{}_MetallicRoughness.{}", clean_name, ext));
+                Self::save_packed_mr(&textures.roughness, &textures.metallic, &mr_path, flip_v, format)?;
                 generated_files.push(mr_path);
 
                 // 4. AO
-                let ao_path = output_dir.join(format!("{}_AO.png", clean_name));
-                Self::save_scalar(&textures.ao, &ao_path, flip_v)?;
+                let ao_path = output_dir.join(format!("{}_AO.{}", clean_name, ext));
+                Self::save_scalar(&textures.ao, &ao_path, flip_v, format)?;
                 generated_files.push(ao_path);
 
                 // 5. Emissive
-                let emis_path = output_dir.join(format!("{}_Emissive.png", clean_name));
-                Self::save_rgba(&textures.emissive, &emis_path, flip_v)?;
+                let emis_path = output_dir.join(format!("{}_Emissive.{}", clean_name, ext));
+                Self::save_rgba(&textures.emissive, &emis_path, flip_v, format)?;
                 generated_files.push(emis_path);
 
                 // 6. Opacity
-                let opac_path = output_dir.join(format!("{}_Opacity.png", clean_name));
-                Self::save_scalar(&textures.opacity, &opac_path, flip_v)?;
+                let opac_path = output_dir.join(format!("{}_Opacity.{}", clean_name, ext));
+                Self::save_scalar(&textures.opacity, &opac_path, flip_v, format)?;
                 generated_files.push(opac_path);
             }
 
             ExportPreset::Unity => {
                 // 1. Albedo
-                let albedo_path = output_dir.join(format!("{}_Albedo.png", clean_name));
-                Self::save_rgba(&textures.base_color, &albedo_path, flip_v)?;
+                let albedo_path = output_dir.join(format!("{}_Albedo.{}", clean_name, ext));
+                Self::save_rgba(&textures.base_color, &albedo_path, flip_v, format)?;
                 generated_files.push(albedo_path);
 
                 // 2. MetallicGloss: R = Metallic, A = Smoothness (1 - roughness)
-                let mg_path = output_dir.join(format!("{}_MetallicGloss.png", clean_name));
-                Self::save_packed_unity(&textures.metallic, &textures.roughness, &mg_path, flip_v)?;
+                let mg_path = output_dir.join(format!("{}_MetallicGloss.{}", clean_name, ext));
+                Self::save_packed_unity(&textures.metallic, &textures.roughness, &mg_path, flip_v, format)?;
                 generated_files.push(mg_path);
 
                 // 3. Normal (OpenGL +Y up with blended height bump)
-                let n_path = output_dir.join(format!("{}_Normal.png", clean_name));
-                Self::save_rgba(&combined_normal, &n_path, flip_v)?;
+                let n_path = output_dir.join(format!("{}_Normal.{}", clean_name, ext));
+                Self::save_rgba(&combined_normal, &n_path, flip_v, format)?;
                 generated_files.push(n_path);
 
                 // 4. Emissive
-                let emis_path = output_dir.join(format!("{}_Emission.png", clean_name));
-                Self::save_rgba(&textures.emissive, &emis_path, flip_v)?;
+                let emis_path = output_dir.join(format!("{}_Emission.{}", clean_name, ext));
+                Self::save_rgba(&textures.emissive, &emis_path, flip_v, format)?;
                 generated_files.push(emis_path);
 
                 // 5. Opacity / Cutout
-                let opac_path = output_dir.join(format!("{}_Opacity.png", clean_name));
-                Self::save_scalar(&textures.opacity, &opac_path, flip_v)?;
+                let opac_path = output_dir.join(format!("{}_Opacity.{}", clean_name, ext));
+                Self::save_scalar(&textures.opacity, &opac_path, flip_v, format)?;
                 generated_files.push(opac_path);
             }
 
             ExportPreset::GlbBinary => {
-                let bc_path = output_dir.join(format!("{}_BaseColor.png", clean_name));
-                Self::save_rgba(&textures.base_color, &bc_path, flip_v)?;
+                let bc_path = output_dir.join(format!("{}_BaseColor.{}", clean_name, ext));
+                Self::save_rgba(&textures.base_color, &bc_path, flip_v, format)?;
                 generated_files.push(bc_path);
 
-                let mr_path = output_dir.join(format!("{}_MetallicRoughness.png", clean_name));
-                Self::save_packed_orm(&textures.ao, &textures.roughness, &textures.metallic, &mr_path, flip_v)?;
+                let mr_path = output_dir.join(format!("{}_MetallicRoughness.{}", clean_name, ext));
+                Self::save_packed_orm(&textures.ao, &textures.roughness, &textures.metallic, &mr_path, flip_v, format)?;
                 generated_files.push(mr_path);
 
-                let n_path = output_dir.join(format!("{}_Normal.png", clean_name));
-                Self::save_rgba(&combined_normal, &n_path, flip_v)?;
+                let n_path = output_dir.join(format!("{}_Normal.{}", clean_name, ext));
+                Self::save_rgba(&combined_normal, &n_path, flip_v, format)?;
                 generated_files.push(n_path);
             }
 
@@ -210,8 +213,8 @@ impl TextureExporter {
                     ("Emissive", &textures.emissive),
                 ];
                 for (suffix, buf) in maps {
-                    let path = output_dir.join(format!("{}_{}.png", clean_name, suffix));
-                    Self::save_rgba(buf, &path, flip_v)?;
+                    let path = output_dir.join(format!("{}_{}.{}", clean_name, suffix, ext));
+                    Self::save_rgba(buf, &path, flip_v, format)?;
                     generated_files.push(path);
                 }
 
@@ -226,8 +229,8 @@ impl TextureExporter {
                     ("AnisotropyAngle", &textures.anisotropy_angle),
                 ];
                 for (suffix, buf) in scalar_maps {
-                    let path = output_dir.join(format!("{}_{}.png", clean_name, suffix));
-                    Self::save_scalar(buf, &path, flip_v)?;
+                    let path = output_dir.join(format!("{}_{}.{}", clean_name, suffix, ext));
+                    Self::save_scalar(buf, &path, flip_v, format)?;
                     generated_files.push(path);
                 }
             }
@@ -248,21 +251,22 @@ impl TextureExporter {
             let mut mtl_content = format!(
                 "# 3D Paintcraft Wavefront Material Definition\nnewmtl Material\nillum 2\nKa 1.0 1.0 1.0\nKd 1.0 1.0 1.0\nKs 0.5 0.5 0.5\n"
             );
+            let ext_suffix = format!(".{}", ext);
             for file in &generated_files {
                 if let Some(fname) = file.file_name().and_then(|f| f.to_str()) {
-                    if fname.ends_with("_Albedo.png") || fname.ends_with("_BaseColor.png") {
+                    if fname.ends_with(&format!("_Albedo{}", ext_suffix)) || fname.ends_with(&format!("_BaseColor{}", ext_suffix)) {
                         mtl_content.push_str(&format!("map_Kd {}\n", fname));
-                    } else if fname.ends_with("_Normal.png") {
+                    } else if fname.ends_with(&format!("_Normal{}", ext_suffix)) {
                         mtl_content.push_str(&format!("map_Bump {}\nbump {}\n", fname, fname));
-                    } else if fname.ends_with("_Roughness.png") {
+                    } else if fname.ends_with(&format!("_Roughness{}", ext_suffix)) {
                         mtl_content.push_str(&format!("map_Ns {}\n", fname));
-                    } else if fname.ends_with("_Metallic.png") {
+                    } else if fname.ends_with(&format!("_Metallic{}", ext_suffix)) {
                         mtl_content.push_str(&format!("map_Pm {}\n", fname));
-                    } else if fname.ends_with("_AO.png") {
+                    } else if fname.ends_with(&format!("_AO{}", ext_suffix)) {
                         mtl_content.push_str(&format!("map_Ka {}\n", fname));
-                    } else if fname.ends_with("_Emissive.png") || fname.ends_with("_Emission.png") {
+                    } else if fname.ends_with(&format!("_Emissive{}", ext_suffix)) || fname.ends_with(&format!("_Emission{}", ext_suffix)) {
                         mtl_content.push_str(&format!("map_Ke {}\n", fname));
-                    } else if fname.ends_with("_Opacity.png") {
+                    } else if fname.ends_with(&format!("_Opacity{}", ext_suffix)) {
                         mtl_content.push_str(&format!("map_d {}\n", fname));
                     }
                 }
@@ -341,7 +345,34 @@ impl TextureExporter {
         }
     }
 
-    fn save_normal_directx(buf: &crate::channel::RgbaBuffer, path: &Path, flip_v: bool) -> Result<(), String> {
+    pub fn save_image_buffer(
+        img: &ImageBuffer<Rgba<u8>, Vec<u8>>,
+        path: &Path,
+        format: ExportImageFormat,
+        has_alpha: bool,
+    ) -> Result<(), String> {
+        match format {
+            ExportImageFormat::Jpeg => {
+                let rgb = image::DynamicImage::ImageRgba8(img.clone()).to_rgb8();
+                rgb.save(path).map_err(|e| e.to_string())
+            }
+            ExportImageFormat::Png | ExportImageFormat::Tiff | ExportImageFormat::Bmp | ExportImageFormat::Tga => {
+                if has_alpha {
+                    img.save(path).map_err(|e| e.to_string())
+                } else {
+                    let rgb = image::DynamicImage::ImageRgba8(img.clone()).to_rgb8();
+                    rgb.save(path).map_err(|e| e.to_string())
+                }
+            }
+        }
+    }
+
+    fn save_normal_directx(
+        buf: &crate::channel::RgbaBuffer,
+        path: &Path,
+        flip_v: bool,
+        format: ExportImageFormat,
+    ) -> Result<(), String> {
         let w = buf.width;
         let h = buf.height;
         let mut img: ImageBuffer<Rgba<u8>, Vec<u8>> = ImageBuffer::new(w, h);
@@ -359,10 +390,15 @@ impl TextureExporter {
             }
         }
         Self::dilate_image_rgba(&mut img, &mask, 16);
-        img.save(path).map_err(|e| e.to_string())
+        Self::save_image_buffer(&img, path, format, false)
     }
 
-    fn save_rgba(buf: &crate::channel::RgbaBuffer, path: &Path, flip_v: bool) -> Result<(), String> {
+    fn save_rgba(
+        buf: &crate::channel::RgbaBuffer,
+        path: &Path,
+        flip_v: bool,
+        format: ExportImageFormat,
+    ) -> Result<(), String> {
         let w = buf.width;
         let h = buf.height;
         let mut img: ImageBuffer<Rgba<u8>, Vec<u8>> = ImageBuffer::new(w, h);
@@ -380,10 +416,15 @@ impl TextureExporter {
             }
         }
         Self::dilate_image_rgba(&mut img, &mask, 16);
-        img.save(path).map_err(|e| e.to_string())
+        Self::save_image_buffer(&img, path, format, true)
     }
 
-    fn save_scalar(buf: &crate::channel::ScalarBuffer, path: &Path, flip_v: bool) -> Result<(), String> {
+    fn save_scalar(
+        buf: &crate::channel::ScalarBuffer,
+        path: &Path,
+        flip_v: bool,
+        format: ExportImageFormat,
+    ) -> Result<(), String> {
         let w = buf.width;
         let h = buf.height;
         let mut img: ImageBuffer<Rgba<u8>, Vec<u8>> = ImageBuffer::new(w, h);
@@ -394,7 +435,7 @@ impl TextureExporter {
                 img.put_pixel(x, dst_y, Rgba([val, val, val, 255]));
             }
         }
-        img.save(path).map_err(|e| e.to_string())
+        Self::save_image_buffer(&img, path, format, false)
     }
 
     fn save_packed_orm(
@@ -403,6 +444,7 @@ impl TextureExporter {
         metallic: &crate::channel::ScalarBuffer,
         path: &Path,
         flip_v: bool,
+        format: ExportImageFormat,
     ) -> Result<(), String> {
         let w = ao.width;
         let h = ao.height;
@@ -416,7 +458,7 @@ impl TextureExporter {
                 img.put_pixel(x, dst_y, Rgba([a, r, m, 255]));
             }
         }
-        img.save(path).map_err(|e| e.to_string())
+        Self::save_image_buffer(&img, path, format, false)
     }
 
     fn save_packed_mr(
@@ -424,6 +466,7 @@ impl TextureExporter {
         metallic: &crate::channel::ScalarBuffer,
         path: &Path,
         flip_v: bool,
+        format: ExportImageFormat,
     ) -> Result<(), String> {
         let w = roughness.width;
         let h = roughness.height;
@@ -436,7 +479,7 @@ impl TextureExporter {
                 img.put_pixel(x, dst_y, Rgba([0, r, m, 255]));
             }
         }
-        img.save(path).map_err(|e| e.to_string())
+        Self::save_image_buffer(&img, path, format, false)
     }
 
     fn save_packed_unity(
@@ -444,6 +487,7 @@ impl TextureExporter {
         roughness: &crate::channel::ScalarBuffer,
         path: &Path,
         flip_v: bool,
+        format: ExportImageFormat,
     ) -> Result<(), String> {
         let w = metallic.width;
         let h = metallic.height;
@@ -456,7 +500,7 @@ impl TextureExporter {
                 img.put_pixel(x, dst_y, Rgba([m, 0, 0, smoothness]));
             }
         }
-        img.save(path).map_err(|e| e.to_string())
+        Self::save_image_buffer(&img, path, format, true)
     }
 }
 
@@ -468,7 +512,7 @@ mod tests {
     fn test_export_preset_godot4() {
         let textures = CompositeTextureSet::new(16, 16);
         let temp_dir = std::env::temp_dir().join("test_paintcraft_godot4_export");
-        let exported = TextureExporter::export_preset(&textures, "ShaderBall", ExportPreset::Godot4, &temp_dir, false, None).unwrap();
+        let exported = TextureExporter::export_preset(&textures, "ShaderBall", ExportPreset::Godot4, &temp_dir, false, None, ExportImageFormat::Png).unwrap();
 
         assert_eq!(exported.len(), 9, "Godot 4 preset should generate 9 textures (including Emissive and Opacity)");
         for path in &exported {
@@ -490,7 +534,7 @@ mod tests {
             }
         }
         let temp_dir = std::env::temp_dir().join("test_paintcraft_height_normal_export");
-        let _exported = TextureExporter::export_preset(&textures, "HeightTest", ExportPreset::Godot4, &temp_dir, false, None).unwrap();
+        let _exported = TextureExporter::export_preset(&textures, "HeightTest", ExportPreset::Godot4, &temp_dir, false, None, ExportImageFormat::Png).unwrap();
 
         let normal_path = temp_dir.join("heighttest_Normal.png");
         assert!(normal_path.exists());
@@ -525,14 +569,14 @@ mod tests {
             textures.base_color.set_pixel(x, 0, glam::Vec4::new(1.0, 0.0, 0.0, 1.0));
         }
         let temp_dir_flipped = std::env::temp_dir().join("test_paintcraft_flip_v_true");
-        let _ = TextureExporter::export_preset(&textures, "FlipTest", ExportPreset::Godot4, &temp_dir_flipped, true, None).unwrap();
+        let _ = TextureExporter::export_preset(&textures, "FlipTest", ExportPreset::Godot4, &temp_dir_flipped, true, None, ExportImageFormat::Png).unwrap();
         let flipped_albedo = image::open(temp_dir_flipped.join("fliptest_Albedo.png")).unwrap().into_rgba8();
         // When flip_v is true, row 0 in buffer should end up at row h - 1 (y = 7) in the saved PNG
         assert_eq!(flipped_albedo.get_pixel(4, 7)[0], 255, "Flipped texture should have painted row at the bottom (y=7)");
         let _ = std::fs::remove_dir_all(&temp_dir_flipped);
 
         let temp_dir_unflipped = std::env::temp_dir().join("test_paintcraft_flip_v_false");
-        let _ = TextureExporter::export_preset(&textures, "FlipTest", ExportPreset::Godot4, &temp_dir_unflipped, false, None).unwrap();
+        let _ = TextureExporter::export_preset(&textures, "FlipTest", ExportPreset::Godot4, &temp_dir_unflipped, false, None, ExportImageFormat::Png).unwrap();
         let unflipped_albedo = image::open(temp_dir_unflipped.join("fliptest_Albedo.png")).unwrap().into_rgba8();
         // When flip_v is false, row 0 in buffer stays at row 0 in the saved PNG
         assert_eq!(unflipped_albedo.get_pixel(4, 0)[0], 255, "Unflipped texture should have painted row at the top (y=0)");
@@ -544,7 +588,7 @@ mod tests {
         let textures = CompositeTextureSet::new(8, 8);
         let mesh = crate::mesh::Mesh::create_cube_mesh("ExportCube", 1.0);
         let temp_dir = std::env::temp_dir().join("test_paintcraft_mesh_export");
-        let exported = TextureExporter::export_preset(&textures, "ExportCube", ExportPreset::UnrealEngine, &temp_dir, true, Some(&mesh)).unwrap();
+        let exported = TextureExporter::export_preset(&textures, "ExportCube", ExportPreset::UnrealEngine, &temp_dir, true, Some(&mesh), ExportImageFormat::Png).unwrap();
 
         let obj_path = temp_dir.join("exportcube.obj");
         let mtl_path = temp_dir.join("exportcube.mtl");
@@ -574,21 +618,55 @@ mod tests {
 
         // Test Unreal
         let ue_dir = temp_dir.join("ue");
-        let ue_files = TextureExporter::export_preset(&textures, "TestMesh", ExportPreset::UnrealEngine, &ue_dir, false, None).unwrap();
+        let ue_files = TextureExporter::export_preset(&textures, "TestMesh", ExportPreset::UnrealEngine, &ue_dir, false, None, ExportImageFormat::Png).unwrap();
         assert!(ue_files.contains(&ue_dir.join("testmesh_Emissive.png")), "Unreal must export Emissive");
         assert!(ue_files.contains(&ue_dir.join("testmesh_Opacity.png")), "Unreal must export Opacity");
 
         // Test Blender / glTF
         let blender_dir = temp_dir.join("blender");
-        let blender_files = TextureExporter::export_preset(&textures, "TestMesh", ExportPreset::BlenderGltf, &blender_dir, false, None).unwrap();
+        let blender_files = TextureExporter::export_preset(&textures, "TestMesh", ExportPreset::BlenderGltf, &blender_dir, false, None, ExportImageFormat::Png).unwrap();
         assert!(blender_files.contains(&blender_dir.join("testmesh_Emissive.png")), "Blender must export Emissive");
         assert!(blender_files.contains(&blender_dir.join("testmesh_Opacity.png")), "Blender must export Opacity");
 
         // Test Unity
         let unity_dir = temp_dir.join("unity");
-        let unity_files = TextureExporter::export_preset(&textures, "TestMesh", ExportPreset::Unity, &unity_dir, false, None).unwrap();
+        let unity_files = TextureExporter::export_preset(&textures, "TestMesh", ExportPreset::Unity, &unity_dir, false, None, ExportImageFormat::Png).unwrap();
         assert!(unity_files.contains(&unity_dir.join("testmesh_Emission.png")), "Unity must export Emission");
         assert!(unity_files.contains(&unity_dir.join("testmesh_Opacity.png")), "Unity must export Opacity");
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_export_custom_formats_tga_jpeg() {
+        let mut textures = CompositeTextureSet::new(16, 16);
+        textures.base_color.set_pixel(4, 4, glam::Vec4::new(0.8, 0.2, 0.1, 1.0));
+        textures.roughness.set_pixel(4, 4, 0.35);
+
+        let temp_dir = std::env::temp_dir().join("test_paintcraft_custom_formats");
+
+        // 1. Test Targa (.tga) export
+        let tga_dir = temp_dir.join("tga");
+        let tga_files = TextureExporter::export_preset(&textures, "TgaMesh", ExportPreset::UnrealEngine, &tga_dir, false, None, ExportImageFormat::Tga).unwrap();
+        assert!(tga_files.contains(&tga_dir.join("tgamesh_BaseColor.tga")), "BaseColor.tga must exist");
+        assert!(tga_files.contains(&tga_dir.join("tgamesh_Normal.tga")), "Normal.tga must exist");
+        assert!(tga_files.contains(&tga_dir.join("tgamesh_ORM.tga")), "ORM.tga must exist");
+
+        // 2. Test JPEG (.jpg) export
+        let jpg_dir = temp_dir.join("jpg");
+        let jpg_files = TextureExporter::export_preset(&textures, "JpgMesh", ExportPreset::UnrealEngine, &jpg_dir, false, None, ExportImageFormat::Jpeg).unwrap();
+        assert!(jpg_files.contains(&jpg_dir.join("jpgmesh_BaseColor.jpg")), "BaseColor.jpg must exist");
+        assert!(jpg_files.contains(&jpg_dir.join("jpgmesh_Normal.jpg")), "Normal.jpg must exist");
+
+        // 3. Test TIFF (.tif) export
+        let tif_dir = temp_dir.join("tif");
+        let tif_files = TextureExporter::export_preset(&textures, "TifMesh", ExportPreset::UnrealEngine, &tif_dir, false, None, ExportImageFormat::Tiff).unwrap();
+        assert!(tif_files.contains(&tif_dir.join("tifmesh_BaseColor.tif")), "BaseColor.tif must exist");
+
+        // 4. Test BMP (.bmp) export
+        let bmp_dir = temp_dir.join("bmp");
+        let bmp_files = TextureExporter::export_preset(&textures, "BmpMesh", ExportPreset::UnrealEngine, &bmp_dir, false, None, ExportImageFormat::Bmp).unwrap();
+        assert!(bmp_files.contains(&bmp_dir.join("bmpmesh_BaseColor.bmp")), "BaseColor.bmp must exist");
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }

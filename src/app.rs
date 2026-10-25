@@ -225,6 +225,8 @@ pub struct PaintcraftApp {
     pub status_message: String,
     #[allow(dead_code)]
     pub export_preset: ExportPreset,
+    pub export_image_format: crate::packing::PackedImageFormat,
+    pub last_stylus_pressure: f32,
     pub export_dir: String,
     pub export_flip_v: bool,
     pub export_mesh: bool,
@@ -580,6 +582,8 @@ impl PaintcraftApp {
             uv_pixel_buffer: Vec::new(),
             status_message: "Ready. Select a tool or material to begin painting in 3D.".to_string(),
             export_preset: ExportPreset::UnrealEngine,
+            export_image_format: crate::packing::PackedImageFormat::Png,
+            last_stylus_pressure: 1.0,
             export_dir: {
                 let mut dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
                 dir.push("exports");
@@ -2145,6 +2149,17 @@ impl PaintcraftApp {
                                             .on_hover_text("When checked, exports 3D mesh geometry files alongside texture maps. When unchecked, exports texture maps only.");
                                         ui.end_row();
 
+                                        ui.label(egui::RichText::new("Output Format:").strong());
+                                        egui::ComboBox::from_id_source("settings_output_format_combo")
+                                            .selected_text(self.export_image_format.name())
+                                            .width(280.0)
+                                            .show_ui(ui, |ui| {
+                                                for fmt in crate::packing::PackedImageFormat::all() {
+                                                    ui.selectable_value(&mut self.export_image_format, *fmt, fmt.name());
+                                                }
+                                            });
+                                        ui.end_row();
+
                                         ui.label(egui::RichText::new("Coordinate System:").strong());
                                         ui.checkbox(&mut self.export_flip_v, "Flip Y / V-Axis (DirectX / OBJ UV origin)")
                                             .on_hover_text("Inverts vertical texture coordinates to conform to DirectX and standard DCC UV orientations.");
@@ -2175,6 +2190,7 @@ impl PaintcraftApp {
                                 if let Some(cur_preset) = self.custom_packing_presets.get(self.active_custom_packing_idx) {
                                     let mesh_clean = self.project.mesh.name.replace(' ', "_").to_lowercase();
                                     let ts_clean = focused_ts_name.replace(' ', "_");
+                                    let ext = self.export_image_format.extension();
 
                                     egui::ScrollArea::vertical()
                                         .max_height(160.0)
@@ -2202,9 +2218,9 @@ impl PaintcraftApp {
                                                     continue;
                                                 }
                                                 let file_name = if self.project.texture_sets.len() > 1 {
-                                                    format!("{}_{}{}.{}", mesh_clean, ts_clean, map.name_suffix, map.format.extension())
+                                                    format!("{}_{}{}.{}", mesh_clean, ts_clean, map.name_suffix, ext)
                                                 } else {
-                                                    format!("{}{}.{}", mesh_clean, map.name_suffix, map.format.extension())
+                                                    format!("{}{}.{}", mesh_clean, map.name_suffix, ext)
                                                 };
 
                                                 ui.horizontal(|ui| {
@@ -2270,9 +2286,10 @@ impl PaintcraftApp {
                                             .cloned()
                                             .unwrap_or_else(crate::packing::CustomPackingPreset::unreal_orm);
 
-                                        // Apply global padding override if configured
+                                        // Apply global padding and format override if configured
                                         for m in &mut active_preset.maps {
                                             m.dilation_iterations = self.export_padding_px;
+                                            m.format = self.export_image_format;
                                         }
 
                                         // Step 0: Fully rebuild composite for active canvas and synchronize active texture set
@@ -2556,17 +2573,18 @@ impl PaintcraftApp {
 
                                                         egui::ComboBox::from_id_source(format!("substance_format_{}", m_idx))
                                                             .selected_text(map.format.name())
-                                                            .width(90.0)
+                                                            .width(100.0)
                                                             .show_ui(ui, |ui| {
-                                                                ui.selectable_value(&mut map.format, crate::packing::PackedImageFormat::Png, "PNG");
-                                                                ui.selectable_value(&mut map.format, crate::packing::PackedImageFormat::Jpeg, "JPEG");
+                                                                for fmt in crate::packing::PackedImageFormat::all() {
+                                                                    ui.selectable_value(&mut map.format, *fmt, fmt.name());
+                                                                }
                                                             });
 
                                                         ui.label("Pad:");
                                                         ui.add(egui::Slider::new(&mut map.dilation_iterations, 0..=32).text("px"));
 
                                                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                                            if ui.small_button("✕").on_hover_text("Delete this map").clicked() {
+                                                            if ui.small_button("X").on_hover_text("Delete this map").clicked() {
                                                                 map_to_delete = Some(m_idx);
                                                             }
                                                             if ui.small_button("Dup").on_hover_text("Duplicate map").clicked() {
@@ -2809,14 +2827,14 @@ impl PaintcraftApp {
                                         };
 
                                         ui.horizontal(|ui| {
-                                            let icon = if fname.ends_with(".obj") || fname.ends_with(".glb") {
-                                                "📦"
+                                            let tag = if fname.ends_with(".obj") || fname.ends_with(".glb") {
+                                                "[3D]"
                                             } else if fname.ends_with(".mtl") {
-                                                "⚙"
+                                                "[MTL]"
                                             } else {
-                                                "📄"
+                                                "[TEX]"
                                             };
-                                            ui.label(icon);
+                                            ui.label(egui::RichText::new(tag).monospace().color(egui::Color32::from_rgb(140, 200, 255)));
                                             ui.label(egui::RichText::new(fname).strong());
                                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                                 ui.label(egui::RichText::new(size_str).small().color(egui::Color32::GRAY));
@@ -3387,6 +3405,11 @@ impl eframe::App for PaintcraftApp {
                         self.file_explorer.open();
                         ui.close_menu();
                     }
+                    if ui.button("Import 3D Model (OBJ, glTF, PLY, STL)...").clicked() {
+                        self.file_explorer = FileExplorerDialog::new_open_model();
+                        self.file_explorer.open();
+                        ui.close_menu();
+                    }
                     ui.menu_button("Open Recent", |ui| {
                         if self.recent_projects.is_empty() {
                             ui.label(egui::RichText::new("No recent projects").small().color(Color32::GRAY));
@@ -3729,7 +3752,7 @@ impl eframe::App for PaintcraftApp {
                                 ui.add(egui::Slider::new(&mut self.brush_engine.settings.lazy_mouse_radius, 0.01..=0.2).text("Dist"));
                             }
 
-                            // Stylus Tablet Pressure
+                            // Stylus Tablet Pressure Dynamics
                             let pres_sz = self.brush_engine.settings.pressure_size;
                             if ui.selectable_label(pres_sz, "Pres.Size").on_hover_text("Pen Tablet Pressure scales brush radius").clicked() {
                                 self.brush_engine.settings.pressure_size = !pres_sz;
@@ -3738,6 +3761,23 @@ impl eframe::App for PaintcraftApp {
                             if ui.selectable_label(pres_op, "Pres.Flow").on_hover_text("Pen Tablet Pressure scales brush opacity and flow").clicked() {
                                 self.brush_engine.settings.pressure_opacity = !pres_op;
                             }
+                            let pres_hd = self.brush_engine.settings.pressure_hardness;
+                            if ui.selectable_label(pres_hd, "Pres.Hard").on_hover_text("Pen Tablet Pressure scales brush edge hardness").clicked() {
+                                self.brush_engine.settings.pressure_hardness = !pres_hd;
+                            }
+                            egui::ComboBox::from_id_source("stylus_pressure_curve_combo")
+                                .selected_text(self.brush_engine.settings.pressure_curve.name())
+                                .width(65.0)
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(&mut self.brush_engine.settings.pressure_curve, crate::brush::PressureCurve::Linear, "Linear");
+                                    ui.selectable_value(&mut self.brush_engine.settings.pressure_curve, crate::brush::PressureCurve::Soft, "Soft (Sens)");
+                                    ui.selectable_value(&mut self.brush_engine.settings.pressure_curve, crate::brush::PressureCurve::Firm, "Firm (Heavy)");
+                                });
+                            ui.label(
+                                egui::RichText::new(format!("P:{:.0}%", self.last_stylus_pressure * 100.0))
+                                    .monospace()
+                                    .color(egui::Color32::from_rgb(140, 220, 255)),
+                            );
 
                             // Follow Path Brush Dynamics
                             let follow = self.brush_engine.settings.follow_path;
@@ -4579,7 +4619,7 @@ impl eframe::App for PaintcraftApp {
         // --- VISUAL FILE EXPLORER MODAL (For opening 3D models or projects) ---
         if let Some(selected_path) = self.file_explorer.ui(ctx) {
             let ext = selected_path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
-            if ext == "obj" || ext == "gltf" || ext == "glb" {
+            if ext == "obj" || ext == "gltf" || ext == "glb" || ext == "ply" || ext == "stl" {
                 let stem = selected_path.file_stem().and_then(|s| s.to_str()).unwrap_or("Model");
                 match Mesh::load_file(&selected_path) {
                     Ok(mesh) => {
@@ -5338,7 +5378,7 @@ impl eframe::App for PaintcraftApp {
                                 ui.add(egui::TextEdit::singleline(&mut self.new_proj_custom_path).hint_text("/path/to/model.obj").desired_width(320.0));
                                 if ui.button("Browse...").clicked() {
                                     if let Some(path) = rfd::FileDialog::new()
-                                        .add_filter("Wavefront OBJ", &["obj"])
+                                        .add_filter("3D Models (OBJ, glTF, GLB, PLY, STL)", &["obj", "gltf", "glb", "ply", "stl"])
                                         .set_title("Select 3D Mesh Model")
                                         .pick_file()
                                     {
@@ -6140,6 +6180,7 @@ impl PaintcraftApp {
                         egui::Event::Touch { force: Some(f), .. } => Some(*f),
                         _ => None,
                     }).unwrap_or(1.0).clamp(0.05, 1.0);
+                    self.last_stylus_pressure = pressure;
 
                     // Lazy Mouse evaluation
                     let mouse_pos = if self.brush_engine.settings.lazy_mouse_enabled {
@@ -6310,11 +6351,7 @@ impl PaintcraftApp {
                                 if is_blocked {
                                     self.status_message = "Direct painting blocked on Fill layers. Switch target to Mask or add a Paint layer.".to_string();
                                 } else {
-                                    let effective_radius = if self.brush_engine.settings.pressure_size {
-                                        self.brush_engine.settings.radius * (0.2 + 0.8 * pressure)
-                                    } else {
-                                        self.brush_engine.settings.radius
-                                    };
+                                    let (effective_radius, effective_flow, effective_hardness) = self.brush_engine.settings.compute_effective_dynamics(pressure);
                                     let ray2 = self.camera.screen_to_ray(
                                         local_x + effective_radius,
                                         local_y,
@@ -6325,9 +6362,9 @@ impl PaintcraftApp {
                                     let world_radius = (hit.point - point2).length().max(0.001);
 
                                     let orig_flow = self.brush_engine.settings.flow;
-                                    if self.brush_engine.settings.pressure_opacity {
-                                        self.brush_engine.settings.flow = orig_flow * pressure;
-                                    }
+                                    let orig_hardness = self.brush_engine.settings.hardness;
+                                    self.brush_engine.settings.flow = effective_flow;
+                                    self.brush_engine.settings.hardness = effective_hardness;
 
                                     let t_stroke = std::time::Instant::now();
                                     let doc_w = self.project.texture_width;
@@ -6415,9 +6452,8 @@ impl PaintcraftApp {
 
                                     self.perf_metrics.paint_stroke_ms = t_stroke.elapsed().as_secs_f32() * 1000.0;
 
-                                    if self.brush_engine.settings.pressure_opacity {
-                                        self.brush_engine.settings.flow = orig_flow;
-                                    }
+                                    self.brush_engine.settings.flow = orig_flow;
+                                    self.brush_engine.settings.hardness = orig_hardness;
 
                                     if !gpu_synced {
                                         self.project.gpu_sync_needed = true;
@@ -7091,14 +7127,14 @@ impl PaintcraftApp {
                                             _ => None,
                                         }).unwrap_or(1.0)
                                     }).clamp(0.05, 1.0);
+                                    self.last_stylus_pressure = pressure;
+                                    let (effective_radius, effective_flow, effective_hardness) = self.brush_engine.settings.compute_effective_dynamics(pressure);
                                     let orig_rad = self.brush_engine.settings.radius;
                                     let orig_flow = self.brush_engine.settings.flow;
-                                    if self.brush_engine.settings.pressure_size {
-                                        self.brush_engine.settings.radius = orig_rad * (0.2 + 0.8 * pressure);
-                                    }
-                                    if self.brush_engine.settings.pressure_opacity {
-                                        self.brush_engine.settings.flow = orig_flow * pressure;
-                                    }
+                                    let orig_hard = self.brush_engine.settings.hardness;
+                                    self.brush_engine.settings.radius = effective_radius;
+                                    self.brush_engine.settings.flow = effective_flow;
+                                    self.brush_engine.settings.hardness = effective_hardness;
                                     let t_stroke = std::time::Instant::now();
                                     let is_gpu_compute = (self.brush_engine.settings.mode == ToolMode::Brush || self.brush_engine.settings.mode == ToolMode::Eraser)
                                         && self.wgpu_viewport.is_some();
@@ -7153,6 +7189,7 @@ impl PaintcraftApp {
                                     self.perf_metrics.paint_stroke_ms = t_stroke.elapsed().as_secs_f32() * 1000.0;
                                     self.brush_engine.settings.radius = orig_rad;
                                     self.brush_engine.settings.flow = orig_flow;
+                                    self.brush_engine.settings.hardness = orig_hard;
                                     self.project.gpu_sync_needed = false;
                                     self.project.is_dirty = true;
                                     self.last_painted_uv = Some(glam::Vec2::new(u, v));
@@ -9194,7 +9231,7 @@ impl PaintcraftApp {
                                             ui.horizontal(|ui| {
                                                 ui.text_edit_singleline(&mut self.bake_highpoly_path);
                                                 if ui.button("Browse...").clicked() {
-                                                    if let Some(path) = rfd::FileDialog::new().add_filter("3D Models (OBJ, glTF, GLB)", &["obj", "gltf", "glb"]).pick_file() {
+                                                    if let Some(path) = rfd::FileDialog::new().add_filter("3D Models (OBJ, glTF, GLB, PLY, STL)", &["obj", "gltf", "glb", "ply", "stl"]).pick_file() {
                                                         self.bake_highpoly_path = path.to_string_lossy().to_string();
                                                         if let Ok(mesh) = crate::mesh::Mesh::load_file(&path) {
                                                             self.project.high_poly_mesh = Some(mesh);
@@ -9569,7 +9606,7 @@ impl PaintcraftApp {
                         // Completed view
                         if let Some(msg) = &self.bake_success_message {
                             ui.horizontal(|ui| {
-                                ui.colored_label(Color32::from_rgb(100, 220, 140), format!("✓ {}", msg));
+                                ui.colored_label(Color32::from_rgb(100, 220, 140), format!("[OK] {}", msg));
                             });
                         }
                         // Live Thumbnails Strip

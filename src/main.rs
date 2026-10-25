@@ -75,7 +75,7 @@ fn main() -> Result<(), eframe::Error> {
         };
 
         let out_path = PathBuf::from(out_dir_str);
-        match export::TextureExporter::export_preset(&project.composite_textures, &project.mesh.name, preset, &out_path, true, Some(&project.mesh)) {
+        match export::TextureExporter::export_preset(&project.composite_textures, &project.mesh.name, preset, &out_path, true, Some(&project.mesh), export::ExportImageFormat::Png) {
             Ok(files) => {
                 println!("[3D Paintcraft] Successfully exported {} texture maps to {:?}", files.len(), out_path);
                 for f in files {

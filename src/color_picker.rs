@@ -233,7 +233,7 @@ pub fn show_color_wheel_content(
             }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.small_button("✕").on_hover_text("Close color picker (Esc)").clicked() {
+                if ui.small_button("X").on_hover_text("Close color picker (Esc)").clicked() {
                     state.is_open = false;
                 }
             });

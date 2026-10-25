@@ -262,6 +262,9 @@ impl PackedColorMode {
 pub enum PackedImageFormat {
     Png,
     Jpeg,
+    Tga,
+    Tiff,
+    Bmp,
 }
 
 impl PackedImageFormat {
@@ -269,6 +272,9 @@ impl PackedImageFormat {
         match self {
             Self::Png => "PNG (.png)",
             Self::Jpeg => "JPEG (.jpg)",
+            Self::Tga => "Targa (.tga)",
+            Self::Tiff => "TIFF (.tif)",
+            Self::Bmp => "Bitmap (.bmp)",
         }
     }
 
@@ -276,7 +282,14 @@ impl PackedImageFormat {
         match self {
             Self::Png => "png",
             Self::Jpeg => "jpg",
+            Self::Tga => "tga",
+            Self::Tiff => "tif",
+            Self::Bmp => "bmp",
         }
+    }
+
+    pub fn all() -> &'static [PackedImageFormat] {
+        &[Self::Png, Self::Jpeg, Self::Tga, Self::Tiff, Self::Bmp]
     }
 }
 
@@ -817,6 +830,23 @@ impl CustomTexturePacker {
                         .save(&target_path)
                         .map_err(|e| e.to_string())?;
                 }
+                PackedImageFormat::Tga | PackedImageFormat::Tiff | PackedImageFormat::Bmp => match map.color_mode {
+                    PackedColorMode::Grayscale => {
+                        image::DynamicImage::ImageRgba8(img)
+                            .to_luma8()
+                            .save(&target_path)
+                            .map_err(|e| e.to_string())?;
+                    }
+                    PackedColorMode::Rgb => {
+                        image::DynamicImage::ImageRgba8(img)
+                            .to_rgb8()
+                            .save(&target_path)
+                            .map_err(|e| e.to_string())?;
+                    }
+                    PackedColorMode::Rgba => {
+                        img.save(&target_path).map_err(|e| e.to_string())?;
+                    }
+                },
             }
 
             generated_files.push(target_path);

@@ -337,6 +337,14 @@ impl McpServer {
 
                 let flip_v = arguments.get("flip_v").and_then(|v| v.as_bool()).unwrap_or(true);
                 let export_mesh = arguments.get("export_mesh").and_then(|v| v.as_bool()).unwrap_or(true);
+                let format_str = arguments.get("format").and_then(|v| v.as_str()).unwrap_or("png");
+                let format = match format_str.to_lowercase().as_str() {
+                    "jpg" | "jpeg" => crate::export::ExportImageFormat::Jpeg,
+                    "tga" => crate::export::ExportImageFormat::Tga,
+                    "tif" | "tiff" => crate::export::ExportImageFormat::Tiff,
+                    "bmp" => crate::export::ExportImageFormat::Bmp,
+                    _ => crate::export::ExportImageFormat::Png,
+                };
                 let files = TextureExporter::export_preset(
                     &project.composite_textures,
                     &project.mesh.name,
@@ -344,6 +352,7 @@ impl McpServer {
                     &out_dir,
                     flip_v,
                     if export_mesh { Some(&project.mesh) } else { None },
+                    format,
                 )?;
                 let file_strings: Vec<String> = files.into_iter().map(|p| p.to_string_lossy().to_string()).collect();
 

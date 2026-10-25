@@ -134,6 +134,16 @@ pub struct BrushSettings {
     // Tablet Stylus Dynamics
     pub pressure_size: bool,
     pub pressure_opacity: bool,
+    #[serde(default)]
+    pub pressure_hardness: bool,
+    #[serde(default = "default_min_pressure_size")]
+    pub min_pressure_size: f32,
+    #[serde(default = "default_min_pressure_opacity")]
+    pub min_pressure_opacity: f32,
+    #[serde(default = "default_min_pressure_hardness")]
+    pub min_pressure_hardness: f32,
+    #[serde(default)]
+    pub pressure_curve: PressureCurve,
 
     // Material to paint with
     pub paint_color: Vec4,
@@ -175,6 +185,73 @@ fn default_smudge_strength() -> f32 {
     0.5
 }
 
+fn default_min_pressure_size() -> f32 {
+    0.1
+}
+
+fn default_min_pressure_opacity() -> f32 {
+    0.05
+}
+
+fn default_min_pressure_hardness() -> f32 {
+    0.2
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PressureCurve {
+    Linear,
+    Soft,
+    Firm,
+}
+
+impl Default for PressureCurve {
+    fn default() -> Self {
+        Self::Linear
+    }
+}
+
+impl PressureCurve {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Linear => "Linear",
+            Self::Soft => "Soft (Sensitive)",
+            Self::Firm => "Firm (Controlled)",
+        }
+    }
+
+    pub fn apply(&self, raw: f32) -> f32 {
+        let p = raw.clamp(0.0, 1.0);
+        match self {
+            Self::Linear => p,
+            Self::Soft => p.powf(0.6),
+            Self::Firm => p.powf(1.7),
+        }
+    }
+}
+
+impl BrushSettings {
+    /// Calculate effective radius, flow, and hardness modulated by hardware stylus pressure dynamics.
+    pub fn compute_effective_dynamics(&self, raw_pressure: f32) -> (f32, f32, f32) {
+        let p = self.pressure_curve.apply(raw_pressure);
+        let eff_radius = if self.pressure_size {
+            self.radius * (self.min_pressure_size + (1.0 - self.min_pressure_size) * p)
+        } else {
+            self.radius
+        };
+        let eff_flow = if self.pressure_opacity {
+            self.flow * (self.min_pressure_opacity + (1.0 - self.min_pressure_opacity) * p)
+        } else {
+            self.flow
+        };
+        let eff_hardness = if self.pressure_hardness {
+            self.hardness * (self.min_pressure_hardness + (1.0 - self.min_pressure_hardness) * p)
+        } else {
+            self.hardness
+        };
+        (eff_radius, eff_flow, eff_hardness)
+    }
+}
+
 impl Default for BrushSettings {
     fn default() -> Self {
         Self {
@@ -195,6 +272,11 @@ impl Default for BrushSettings {
             follow_path_offset: 0.0,
             pressure_size: false,
             pressure_opacity: false,
+            pressure_hardness: false,
+            min_pressure_size: 0.1,
+            min_pressure_opacity: 0.05,
+            min_pressure_hardness: 0.2,
+            pressure_curve: PressureCurve::Linear,
             paint_color: Vec4::new(0.88, 0.22, 0.18, 1.0),
             paint_roughness: 0.35,
             paint_metallic: 0.0,
@@ -1852,5 +1934,62 @@ mod tests {
         assert!(painted_pixel_count > 10, "Stamp 3D must cover surface, found {} pixels", painted_pixel_count);
         assert!(max_red > 0.95, "Stamp 3D maximum red should be ~1.0, got {}", max_red);
         assert!(max_alpha > 0.95, "Stamp 3D maximum alpha should be ~1.0, got {}", max_alpha);
+    }
+
+    #[test]
+    fn test_stylus_pressure_curves_and_dynamics() {
+        let mut settings = BrushSettings::default();
+        settings.radius = 50.0;
+        settings.flow = 1.0;
+        settings.hardness = 0.8;
+        settings.min_pressure_size = 0.2;
+        settings.min_pressure_opacity = 0.1;
+        settings.min_pressure_hardness = 0.25;
+
+        // 1. Without pressure toggles enabled, settings remain constant
+        let (r0, f0, h0) = settings.compute_effective_dynamics(0.5);
+        assert_eq!(r0, 50.0);
+        assert_eq!(f0, 1.0);
+        assert_eq!(h0, 0.8);
+
+        // 2. Enable size, flow, and hardness pressure dynamics
+        settings.pressure_size = true;
+        settings.pressure_opacity = true;
+        settings.pressure_hardness = true;
+
+        // Full pressure (1.0) -> maximum values
+        let (r_max, f_max, h_max) = settings.compute_effective_dynamics(1.0);
+        assert!((r_max - 50.0).abs() < 1e-4);
+        assert!((f_max - 1.0).abs() < 1e-4);
+        assert!((h_max - 0.8).abs() < 1e-4);
+
+        // Zero pressure (0.0) -> min threshold values
+        let (r_min, f_min, h_min) = settings.compute_effective_dynamics(0.0);
+        assert!((r_min - 10.0).abs() < 1e-4, "Min radius should be 50.0 * 0.2 = 10.0");
+        assert!((f_min - 0.1).abs() < 1e-4, "Min flow should be 1.0 * 0.1 = 0.1");
+        assert!((h_min - 0.2).abs() < 1e-4, "Min hardness should be 0.8 * 0.25 = 0.2");
+
+        // 3. Test Curve characteristics
+        // Linear: P = 0.5 -> 0.5
+        assert_eq!(PressureCurve::Linear.apply(0.5), 0.5);
+
+        // Soft: P = 0.5 -> 0.5^0.6 ~ 0.65975 (higher output for light touch)
+        let soft_p = PressureCurve::Soft.apply(0.5);
+        assert!(soft_p > 0.5 && soft_p < 0.7);
+
+        // Firm: P = 0.5 -> 0.5^1.7 ~ 0.30778 (lower output for deliberate firm strokes)
+        let firm_p = PressureCurve::Firm.apply(0.5);
+        assert!(firm_p < 0.5 && firm_p > 0.2);
+
+        // Compare effective radius across curves at half pressure
+        settings.pressure_curve = PressureCurve::Soft;
+        let (r_soft, _, _) = settings.compute_effective_dynamics(0.5);
+        settings.pressure_curve = PressureCurve::Linear;
+        let (r_linear, _, _) = settings.compute_effective_dynamics(0.5);
+        settings.pressure_curve = PressureCurve::Firm;
+        let (r_firm, _, _) = settings.compute_effective_dynamics(0.5);
+
+        assert!(r_soft > r_linear, "Soft curve must produce larger radius than Linear at 0.5 pressure");
+        assert!(r_linear > r_firm, "Linear curve must produce larger radius than Firm at 0.5 pressure");
     }
 }
