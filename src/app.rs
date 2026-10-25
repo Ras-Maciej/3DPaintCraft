@@ -2912,6 +2912,55 @@ impl PaintcraftApp {
         self.status_message = format!("Channel View: {} [C / Shift+C]", self.view_mode.name());
     }
 
+    /// Check if an asynchronous staging readback is currently in flight
+    pub fn has_pending_gpu_readback(&self) -> bool {
+        self.wgpu_viewport.as_ref().map(|w| w.has_pending_readback()).unwrap_or(false)
+    }
+
+    /// Non-blocking poll for completed asynchronous staging readback.
+    /// Updates CPU layer, tile undo history, and sub-composite without stalling the main render thread.
+    pub fn poll_pending_gpu_readbacks(&mut self, ctx: &egui::Context) {
+        if let Some(wgpu) = &mut self.wgpu_viewport {
+            if let Some(res) = wgpu.poll_async_readback(&mut self.project) {
+                let x0 = res.min_x;
+                let y0 = res.min_y;
+                let x1 = x0 + res.rect_w.saturating_sub(1);
+                let y1 = y0 + res.rect_h.saturating_sub(1);
+                if let Some(layer) = self.project.layers.get_mut(res.layer_idx) {
+                    layer.record_tiles_for_rect(x0, y0, x1, y1);
+                    if let Some(action) = layer.finish_stroke_delta(res.layer_idx, &res.description) {
+                        self.history.push(&res.description, action);
+                    }
+                }
+                self.project.rebuild_composite_rect(x0 as usize, y0 as usize, x1 as usize, y1 as usize);
+                self.update_uv_texture_rect(ctx, x0, y0, x1, y1);
+            }
+        }
+    }
+
+    /// Flush and wait for pending asynchronous staging readback to complete immediately.
+    /// Used before Undo, Redo, Save, Export, or starting a new stroke.
+    pub fn flush_pending_gpu_readbacks(&mut self, ctx: &egui::Context) {
+        if let Some(wgpu) = &mut self.wgpu_viewport {
+            if wgpu.has_pending_readback() {
+                if let Some(res) = wgpu.flush_async_readback(&mut self.project) {
+                    let x0 = res.min_x;
+                    let y0 = res.min_y;
+                    let x1 = x0 + res.rect_w.saturating_sub(1);
+                    let y1 = y0 + res.rect_h.saturating_sub(1);
+                    if let Some(layer) = self.project.layers.get_mut(res.layer_idx) {
+                        layer.record_tiles_for_rect(x0, y0, x1, y1);
+                        if let Some(action) = layer.finish_stroke_delta(res.layer_idx, &res.description) {
+                            self.history.push(&res.description, action);
+                        }
+                    }
+                    self.project.rebuild_composite_rect(x0 as usize, y0 as usize, x1 as usize, y1 as usize);
+                    self.update_uv_texture_rect(ctx, x0, y0, x1, y1);
+                }
+            }
+        }
+    }
+
     /// Cycle through baked mesh maps (Substance standard shortcut 'B' / 'Shift+B')
     pub fn cycle_mesh_map(&mut self, forward: bool) {
         let order = [
@@ -3023,6 +3072,12 @@ fn channel_pill_button(ui: &mut egui::Ui, name: &str, active: bool) -> egui::Res
 
 impl eframe::App for PaintcraftApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Poll pending non-blocking staging readbacks
+        self.poll_pending_gpu_readbacks(ctx);
+        if self.has_pending_gpu_readback() {
+            ctx.request_repaint();
+        }
+
         // Track frame delta and FPS
         let frame_start = std::time::Instant::now();
         let delta = frame_start.duration_since(self.perf_metrics.last_frame_time).as_secs_f32();
@@ -3181,6 +3236,7 @@ impl eframe::App for PaintcraftApp {
 
         // Undo: Ctrl+Z
         if input.modifiers.command && input.key_pressed(egui::Key::Z) && !input.modifiers.shift {
+            self.flush_pending_gpu_readbacks(ctx);
             if let Some(desc) = self.history.undo(&mut self.project) {
                 self.status_message = format!("Undo: {}", desc);
                 self.project.gpu_sync_needed = true;
@@ -3194,6 +3250,7 @@ impl eframe::App for PaintcraftApp {
         if (input.modifiers.command && input.key_pressed(egui::Key::Y))
             || (input.modifiers.command && input.modifiers.shift && input.key_pressed(egui::Key::Z))
         {
+            self.flush_pending_gpu_readbacks(ctx);
             if let Some(desc) = self.history.redo(&mut self.project) {
                 self.status_message = format!("Redo: {}", desc);
                 self.project.gpu_sync_needed = true;
@@ -3356,6 +3413,7 @@ impl eframe::App for PaintcraftApp {
                     });
                     ui.separator();
                     if ui.button("Save Project (Ctrl+S)").clicked() {
+                        self.flush_pending_gpu_readbacks(ctx);
                         let path = PathBuf::from(&self.project_file_path);
                         if let Err(e) = self.project.save_to_file(&path) {
                             self.status_message = format!("Save Error: {}", e);
@@ -3366,11 +3424,13 @@ impl eframe::App for PaintcraftApp {
                         ui.close_menu();
                     }
                     if ui.button("Save Project As...").clicked() {
+                        self.flush_pending_gpu_readbacks(ctx);
                         self.show_save_modal = true;
                         ui.close_menu();
                     }
                     ui.separator();
                     if ui.button("Export Textures... (Ctrl+E)").clicked() {
+                        self.flush_pending_gpu_readbacks(ctx);
                         self.show_export_modal = true;
                         ui.close_menu();
                     }
@@ -3378,6 +3438,7 @@ impl eframe::App for PaintcraftApp {
 
                 ui.menu_button("Edit", |ui| {
                     if ui.add_enabled(self.history.can_undo(), egui::Button::new("Undo (Ctrl+Z)")).clicked() {
+                        self.flush_pending_gpu_readbacks(ctx);
                         if let Some(desc) = self.history.undo(&mut self.project) {
                             self.status_message = format!("Undo: {}", desc);
                             self.project.gpu_sync_needed = true;
@@ -3389,6 +3450,7 @@ impl eframe::App for PaintcraftApp {
                         ui.close_menu();
                     }
                     if ui.add_enabled(self.history.can_redo(), egui::Button::new("Redo (Ctrl+Y)")).clicked() {
+                        self.flush_pending_gpu_readbacks(ctx);
                         if let Some(desc) = self.history.redo(&mut self.project) {
                             self.status_message = format!("Redo: {}", desc);
                             self.project.gpu_sync_needed = true;
@@ -5794,7 +5856,7 @@ impl PaintcraftApp {
 
         // --- REAL-TIME PERFORMANCE & HARDWARE DIAGNOSTICS HUD ---
         if self.perf_metrics.show_debug_hud {
-            let diag_rect = egui::Rect::from_min_size(rect.min + egui::vec2(12.0, 36.0), egui::vec2(460.0, 230.0));
+            let diag_rect = egui::Rect::from_min_size(rect.min + egui::vec2(12.0, 36.0), egui::vec2(460.0, 248.0));
             ui.painter().rect_filled(
                 diag_rect,
                 egui::Rounding::same(8.0),
@@ -5960,6 +6022,20 @@ impl PaintcraftApp {
                 egui::FontId::proportional(10.5),
                 egui::Color32::from_rgb(140, 190, 230),
             );
+            y_cur += 18.0;
+
+            let (rb_str, rb_col) = if self.has_pending_gpu_readback() {
+                ("Staging Readback: ASYNC IN-FLIGHT (Non-Blocking)".to_string(), egui::Color32::from_rgb(255, 200, 80))
+            } else {
+                ("Staging Readback: IDLE (Zero-Stall Non-Blocking Engine)".to_string(), egui::Color32::from_rgb(120, 220, 160))
+            };
+            ui.painter().text(
+                egui::pos2(left_x, y_cur),
+                egui::Align2::LEFT_TOP,
+                rb_str,
+                egui::FontId::proportional(10.5),
+                rb_col,
+            );
         }
 
         let input = ui.input(|i| i.clone());
@@ -6026,6 +6102,7 @@ impl PaintcraftApp {
             && !input.modifiers.alt && !input.modifiers.command && !self.show_bake_modal
         {
                 if !self.is_stroke_active {
+                    self.flush_pending_gpu_readbacks(ctx);
                     if let Some(wgpu) = &mut self.wgpu_viewport {
                         if wgpu.gpu_layers.len() != self.project.layers.len() {
                             wgpu.ensure_gpu_layers(&mut self.project);
@@ -6357,21 +6434,6 @@ impl PaintcraftApp {
                     }
                 }
             } else if response.drag_stopped() || (!input.pointer.any_down() && self.is_stroke_active) {
-                if let Some((x0, y0, x1, y1)) = self.gpu_stroke_dirty_rect.take() {
-                    let idx = self.project.active_layer_idx;
-                    if let Some(wgpu) = &mut self.wgpu_viewport {
-                        if let Some(layer) = self.project.layers.get_mut(idx) {
-                            wgpu.readback_layer_rect(idx, layer, x0, y0, x1, y1, self.brush_engine.settings.channels);
-                            layer.record_tiles_for_rect(x0, y0, x1, y1);
-                        }
-                    }
-                }
-                self.brush_engine.end_stroke();
-                self.polygon_fill_drag_tris.clear();
-                self.project.rebuild_composite();
-                if let Some(wgpu) = &mut self.wgpu_viewport {
-                    wgpu.sync_textures(&mut self.project);
-                }
                 if self.is_stroke_active {
                     let idx = self.project.active_layer_idx;
                     let desc = if self.brush_engine.settings.mode == ToolMode::FillBucket {
@@ -6379,13 +6441,23 @@ impl PaintcraftApp {
                     } else {
                         "Paint Stroke".to_string()
                     };
-                    if let Some(layer) = self.project.layers.get_mut(idx) {
+
+                    if let Some((x0, y0, x1, y1)) = self.gpu_stroke_dirty_rect.take() {
+                        if let Some(wgpu) = &mut self.wgpu_viewport {
+                            if let Some(layer) = self.project.layers.get_mut(idx) {
+                                wgpu.start_async_readback(idx, layer, x0, y0, x1, y1, self.brush_engine.settings.channels, &desc);
+                            }
+                        }
+                    } else if let Some(layer) = self.project.layers.get_mut(idx) {
                         if let Some(action) = layer.finish_stroke_delta(idx, &desc) {
                             self.history.push(&desc, action);
                         }
                     }
                     self.is_stroke_active = false;
                 }
+                self.brush_engine.end_stroke();
+                self.polygon_fill_drag_tris.clear();
+                ctx.request_repaint();
             }
 
         // --- 3D SYMMETRY PLANE GIZMO ---
@@ -6844,6 +6916,7 @@ impl PaintcraftApp {
             if !is_panning && (response.dragged_by(egui::PointerButton::Primary) || response.clicked()) {
                 ctx.request_repaint();
                 if !self.is_stroke_active {
+                    self.flush_pending_gpu_readbacks(ctx);
                     if let Some(wgpu) = &mut self.wgpu_viewport {
                         if wgpu.gpu_layers.len() != self.project.layers.len() {
                             wgpu.ensure_gpu_layers(&mut self.project);
@@ -7092,27 +7165,6 @@ impl PaintcraftApp {
                     }
                 }
             } else if response.drag_stopped() || (!ui.input(|i| i.pointer.any_down()) && self.is_stroke_active) {
-                if let Some((x0, y0, x1, y1)) = self.gpu_stroke_dirty_rect.take() {
-                    let idx = self.project.active_layer_idx;
-                    if let Some(wgpu) = &mut self.wgpu_viewport {
-                        if let Some(layer) = self.project.layers.get_mut(idx) {
-                            wgpu.readback_layer_rect(idx, layer, x0, y0, x1, y1, self.brush_engine.settings.channels);
-                            layer.record_tiles_for_rect(x0, y0, x1, y1);
-                        }
-                    }
-                }
-                self.brush_engine.end_stroke();
-                self.polygon_fill_drag_tris.clear();
-                if let Some(layer) = self.project.active_layer_mut() {
-                    if self.brush_engine.settings.channels.height {
-                        layer.update_normal_from_height(1.0);
-                    }
-                }
-                self.project.rebuild_composite();
-                self.update_uv_texture(ctx);
-                if let Some(wgpu) = &mut self.wgpu_viewport {
-                    wgpu.sync_textures(&mut self.project);
-                }
                 if self.is_stroke_active {
                     let idx = self.project.active_layer_idx;
                     let desc = if self.brush_engine.settings.mode == ToolMode::FillBucket {
@@ -7120,13 +7172,23 @@ impl PaintcraftApp {
                     } else {
                         "2D UV Paint Stroke".to_string()
                     };
-                    if let Some(layer) = self.project.layers.get_mut(idx) {
+
+                    if let Some((x0, y0, x1, y1)) = self.gpu_stroke_dirty_rect.take() {
+                        if let Some(wgpu) = &mut self.wgpu_viewport {
+                            if let Some(layer) = self.project.layers.get_mut(idx) {
+                                wgpu.start_async_readback(idx, layer, x0, y0, x1, y1, self.brush_engine.settings.channels, &desc);
+                            }
+                        }
+                    } else if let Some(layer) = self.project.layers.get_mut(idx) {
                         if let Some(action) = layer.finish_stroke_delta(idx, &desc) {
                             self.history.push(&desc, action);
                         }
                     }
                     self.is_stroke_active = false;
                 }
+                self.brush_engine.end_stroke();
+                self.polygon_fill_drag_tris.clear();
+                ctx.request_repaint();
             }
 
             // --- 2D POLYGON FILL HOVER PREVIEW HIGHLIGHT ---

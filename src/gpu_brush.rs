@@ -37,6 +37,37 @@ pub struct GpuBrushTriangle {
     pub _pad: [f32; 2],
 }
 
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct ReadbackCompleted {
+    pub layer_idx: usize,
+    pub min_x: u32,
+    pub min_y: u32,
+    pub rect_w: u32,
+    pub rect_h: u32,
+    pub channels: crate::channel::ChannelFlags,
+    pub description: String,
+}
+
+pub struct PendingReadbackBatch {
+    pub layer_idx: usize,
+    pub min_x: u32,
+    pub min_y: u32,
+    pub rect_w: u32,
+    pub rect_h: u32,
+    pub channels: crate::channel::ChannelFlags,
+    pub staging_rgba: Option<wgpu::Buffer>,
+    pub staging_normal: Option<wgpu::Buffer>,
+    pub staging_roughness: Option<wgpu::Buffer>,
+    pub staging_metallic: Option<wgpu::Buffer>,
+    pub padded_bytes_rgba: u32,
+    pub padded_bytes_scalar: u32,
+    pub unpadded_bytes_rgba: u32,
+    pub unpadded_bytes_scalar: u32,
+    pub remaining: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    pub description: String,
+}
+
 pub struct GpuBrushEngine {
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
@@ -58,6 +89,8 @@ pub struct GpuBrushEngine {
 
     pub width: u32,
     pub height: u32,
+
+    pending_readback: std::sync::Mutex<Option<PendingReadbackBatch>>,
 }
 
 impl GpuBrushEngine {
@@ -224,6 +257,7 @@ impl GpuBrushEngine {
             scratch_metallic_view,
             width,
             height,
+            pending_readback: std::sync::Mutex::new(None),
         }
     }
 
@@ -494,18 +528,33 @@ impl GpuBrushEngine {
         self.queue.submit(std::iter::once(encoder.finish()));
     }
 
-    /// Read back a modified sub-rectangle from a GPU layer directly into the CPU Layer
-    /// for history undo tracking and file persistence.
-    pub fn readback_layer_rect(
+    pub fn has_pending_readback(&self) -> bool {
+        self.pending_readback.lock().map(|g| g.is_some()).unwrap_or(false)
+    }
+
+    pub fn pending_readback_layer_idx(&self) -> Option<usize> {
+        self.pending_readback.lock().ok().and_then(|g| g.as_ref().map(|b| b.layer_idx))
+    }
+
+    /// Asynchronously initiate readback of a modified sub-rectangle from a GPU layer
+    /// to staging buffers without stalling the CPU render thread.
+    pub fn start_async_readback(
         &self,
         gpu_layer: &crate::gpu_compositor::GpuLayer,
         cpu_layer: &mut crate::layer::Layer,
+        layer_idx: usize,
         min_x: u32,
         min_y: u32,
         max_x: u32,
         max_y: u32,
         channels: crate::channel::ChannelFlags,
+        description: &str,
     ) {
+        // If there was an earlier pending readback that wasn't polled yet, flush it first
+        if self.has_pending_readback() {
+            let _ = self.flush_async_readback(cpu_layer);
+        }
+
         let min_x = min_x.min(self.width.saturating_sub(1));
         let min_y = min_y.min(self.height.saturating_sub(1));
         let max_x = max_x.min(self.width.saturating_sub(1));
@@ -534,10 +583,13 @@ impl GpuBrushEngine {
             label: Some("GPU Readback Encoder"),
         });
 
-        // 1. Readback Base Color (RGBA32Float)
+        let mut num_mappings = 0usize;
+
+        // 1. Staging Base Color (RGBA32Float)
         let unpadded_bytes_rgba = rect_w * 16;
         let padded_bytes_rgba = ((unpadded_bytes_rgba + align - 1) / align) * align;
         let staging_rgba = if channels.base_color {
+            num_mappings += 1;
             let buf = self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("Staging BaseColor"),
                 size: (padded_bytes_rgba * rect_h) as u64,
@@ -566,10 +618,42 @@ impl GpuBrushEngine {
             None
         };
 
-        // 2. Readback Roughness (R32Float)
+        // 2. Staging Normal (RGBA32Float)
+        let staging_normal = if channels.normal {
+            num_mappings += 1;
+            let buf = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Staging Normal"),
+                size: (padded_bytes_rgba * rect_h) as u64,
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            encoder.copy_texture_to_buffer(
+                wgpu::ImageCopyTexture {
+                    texture: &gpu_layer.normal,
+                    mip_level: 0,
+                    origin,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::ImageCopyBuffer {
+                    buffer: &buf,
+                    layout: wgpu::ImageDataLayout {
+                        offset: 0,
+                        bytes_per_row: Some(padded_bytes_rgba),
+                        rows_per_image: Some(rect_h),
+                    },
+                },
+                copy_size,
+            );
+            Some(buf)
+        } else {
+            None
+        };
+
+        // 3. Staging Roughness (R32Float)
         let unpadded_bytes_scalar = rect_w * 4;
         let padded_bytes_scalar = ((unpadded_bytes_scalar + align - 1) / align) * align;
         let staging_roughness = if channels.roughness {
+            num_mappings += 1;
             let buf = self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("Staging Roughness"),
                 size: (padded_bytes_scalar * rect_h) as u64,
@@ -598,8 +682,9 @@ impl GpuBrushEngine {
             None
         };
 
-        // 3. Readback Metallic (R32Float)
+        // 4. Staging Metallic (R32Float)
         let staging_metallic = if channels.metallic {
+            num_mappings += 1;
             let buf = self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("Staging Metallic"),
                 size: (padded_bytes_scalar * rect_h) as u64,
@@ -628,91 +713,218 @@ impl GpuBrushEngine {
             None
         };
 
+        if num_mappings == 0 {
+            return;
+        }
+
         self.queue.submit(std::iter::once(encoder.finish()));
 
-        // Map and copy to CPU layer
-        let layer_w = cpu_layer.base_color_buf.width as usize;
+        let remaining = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(num_mappings));
 
         if let Some(buf) = &staging_rgba {
-            let slice = buf.slice(..);
-            let (tx, rx) = std::sync::mpsc::channel();
-            slice.map_async(wgpu::MapMode::Read, move |res| { let _ = tx.send(res); });
-            self.device.poll(wgpu::Maintain::Wait);
-            if rx.recv().ok().and_then(|r| r.ok()).is_some() {
-                let mapped = slice.get_mapped_range();
-                for y in 0..rect_h {
-                    let src_start = (y * padded_bytes_rgba) as usize;
-                    let src_end = src_start + unpadded_bytes_rgba as usize;
-                    let row_bytes = &mapped[src_start..src_end];
-                    let float_slice: &[f32] = bytemuck::cast_slice(row_bytes);
-                    let dst_row_start = (min_y + y) as usize * layer_w + min_x as usize;
-                    for (i, chunk) in float_slice.chunks_exact(4).enumerate() {
-                        if dst_row_start + i < cpu_layer.base_color_buf.data.len() {
-                            cpu_layer.base_color_buf.data[dst_row_start + i] =
-                                glam::Vec4::new(chunk[0], chunk[1], chunk[2], chunk[3]);
-                        }
-                    }
-                }
-                drop(mapped);
-                buf.unmap();
-            }
+            let r = remaining.clone();
+            buf.slice(..).map_async(wgpu::MapMode::Read, move |_res| {
+                r.fetch_sub(1, std::sync::atomic::Ordering::Release);
+            });
         }
-
+        if let Some(buf) = &staging_normal {
+            let r = remaining.clone();
+            buf.slice(..).map_async(wgpu::MapMode::Read, move |_res| {
+                r.fetch_sub(1, std::sync::atomic::Ordering::Release);
+            });
+        }
         if let Some(buf) = &staging_roughness {
-            let slice = buf.slice(..);
-            let (tx, rx) = std::sync::mpsc::channel();
-            slice.map_async(wgpu::MapMode::Read, move |res| { let _ = tx.send(res); });
-            self.device.poll(wgpu::Maintain::Wait);
-            if rx.recv().ok().and_then(|r| r.ok()).is_some() {
-                let mapped = slice.get_mapped_range();
-                for y in 0..rect_h {
-                    let src_start = (y * padded_bytes_scalar) as usize;
-                    let src_end = src_start + unpadded_bytes_scalar as usize;
-                    let row_bytes = &mapped[src_start..src_end];
-                    let float_slice: &[f32] = bytemuck::cast_slice(row_bytes);
-                    let dst_row_start = (min_y + y) as usize * layer_w + min_x as usize;
-                    for (i, &val) in float_slice.iter().enumerate() {
-                        if dst_row_start + i < cpu_layer.roughness_buf.data.len() {
-                            cpu_layer.roughness_buf.data[dst_row_start + i] = val;
-                        }
-                    }
-                }
-                drop(mapped);
-                buf.unmap();
-            }
+            let r = remaining.clone();
+            buf.slice(..).map_async(wgpu::MapMode::Read, move |_res| {
+                r.fetch_sub(1, std::sync::atomic::Ordering::Release);
+            });
+        }
+        if let Some(buf) = &staging_metallic {
+            let r = remaining.clone();
+            buf.slice(..).map_async(wgpu::MapMode::Read, move |_res| {
+                r.fetch_sub(1, std::sync::atomic::Ordering::Release);
+            });
         }
 
-        if let Some(buf) = &staging_metallic {
+        let batch = PendingReadbackBatch {
+            layer_idx,
+            min_x,
+            min_y,
+            rect_w,
+            rect_h,
+            channels,
+            staging_rgba,
+            staging_normal,
+            staging_roughness,
+            staging_metallic,
+            padded_bytes_rgba,
+            padded_bytes_scalar,
+            unpadded_bytes_rgba,
+            unpadded_bytes_scalar,
+            remaining,
+            description: description.to_string(),
+        };
+
+        if let Ok(mut lock) = self.pending_readback.lock() {
+            *lock = Some(batch);
+        }
+    }
+
+    /// Poll pending asynchronous staging readback. Non-blocking: returns None if GPU mapping is in flight.
+    pub fn poll_async_readback(&self, cpu_layer: &mut crate::layer::Layer) -> Option<ReadbackCompleted> {
+        // Run a maintain poll to advance asynchronous buffer mappings
+        self.device.poll(wgpu::Maintain::Poll);
+
+        let mut lock = self.pending_readback.lock().ok()?;
+        let batch = lock.as_ref()?;
+
+        if batch.remaining.load(std::sync::atomic::Ordering::Acquire) > 0 {
+            return None;
+        }
+
+        // Ready! Extract batch and copy into cpu_layer
+        let batch = lock.take().unwrap();
+        drop(lock);
+
+        let layer_w = cpu_layer.base_color_buf.width as usize;
+        let rect_w = batch.rect_w;
+        let rect_h = batch.rect_h;
+        let min_x = batch.min_x;
+        let min_y = batch.min_y;
+        let max_x = min_x + rect_w.saturating_sub(1);
+        let max_y = min_y + rect_h.saturating_sub(1);
+
+        if let Some(buf) = &batch.staging_rgba {
             let slice = buf.slice(..);
-            let (tx, rx) = std::sync::mpsc::channel();
-            slice.map_async(wgpu::MapMode::Read, move |res| { let _ = tx.send(res); });
-            self.device.poll(wgpu::Maintain::Wait);
-            if rx.recv().ok().and_then(|r| r.ok()).is_some() {
-                let mapped = slice.get_mapped_range();
-                for y in 0..rect_h {
-                    let src_start = (y * padded_bytes_scalar) as usize;
-                    let src_end = src_start + unpadded_bytes_scalar as usize;
-                    let row_bytes = &mapped[src_start..src_end];
-                    let float_slice: &[f32] = bytemuck::cast_slice(row_bytes);
-                    let dst_row_start = (min_y + y) as usize * layer_w + min_x as usize;
-                    for (i, &val) in float_slice.iter().enumerate() {
-                        if dst_row_start + i < cpu_layer.metallic_buf.data.len() {
-                            cpu_layer.metallic_buf.data[dst_row_start + i] = val;
-                        }
+            let mapped = slice.get_mapped_range();
+            for y in 0..rect_h {
+                let src_start = (y * batch.padded_bytes_rgba) as usize;
+                let src_end = src_start + batch.unpadded_bytes_rgba as usize;
+                let row_bytes = &mapped[src_start..src_end];
+                let float_slice: &[f32] = bytemuck::cast_slice(row_bytes);
+                let dst_row_start = (min_y + y) as usize * layer_w + min_x as usize;
+                for (i, chunk) in float_slice.chunks_exact(4).enumerate() {
+                    if dst_row_start + i < cpu_layer.base_color_buf.data.len() {
+                        cpu_layer.base_color_buf.data[dst_row_start + i] =
+                            glam::Vec4::new(chunk[0], chunk[1], chunk[2], chunk[3]);
                     }
                 }
-                drop(mapped);
-                buf.unmap();
             }
+            drop(mapped);
+            buf.unmap();
+        }
+
+        if let Some(buf) = &batch.staging_normal {
+            let slice = buf.slice(..);
+            let mapped = slice.get_mapped_range();
+            for y in 0..rect_h {
+                let src_start = (y * batch.padded_bytes_rgba) as usize;
+                let src_end = src_start + batch.unpadded_bytes_rgba as usize;
+                let row_bytes = &mapped[src_start..src_end];
+                let float_slice: &[f32] = bytemuck::cast_slice(row_bytes);
+                let dst_row_start = (min_y + y) as usize * layer_w + min_x as usize;
+                for (i, chunk) in float_slice.chunks_exact(4).enumerate() {
+                    if dst_row_start + i < cpu_layer.normal_buf.data.len() {
+                        cpu_layer.normal_buf.data[dst_row_start + i] =
+                            glam::Vec4::new(chunk[0], chunk[1], chunk[2], chunk[3]);
+                    }
+                }
+            }
+            drop(mapped);
+            buf.unmap();
+        }
+
+        if let Some(buf) = &batch.staging_roughness {
+            let slice = buf.slice(..);
+            let mapped = slice.get_mapped_range();
+            for y in 0..rect_h {
+                let src_start = (y * batch.padded_bytes_scalar) as usize;
+                let src_end = src_start + batch.unpadded_bytes_scalar as usize;
+                let row_bytes = &mapped[src_start..src_end];
+                let float_slice: &[f32] = bytemuck::cast_slice(row_bytes);
+                let dst_row_start = (min_y + y) as usize * layer_w + min_x as usize;
+                for (i, &val) in float_slice.iter().enumerate() {
+                    if dst_row_start + i < cpu_layer.roughness_buf.data.len() {
+                        cpu_layer.roughness_buf.data[dst_row_start + i] = val;
+                    }
+                }
+            }
+            drop(mapped);
+            buf.unmap();
+        }
+
+        if let Some(buf) = &batch.staging_metallic {
+            let slice = buf.slice(..);
+            let mapped = slice.get_mapped_range();
+            for y in 0..rect_h {
+                let src_start = (y * batch.padded_bytes_scalar) as usize;
+                let src_end = src_start + batch.unpadded_bytes_scalar as usize;
+                let row_bytes = &mapped[src_start..src_end];
+                let float_slice: &[f32] = bytemuck::cast_slice(row_bytes);
+                let dst_row_start = (min_y + y) as usize * layer_w + min_x as usize;
+                for (i, &val) in float_slice.iter().enumerate() {
+                    if dst_row_start + i < cpu_layer.metallic_buf.data.len() {
+                        cpu_layer.metallic_buf.data[dst_row_start + i] = val;
+                    }
+                }
+            }
+            drop(mapped);
+            buf.unmap();
         }
 
         cpu_layer.dirty_rect = Some((min_x, min_y, max_x, max_y));
         cpu_layer.dirty_flags = crate::layer::LayerDirtyFlags {
-            color: channels.base_color,
-            roughness: channels.roughness,
-            metallic: channels.metallic,
-            normal: false,
+            color: batch.channels.base_color,
+            roughness: batch.channels.roughness,
+            metallic: batch.channels.metallic,
+            normal: batch.channels.normal,
             mask: false,
         };
+
+        Some(ReadbackCompleted {
+            layer_idx: batch.layer_idx,
+            min_x,
+            min_y,
+            rect_w,
+            rect_h,
+            channels: batch.channels,
+            description: batch.description,
+        })
+    }
+
+    /// Flush and wait for pending asynchronous staging readback to complete immediately.
+    pub fn flush_async_readback(&self, cpu_layer: &mut crate::layer::Layer) -> Option<ReadbackCompleted> {
+        if !self.has_pending_readback() {
+            return None;
+        }
+        self.device.poll(wgpu::Maintain::Wait);
+        self.poll_async_readback(cpu_layer)
+    }
+
+    /// Read back a modified sub-rectangle from a GPU layer directly into the CPU Layer
+    /// for history undo tracking and file persistence. Synchronous wrapper.
+    #[allow(dead_code)]
+    pub fn readback_layer_rect(
+        &self,
+        gpu_layer: &crate::gpu_compositor::GpuLayer,
+        cpu_layer: &mut crate::layer::Layer,
+        min_x: u32,
+        min_y: u32,
+        max_x: u32,
+        max_y: u32,
+        channels: crate::channel::ChannelFlags,
+    ) {
+        self.start_async_readback(
+            gpu_layer,
+            cpu_layer,
+            0,
+            min_x,
+            min_y,
+            max_x,
+            max_y,
+            channels,
+            "Sync Readback",
+        );
+        let _ = self.flush_async_readback(cpu_layer);
     }
 }

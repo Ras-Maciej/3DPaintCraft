@@ -1237,7 +1237,8 @@ impl WgpuViewport {
         }
     }
 
-    /// Read back modified rectangular region from GPU layer into CPU layer
+    /// Read back modified rectangular region from GPU layer into CPU layer (synchronous)
+    #[allow(dead_code)]
     pub fn readback_layer_rect(
         &self,
         active_layer_idx: usize,
@@ -1250,6 +1251,58 @@ impl WgpuViewport {
     ) {
         if let Some(gpu_layer) = self.gpu_layers.get(active_layer_idx) {
             self.gpu_brush.readback_layer_rect(gpu_layer, cpu_layer, min_x, min_y, max_x, max_y, channels);
+        }
+    }
+
+    /// Check if an asynchronous staging readback is currently in flight
+    pub fn has_pending_readback(&self) -> bool {
+        self.gpu_brush.has_pending_readback()
+    }
+
+    /// Asynchronously initiate readback of a modified sub-rectangle from GPU layer to staging buffers
+    pub fn start_async_readback(
+        &self,
+        active_layer_idx: usize,
+        cpu_layer: &mut crate::layer::Layer,
+        min_x: u32,
+        min_y: u32,
+        max_x: u32,
+        max_y: u32,
+        channels: crate::channel::ChannelFlags,
+        description: &str,
+    ) {
+        if let Some(gpu_layer) = self.gpu_layers.get(active_layer_idx) {
+            self.gpu_brush.start_async_readback(
+                gpu_layer,
+                cpu_layer,
+                active_layer_idx,
+                min_x,
+                min_y,
+                max_x,
+                max_y,
+                channels,
+                description,
+            );
+        }
+    }
+
+    /// Non-blocking poll for completed asynchronous staging readback
+    pub fn poll_async_readback(&self, project: &mut crate::project::Project) -> Option<crate::gpu_brush::ReadbackCompleted> {
+        let layer_idx = self.gpu_brush.pending_readback_layer_idx()?;
+        if let Some(cpu_layer) = project.layers.get_mut(layer_idx) {
+            self.gpu_brush.poll_async_readback(cpu_layer)
+        } else {
+            None
+        }
+    }
+
+    /// Flush and wait for pending asynchronous staging readback to complete immediately
+    pub fn flush_async_readback(&self, project: &mut crate::project::Project) -> Option<crate::gpu_brush::ReadbackCompleted> {
+        let layer_idx = self.gpu_brush.pending_readback_layer_idx()?;
+        if let Some(cpu_layer) = project.layers.get_mut(layer_idx) {
+            self.gpu_brush.flush_async_readback(cpu_layer)
+        } else {
+            None
         }
     }
 
@@ -2891,6 +2944,124 @@ mod tests {
         assert!(timings.pbr_pass_ms >= 0.0, "PBR pass time must be non-negative");
         assert!(timings.postprocess_pass_ms >= 0.0, "Postprocess pass time must be non-negative");
         assert!(timings.total_gpu_ms >= 0.0, "Total GPU time must be non-negative");
+    }
+
+    #[test]
+    fn test_async_staging_readback_non_blocking_and_flush() {
+        let instance = wgpu::Instance::default();
+        let adapter = match pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            compatible_surface: None,
+            force_fallback_adapter: false,
+        })) {
+            Some(a) => a,
+            None => {
+                eprintln!("Skipping test_async_staging_readback_non_blocking_and_flush: no adapter");
+                return;
+            }
+        };
+
+        let mut req_features = wgpu::Features::FLOAT32_FILTERABLE;
+        if adapter.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
+            req_features |= wgpu::Features::TIMESTAMP_QUERY;
+        }
+        if adapter.features().contains(wgpu::Features::TIMESTAMP_QUERY_INSIDE_PASSES) {
+            req_features |= wgpu::Features::TIMESTAMP_QUERY_INSIDE_PASSES;
+        }
+
+        let (device, queue) = match pollster::block_on(adapter.request_device(
+            &wgpu::DeviceDescriptor {
+                label: Some("Async Readback Test Device"),
+                required_features: req_features,
+                required_limits: wgpu::Limits::default(),
+            },
+            None,
+        )) {
+            Ok(pair) => pair,
+            Err(e) => {
+                eprintln!("Skipping test_async_staging_readback_non_blocking_and_flush: {}", e);
+                return;
+            }
+        };
+
+        let device = std::sync::Arc::new(device);
+        let queue = std::sync::Arc::new(queue);
+        let adapter_arc = std::sync::Arc::new(adapter);
+        let renderer = std::sync::Arc::new(eframe::egui::mutex::RwLock::new(
+            egui_wgpu::Renderer::new(&device, wgpu::TextureFormat::Rgba8UnormSrgb, None, 1),
+        ));
+
+        let render_state = eframe::egui_wgpu::RenderState {
+            device: device.clone(),
+            queue: queue.clone(),
+            target_format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            renderer,
+            available_adapters: std::sync::Arc::new([]),
+            adapter: adapter_arc,
+        };
+
+        let mesh = crate::mesh::Mesh::create_cube_mesh("TestCubeAsync", 1.0);
+        let mut viewport = WgpuViewport::new(&render_state, &mesh);
+
+        let res = 256;
+        let mut project = crate::project::Project::new_default(res, res);
+        project.mesh = mesh;
+        viewport.sync_textures(&mut project);
+
+        let mut engine = crate::brush::BrushEngine::new();
+        engine.settings.radius = 20.0;
+        engine.settings.flow = 1.0;
+        engine.settings.opacity = 1.0;
+        engine.settings.paint_color = glam::Vec4::new(0.0, 1.0, 0.0, 1.0); // Pure Green
+        engine.settings.paint_roughness = 0.25;
+        engine.settings.paint_metallic = 0.75;
+        engine.update_cache();
+
+        let uniform_2d = engine.build_gpu_stamp_data_2d(glam::Vec2::new(0.5, 0.5), res, res)
+            .expect("2D stamp data must be constructed");
+        viewport.stamp_2d_gpu(0, &uniform_2d);
+        viewport.composite_and_update_active(&project, 0);
+
+        let min_x = uniform_2d.bounds_min[0] as u32;
+        let min_y = uniform_2d.bounds_min[1] as u32;
+        let max_x = uniform_2d.bounds_max[0] as u32;
+        let max_y = uniform_2d.bounds_max[1] as u32;
+
+        let layer = &mut project.layers[0];
+        assert!(!viewport.has_pending_readback(), "No readback should be in flight before start");
+
+        // Initiate async readback
+        viewport.start_async_readback(
+            0,
+            layer,
+            min_x,
+            min_y,
+            max_x,
+            max_y,
+            engine.settings.channels,
+            "Async Green Stamp",
+        );
+
+        assert!(viewport.has_pending_readback(), "Pending readback flag must be true after start_async_readback");
+
+        // Flush and complete readback
+        let completed = viewport.flush_async_readback(&mut project)
+            .expect("flush_async_readback must return completed readback result");
+
+        assert_eq!(completed.description, "Async Green Stamp");
+        assert_eq!(completed.layer_idx, 0);
+        assert!(!viewport.has_pending_readback(), "Pending readback flag must be false after completion");
+
+        // Verify pixel data
+        let center_x = res / 2;
+        let center_y = res / 2;
+        let painted_col = project.layers[0].base_color_buf.get_pixel(center_x, center_y);
+        let painted_r = project.layers[0].roughness_buf.get_pixel(center_x, center_y);
+        let painted_m = project.layers[0].metallic_buf.get_pixel(center_x, center_y);
+
+        assert!(painted_col.y > 0.7, "Center pixel must receive green color from async readback, got g={}", painted_col.y);
+        assert!(painted_r < 0.35, "Center pixel roughness must be updated by async readback, got r={}", painted_r);
+        assert!(painted_m > 0.65, "Center pixel metallic must be updated by async readback, got m={}", painted_m);
     }
 }
 
