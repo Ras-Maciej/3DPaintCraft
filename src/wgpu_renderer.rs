@@ -2876,14 +2876,13 @@ mod tests {
         project.mesh = mesh;
         viewport.sync_textures(&mut project);
 
-        // Frame 1: render viewport
+        // Render 10 consecutive frames to exercise double-buffered lifecycle and readback
         let vp = glam::Mat4::IDENTITY;
         let eye = glam::Vec4::new(0.0, 0.0, 3.0, 1.0);
         let shader = ShaderSettings::default();
-        viewport.render(vp, eye, 0.0, 0, 0.0, 1.0, &shader, false);
-
-        // Frame 2: render viewport again to complete double-buffered query readback
-        viewport.render(vp, eye, 0.0, 0, 0.0, 1.0, &shader, false);
+        for _ in 0..10 {
+            viewport.render(vp, eye, 0.0, 0, 0.0, 1.0, &shader, false);
+        }
 
         let timings = viewport.stage_timings();
         println!("GPU Stage Timings: {:?}", timings);

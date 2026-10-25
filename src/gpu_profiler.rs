@@ -1,5 +1,5 @@
 use eframe::wgpu;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 
 /// Microsecond-accurate timing breakdown of GPU execution stages.
@@ -13,10 +13,20 @@ pub struct GpuStageTimings {
     pub hardware_timestamps_supported: bool,
 }
 
+// Staging slot lifecycle states:
+// 0 = Idle (unmapped, ready to receive copy from resolve buffer)
+// 1 = CopyRecorded (copy recorded in command buffer, submitted to queue)
+// 2 = MappingPending (map_async called, waiting for GPU completion)
+// 3 = Mapped (map callback executed with Ok, ready to read timestamps)
+const STATE_IDLE: u8 = 0;
+const STATE_COPY_RECORDED: u8 = 1;
+const STATE_MAPPING_PENDING: u8 = 2;
+const STATE_MAPPED: u8 = 3;
+
 /// Double-buffered staging slots for zero-stall GPU timestamp readback.
 struct TimestampStagingBuffer {
     buffer: wgpu::Buffer,
-    is_mapped: Arc<AtomicBool>,
+    state: Arc<AtomicU8>,
 }
 
 /// Hardware query resources when TIMESTAMP_QUERY and TIMESTAMP_QUERY_INSIDE_PASSES are supported.
@@ -84,7 +94,7 @@ impl GpuProfiler {
                     usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
                     mapped_at_creation: false,
                 }),
-                is_mapped: Arc::new(AtomicBool::new(false)),
+                state: Arc::new(AtomicU8::new(STATE_IDLE)),
             };
 
             let staging_b = TimestampStagingBuffer {
@@ -94,7 +104,7 @@ impl GpuProfiler {
                     usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
                     mapped_at_creation: false,
                 }),
-                is_mapped: Arc::new(AtomicBool::new(false)),
+                state: Arc::new(AtomicU8::new(STATE_IDLE)),
             };
 
             let timestamp_period_ns = queue.get_timestamp_period();
@@ -133,58 +143,58 @@ impl GpuProfiler {
     /// Prepares profiler for a new frame. Reads previous frame's timestamps non-blockingly.
     pub fn begin_frame(&mut self, device: &wgpu::Device) {
         if let Some(ref mut hw) = self.hardware {
-            // Check non-blocking readback from the opposite (completed) staging buffer
-            let prev_idx = 1 - hw.active_staging_idx;
-            let staging = &mut hw.staging_buffers[prev_idx];
-
-            if staging.is_mapped.load(Ordering::Acquire) {
-                // Buffer is mapped and ready to read
-                {
-                    let view = staging.buffer.slice(..).get_mapped_range();
-                    let raw_timestamps: &[u64] = bytemuck::cast_slice(&view);
-                    if raw_timestamps.len() >= TOTAL_QUERY_COUNT as usize {
-                        let t0 = raw_timestamps[QUERY_SLOT_PBR_START as usize];
-                        let t1 = raw_timestamps[QUERY_SLOT_PBR_END as usize];
-                        let t2 = raw_timestamps[QUERY_SLOT_POSTPROCESS_START as usize];
-                        let t3 = raw_timestamps[QUERY_SLOT_POSTPROCESS_END as usize];
-                        let t4 = raw_timestamps[QUERY_SLOT_COMPUTE_START as usize];
-                        let t5 = raw_timestamps[QUERY_SLOT_COMPUTE_END as usize];
-                        let t6 = raw_timestamps[QUERY_SLOT_COMPOSITE_START as usize];
-                        let t7 = raw_timestamps[QUERY_SLOT_COMPOSITE_END as usize];
-
-                        let period = hw.timestamp_period_ns as f64 / 1_000_000.0; // ns to ms factor
-
-                        let pbr_ms = if t1 > t0 { ((t1 - t0) as f64 * period) as f32 } else { 0.0 };
-                        let pp_ms = if t3 > t2 { ((t3 - t2) as f64 * period) as f32 } else { 0.0 };
-                        let comp_brush_ms = if t5 > t4 { ((t5 - t4) as f64 * period) as f32 } else { 0.0 };
-                        let compositing_ms = if t7 > t6 { ((t7 - t6) as f64 * period) as f32 } else { 0.0 };
-
-                        self.timings.pbr_pass_ms = pbr_ms;
-                        self.timings.postprocess_pass_ms = pp_ms;
-                        self.timings.compute_brush_ms = comp_brush_ms;
-                        self.timings.compositing_ms = compositing_ms;
-                        self.timings.total_gpu_ms = pbr_ms + pp_ms + comp_brush_ms + compositing_ms;
-                        self.timings.hardware_timestamps_supported = true;
-
-                        // Exponential Moving Average (EMA) for visual stability
-                        let alpha = 0.2_f32;
-                        self.smoothed_timings.pbr_pass_ms = self.smoothed_timings.pbr_pass_ms * (1.0 - alpha) + pbr_ms * alpha;
-                        self.smoothed_timings.postprocess_pass_ms = self.smoothed_timings.postprocess_pass_ms * (1.0 - alpha) + pp_ms * alpha;
-                        self.smoothed_timings.compute_brush_ms = self.smoothed_timings.compute_brush_ms * (1.0 - alpha) + comp_brush_ms * alpha;
-                        self.smoothed_timings.compositing_ms = self.smoothed_timings.compositing_ms * (1.0 - alpha) + compositing_ms * alpha;
-                        self.smoothed_timings.total_gpu_ms = self.smoothed_timings.pbr_pass_ms
-                            + self.smoothed_timings.postprocess_pass_ms
-                            + self.smoothed_timings.compute_brush_ms
-                            + self.smoothed_timings.compositing_ms;
-                        self.smoothed_timings.hardware_timestamps_supported = true;
-                    }
-                }
-                staging.buffer.unmap();
-                staging.is_mapped.store(false, Ordering::Release);
-            }
-
-            // Non-blocking poll to drive asynchronous mappings
+            // 1. Non-blocking poll to drive asynchronous mapping callbacks
             let _ = device.poll(wgpu::Maintain::Poll);
+
+            // 2. Check all staging buffers for completed map operations
+            for i in 0..2 {
+                let staging = &mut hw.staging_buffers[i];
+                if staging.state.load(Ordering::Acquire) == STATE_MAPPED {
+                    {
+                        let view = staging.buffer.slice(..).get_mapped_range();
+                        let raw_timestamps: &[u64] = bytemuck::cast_slice(&view);
+                        if raw_timestamps.len() >= TOTAL_QUERY_COUNT as usize {
+                            let t0 = raw_timestamps[QUERY_SLOT_PBR_START as usize];
+                            let t1 = raw_timestamps[QUERY_SLOT_PBR_END as usize];
+                            let t2 = raw_timestamps[QUERY_SLOT_POSTPROCESS_START as usize];
+                            let t3 = raw_timestamps[QUERY_SLOT_POSTPROCESS_END as usize];
+                            let t4 = raw_timestamps[QUERY_SLOT_COMPUTE_START as usize];
+                            let t5 = raw_timestamps[QUERY_SLOT_COMPUTE_END as usize];
+                            let t6 = raw_timestamps[QUERY_SLOT_COMPOSITE_START as usize];
+                            let t7 = raw_timestamps[QUERY_SLOT_COMPOSITE_END as usize];
+
+                            let period = hw.timestamp_period_ns as f64 / 1_000_000.0; // ns to ms factor
+
+                            let pbr_ms = if t1 > t0 { ((t1 - t0) as f64 * period) as f32 } else { 0.0 };
+                            let pp_ms = if t3 > t2 { ((t3 - t2) as f64 * period) as f32 } else { 0.0 };
+                            let comp_brush_ms = if t5 > t4 { ((t5 - t4) as f64 * period) as f32 } else { 0.0 };
+                            let compositing_ms = if t7 > t6 { ((t7 - t6) as f64 * period) as f32 } else { 0.0 };
+
+                            self.timings.pbr_pass_ms = pbr_ms;
+                            self.timings.postprocess_pass_ms = pp_ms;
+                            self.timings.compute_brush_ms = comp_brush_ms;
+                            self.timings.compositing_ms = compositing_ms;
+                            self.timings.total_gpu_ms = pbr_ms + pp_ms + comp_brush_ms + compositing_ms;
+                            self.timings.hardware_timestamps_supported = true;
+
+                            // Exponential Moving Average (EMA) for visual stability
+                            let alpha = 0.2_f32;
+                            self.smoothed_timings.pbr_pass_ms = self.smoothed_timings.pbr_pass_ms * (1.0 - alpha) + pbr_ms * alpha;
+                            self.smoothed_timings.postprocess_pass_ms = self.smoothed_timings.postprocess_pass_ms * (1.0 - alpha) + pp_ms * alpha;
+                            self.smoothed_timings.compute_brush_ms = self.smoothed_timings.compute_brush_ms * (1.0 - alpha) + comp_brush_ms * alpha;
+                            self.smoothed_timings.compositing_ms = self.smoothed_timings.compositing_ms * (1.0 - alpha) + compositing_ms * alpha;
+                            self.smoothed_timings.total_gpu_ms = self.smoothed_timings.pbr_pass_ms
+                                + self.smoothed_timings.postprocess_pass_ms
+                                + self.smoothed_timings.compute_brush_ms
+                                + self.smoothed_timings.compositing_ms;
+                            self.smoothed_timings.hardware_timestamps_supported = true;
+                        }
+                    }
+                    // Unmap the buffer so it can be reused safely
+                    staging.buffer.unmap();
+                    staging.state.store(STATE_IDLE, Ordering::Release);
+                }
+            }
         } else {
             // CPU fallback timings
             self.timings.pbr_pass_ms = self.cpu_pbr_ms;
@@ -234,26 +244,31 @@ impl GpuProfiler {
         })
     }
 
-    /// Resolves the query set and copies timestamp data into the active staging buffer.
+    /// Resolves the query set and copies timestamp data into the active staging buffer if it is unmapped and idle.
     pub fn resolve(&mut self, encoder: &mut wgpu::CommandEncoder) {
         if let Some(ref mut hw) = self.hardware {
-            encoder.resolve_query_set(
-                &hw.query_set,
-                0..TOTAL_QUERY_COUNT,
-                &hw.resolve_buffer,
-                0,
-            );
-
             let active_idx = hw.active_staging_idx;
             let staging = &mut hw.staging_buffers[active_idx];
 
-            encoder.copy_buffer_to_buffer(
-                &hw.resolve_buffer,
-                0,
-                &staging.buffer,
-                0,
-                BUFFER_SIZE_BYTES,
-            );
+            // Only copy into staging buffer if it is strictly in the Idle (unmapped) state
+            if staging.state.load(Ordering::Acquire) == STATE_IDLE {
+                encoder.resolve_query_set(
+                    &hw.query_set,
+                    0..TOTAL_QUERY_COUNT,
+                    &hw.resolve_buffer,
+                    0,
+                );
+
+                encoder.copy_buffer_to_buffer(
+                    &hw.resolve_buffer,
+                    0,
+                    &staging.buffer,
+                    0,
+                    BUFFER_SIZE_BYTES,
+                );
+
+                staging.state.store(STATE_COPY_RECORDED, Ordering::Release);
+            }
         }
     }
 
@@ -263,16 +278,21 @@ impl GpuProfiler {
             let active_idx = hw.active_staging_idx;
             let staging = &mut hw.staging_buffers[active_idx];
 
-            // Trigger non-blocking asynchronous mapping for this staging buffer
-            let flag = Arc::clone(&staging.is_mapped);
-            staging.buffer.slice(..).map_async(wgpu::MapMode::Read, move |res| {
-                if res.is_ok() {
-                    flag.store(true, Ordering::Release);
-                }
-            });
+            // Only map if a copy was recorded and submitted in this frame
+            if staging.state.load(Ordering::Acquire) == STATE_COPY_RECORDED {
+                staging.state.store(STATE_MAPPING_PENDING, Ordering::Release);
+                let state = Arc::clone(&staging.state);
+                staging.buffer.slice(..).map_async(wgpu::MapMode::Read, move |res| {
+                    if res.is_ok() {
+                        state.store(STATE_MAPPED, Ordering::Release);
+                    } else {
+                        state.store(STATE_IDLE, Ordering::Release);
+                    }
+                });
 
-            // Toggle active staging buffer index for next frame
-            hw.active_staging_idx = 1 - hw.active_staging_idx;
+                // Toggle active staging buffer index for next frame
+                hw.active_staging_idx = 1 - hw.active_staging_idx;
+            }
         }
     }
 
