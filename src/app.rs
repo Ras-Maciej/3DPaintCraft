@@ -34,6 +34,72 @@ pub enum RightPanelTab {
     MeshMaps,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShelfDockLocation {
+    Bottom,
+    Left,
+    Floating,
+}
+
+#[derive(Clone, Debug)]
+pub struct WorkspaceLayout {
+    pub show_toolbar: bool,
+    pub show_context_bar: bool,
+    pub show_status_bar: bool,
+
+    // Panel visibility
+    pub show_texture_sets: bool,
+    pub show_layers: bool,
+    pub show_properties: bool,
+    pub show_shelf: bool,
+
+    // Floating / undocked states
+    pub texture_sets_floating: bool,
+    pub layers_floating: bool,
+    pub properties_floating: bool,
+    pub shelf_dock: ShelfDockLocation,
+
+    // Resizable panel dimensions
+    pub right_panel_width: f32,
+    pub bottom_shelf_height: f32,
+    pub left_shelf_width: f32,
+    pub layers_pane_height: f32,
+
+    // Collapsed states when docked
+    pub texture_sets_collapsed: bool,
+    pub layers_collapsed: bool,
+    pub properties_collapsed: bool,
+}
+
+impl Default for WorkspaceLayout {
+    fn default() -> Self {
+        Self {
+            show_toolbar: true,
+            show_context_bar: true,
+            show_status_bar: true,
+
+            show_texture_sets: true,
+            show_layers: true,
+            show_properties: true,
+            show_shelf: true,
+
+            texture_sets_floating: false,
+            layers_floating: false,
+            properties_floating: false,
+            shelf_dock: ShelfDockLocation::Bottom,
+
+            right_panel_width: 380.0,
+            bottom_shelf_height: 220.0,
+            left_shelf_width: 210.0,
+            layers_pane_height: 240.0,
+
+            texture_sets_collapsed: false,
+            layers_collapsed: false,
+            properties_collapsed: false,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct BakeProgressState {
     pub progress: f32,
@@ -263,6 +329,7 @@ pub struct PaintcraftApp {
     #[allow(dead_code)]
     pub stencil_overlay_texture: Option<TextureHandle>,
     pub right_panel_tab: RightPanelTab,
+    pub workspace: WorkspaceLayout,
     pub show_shelf: bool,
     pub shelf_category: crate::shelf::ShelfCategory,
     pub shelf_search_query: String,
@@ -412,8 +479,22 @@ pub fn apply_substance_theme(ctx: &eframe::egui::Context) {
     visuals.widgets.active.fg_stroke = eframe::egui::Stroke::new(1.0_f32, eframe::egui::Color32::WHITE);
     visuals.widgets.active.rounding = eframe::egui::Rounding::same(2.5);
 
-    visuals.window_rounding = eframe::egui::Rounding::same(3.0);
-    visuals.menu_rounding = eframe::egui::Rounding::same(2.0);
+    visuals.window_rounding = eframe::egui::Rounding::same(3.5);
+    visuals.menu_rounding = eframe::egui::Rounding::same(2.5);
+    visuals.window_shadow = eframe::egui::epaint::Shadow {
+        offset: eframe::egui::vec2(0.0, 4.0),
+        blur: 12.0,
+        spread: 0.0,
+        color: eframe::egui::Color32::from_black_alpha(150),
+    };
+    visuals.popup_shadow = eframe::egui::epaint::Shadow {
+        offset: eframe::egui::vec2(0.0, 3.0),
+        blur: 8.0,
+        spread: 0.0,
+        color: eframe::egui::Color32::from_black_alpha(140),
+    };
+    visuals.window_stroke = eframe::egui::Stroke::new(1.0_f32, eframe::egui::Color32::from_rgb(52, 56, 66));
+    visuals.resize_corner_size = 9.0;
 
     ctx.set_visuals(visuals);
 
@@ -587,6 +668,7 @@ impl PaintcraftApp {
             stencil_image_path: String::new(),
             stencil_overlay_texture: None,
             right_panel_tab: RightPanelTab::Layers,
+            workspace: WorkspaceLayout::default(),
             show_shelf: true,
             shelf_category: crate::shelf::ShelfCategory::All,
             shelf_search_query: String::new(),
@@ -3321,20 +3403,84 @@ impl eframe::App for PaintcraftApp {
                 });
 
                 ui.menu_button("Window", |ui| {
-                    let shelf_text = if self.show_shelf { "Hide Assets Shelf [^]" } else { "Show Assets Shelf [v]" };
-                    if ui.button(shelf_text).clicked() {
-                        self.show_shelf = !self.show_shelf;
+                    if ui.button("Reset Workspace to Default Layout").clicked() {
+                        self.workspace = WorkspaceLayout::default();
+                        self.show_shelf = true;
+                        self.status_message = "Reset workspace to Substance 3D Painter default layout".to_string();
                         ui.close_menu();
                     }
                     ui.separator();
-                    ui.label("Viewport Layout:");
-                    if ui.selectable_value(&mut self.layout, ViewLayout::View3DOnly, "3D Viewport Only").clicked() {
+                    ui.label(egui::RichText::new("Panels & Views").strong().color(Color32::from_rgb(226, 91, 16)));
+                    
+                    if ui.checkbox(&mut self.workspace.show_toolbar, "Tools Toolbar (Left)").clicked() {
                         ui.close_menu();
                     }
-                    if ui.selectable_value(&mut self.layout, ViewLayout::SplitDualView, "3D | 2D Split View").clicked() {
+                    if ui.checkbox(&mut self.workspace.show_context_bar, "Context Tool Bar (Top)").clicked() {
                         ui.close_menu();
                     }
-                    if ui.selectable_value(&mut self.layout, ViewLayout::View2DOnly, "2D UV Canvas Only").clicked() {
+                    if ui.checkbox(&mut self.workspace.show_status_bar, "Status Bar (Bottom)").clicked() {
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    if ui.checkbox(&mut self.workspace.show_texture_sets, "Texture Set List").clicked() {
+                        ui.close_menu();
+                    }
+                    if ui.checkbox(&mut self.workspace.show_layers, "Layers Stack").clicked() {
+                        ui.close_menu();
+                    }
+                    if ui.checkbox(&mut self.workspace.show_properties, "Properties Panel").clicked() {
+                        ui.close_menu();
+                    }
+                    let mut shelf_vis = self.show_shelf;
+                    if ui.checkbox(&mut shelf_vis, "Assets & Shelf").clicked() {
+                        self.show_shelf = shelf_vis;
+                        self.workspace.show_shelf = shelf_vis;
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    ui.label(egui::RichText::new("Docking & Floating").strong().color(Color32::from_rgb(226, 91, 16)));
+                    if ui.button("Dock All Panels").clicked() {
+                        self.workspace.texture_sets_floating = false;
+                        self.workspace.layers_floating = false;
+                        self.workspace.properties_floating = false;
+                        self.workspace.shelf_dock = ShelfDockLocation::Bottom;
+                        self.status_message = "Docked all panels".to_string();
+                        ui.close_menu();
+                    }
+                    if ui.button("Undock All Panels (Pop Out)").clicked() {
+                        self.workspace.texture_sets_floating = true;
+                        self.workspace.layers_floating = true;
+                        self.workspace.properties_floating = true;
+                        self.workspace.shelf_dock = ShelfDockLocation::Floating;
+                        self.status_message = "Popped out all panels into floating windows".to_string();
+                        ui.close_menu();
+                    }
+                    ui.menu_button("Shelf Dock Placement", |ui| {
+                        if ui.selectable_value(&mut self.workspace.shelf_dock, ShelfDockLocation::Bottom, "Bottom Dock (Substance Default)").clicked() {
+                            self.workspace.show_shelf = true;
+                            self.show_shelf = true;
+                            ui.close_menu();
+                        }
+                        if ui.selectable_value(&mut self.workspace.shelf_dock, ShelfDockLocation::Left, "Left Dock").clicked() {
+                            self.workspace.show_shelf = true;
+                            self.show_shelf = true;
+                            ui.close_menu();
+                        }
+                        if ui.selectable_value(&mut self.workspace.shelf_dock, ShelfDockLocation::Floating, "Floating Window").clicked() {
+                            self.workspace.show_shelf = true;
+                            self.show_shelf = true;
+                            ui.close_menu();
+                        }
+                    });
+                    ui.separator();
+                    ui.label(egui::RichText::new("Viewport Layout").strong().color(Color32::from_rgb(226, 91, 16)));
+                    if ui.selectable_value(&mut self.layout, ViewLayout::SplitDualView, "3D | 2D Split View (F1)").clicked() {
+                        ui.close_menu();
+                    }
+                    if ui.selectable_value(&mut self.layout, ViewLayout::View3DOnly, "3D Viewport Only (F2)").clicked() {
+                        ui.close_menu();
+                    }
+                    if ui.selectable_value(&mut self.layout, ViewLayout::View2DOnly, "2D UV Canvas Only (F3)").clicked() {
                         ui.close_menu();
                     }
                 });
@@ -3943,2469 +4089,285 @@ impl eframe::App for PaintcraftApp {
             });
         }
 
-        // --- SUBSTANCE 3D PAINTER COMPACT LEFT ASSETS DOCK ---
-        if !self.zen_mode && self.show_shelf {
+        // --- SUBSTANCE 3D PAINTER LEFT ASSETS DOCK (When Docked Left) ---
+        if !self.zen_mode && self.show_shelf && self.workspace.shelf_dock == ShelfDockLocation::Left {
             egui::SidePanel::left("left_assets_panel")
-                .resizable(false)
-                .exact_width(195.0)
+                .resizable(true)
+                .default_width(self.workspace.left_shelf_width)
+                .min_width(170.0)
+                .max_width(450.0)
                 .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.strong(egui::RichText::new("ASSETS").size(11.5).color(Color32::WHITE));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.small_button("X").on_hover_text("Close Assets Panel").clicked() {
+                                self.show_shelf = false;
+                                self.workspace.show_shelf = false;
+                            }
+                            if ui.small_button("↗ Pop Out").on_hover_text("Undock Shelf into floating window").clicked() {
+                                self.workspace.shelf_dock = ShelfDockLocation::Floating;
+                            }
+                            if ui.small_button("↓ Dock Bottom").on_hover_text("Dock Shelf to Bottom Dock").clicked() {
+                                self.workspace.shelf_dock = ShelfDockLocation::Bottom;
+                            }
+                        });
+                    });
+                    ui.separator();
                     self.render_assets_panel(ui);
                 });
         }
 
-        // --- RIGHT SIDE PANEL: SEPARATE LAYERS & PROPERTIES PANELS (Substance 3D Painter 1:1) ---
-        if !self.zen_mode {
+        // --- RIGHT SIDE PANEL: DOCKED TEXTURE SETS, LAYERS & PROPERTIES ---
+        let show_right_dock = !self.zen_mode && (
+            (self.workspace.show_texture_sets && !self.workspace.texture_sets_floating) ||
+            (self.workspace.show_layers && !self.workspace.layers_floating) ||
+            (self.workspace.show_properties && !self.workspace.properties_floating)
+        );
+
+        if show_right_dock {
             egui::SidePanel::right("right_panel")
-            .min_width(340.0)
-            .default_width(380.0)
-            .show(ctx, |ui| {
-                // Top: TEXTURE SET LIST (Substance 3D Painter)
-                // Top: TEXTURE SET LIST (Substance 3D Painter)
-                ui.group(|ui| {
-                    ui.horizontal(|ui| {
-                        ui.strong(egui::RichText::new("TEXTURE SET LIST").size(10.5).color(Color32::from_rgb(175, 180, 190)));
-                        ui.label(egui::RichText::new(format!("[{}]", self.project.texture_sets.len())).small().color(Color32::from_rgb(226, 91, 16)));
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.checkbox(&mut self.project.auto_switch_texture_set, "Auto-Switch")
-                                .on_hover_text("Automatically activate Texture Set when painting or clicking on its sub-mesh in the 3D viewport");
-                        });
-                    });
-
-                    // Scrollable list of texture sets
-                    let max_ts_height = (self.project.texture_sets.len() as f32 * 28.0).clamp(40.0, 130.0);
-                    egui::ScrollArea::vertical()
-                        .max_height(max_ts_height)
-                        .show(ui, |ui| {
-                            let mut switch_to = None;
-                            let mut toggle_vis = None;
-                            let mut toggle_solo = None;
-
-                            for (idx, ts) in self.project.texture_sets.iter().enumerate() {
-                                let is_active = idx == self.project.active_texture_set_idx;
-                                let is_visible = ts.visible;
-                                
-                                ui.horizontal(|ui| {
-                                    // Eye visibility toggle
-                                    let eye_txt = if is_visible { "[V]" } else { "[ ]" };
-                                    let eye_col = if is_visible { Color32::from_rgb(220, 225, 235) } else { Color32::from_rgb(100, 105, 115) };
-                                    if ui.button(egui::RichText::new(eye_txt).monospace().color(eye_col)).on_hover_text("Toggle Texture Set / Sub-mesh visibility in 3D viewport").clicked() {
-                                        toggle_vis = Some(idx);
-                                    }
-
-                                    // Solo toggle
-                                    let solo_col = if is_active { Color32::from_rgb(243, 94, 24) } else { Color32::from_rgb(130, 135, 145) };
-                                    if ui.small_button(egui::RichText::new("S").strong().color(solo_col)).on_hover_text("Solo Texture Set (isolate in viewport)").clicked() {
-                                        toggle_solo = Some(idx);
-                                    }
-
-                                    // Name and tri count
-                                    let tri_count: usize = ts.submesh_indices.iter()
-                                        .filter_map(|&sm_idx| self.project.mesh.submeshes.get(sm_idx))
-                                        .map(|sm| sm.index_count / 3)
-                                        .sum();
-
-                                    let label_text = format!("{}  ({} tris)", ts.name, tri_count);
-                                    let resp = if is_active {
-                                        ui.selectable_label(true, egui::RichText::new(&label_text).strong().color(Color32::WHITE))
-                                    } else {
-                                        ui.selectable_label(false, egui::RichText::new(&label_text).color(Color32::from_rgb(180, 185, 195)))
-                                    };
-
-                                    if resp.clicked() && !is_active {
-                                        switch_to = Some(idx);
-                                    }
-                                });
-                            }
-
-                            if let Some(idx) = toggle_vis {
-                                self.project.toggle_texture_set_visibility(idx);
-                                if let Some(wgpu) = &mut self.wgpu_viewport {
-                                    wgpu.sync_submesh_visibility(&self.project.mesh.submeshes);
-                                }
-                            }
-                            if let Some(idx) = toggle_solo {
-                                self.project.solo_texture_set(idx);
-                                if let Some(wgpu) = &mut self.wgpu_viewport {
-                                    wgpu.sync_submesh_visibility(&self.project.mesh.submeshes);
-                                }
-                            }
-                            if let Some(idx) = switch_to {
-                                self.project.switch_texture_set(idx);
-                                if let Some(wgpu) = &mut self.wgpu_viewport {
-                                    wgpu.sync_textures(&mut self.project);
-                                }
-                                self.status_message = format!("Active Texture Set: {}", self.project.texture_sets[idx].name);
-                            }
-                        });
-
-                    // Active Texture Set size selector and quick actions
-                    ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new("Size:").small().color(Color32::from_rgb(140, 145, 155)));
-                        let res_list = [512, 1024, 2048, 4096];
-                        for &r in &res_list {
-                            let is_curr = self.project.texture_width == r;
-                            let btn_text = match r {
-                                512 => "512",
-                                1024 => "1K",
-                                2048 => "2K",
-                                4096 => "4K",
-                                _ => "Custom",
-                            };
-                            if ui.selectable_label(is_curr, btn_text).clicked() && !is_curr {
-                                self.project.resize_textures(r, r);
-                                self.history.adjust_max_undo_for_resolution(r, r);
-                                self.project.rebuild_composite();
-                                self.project.gpu_sync_needed = true;
-                                self.status_message = format!("Resized texture set to {}x{}", r, r);
-                            }
-                        }
-
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if self.project.texture_sets.len() > 1 {
-                                if ui.small_button("Del").on_hover_text("Delete active texture set").clicked() {
-                                    let cur_idx = self.project.active_texture_set_idx;
-                                    self.project.delete_texture_set(cur_idx);
-                                    if let Some(wgpu) = &mut self.wgpu_viewport {
-                                        wgpu.sync_textures(&mut self.project);
-                                    }
-                                }
-                            }
-                            if ui.small_button("Dup").on_hover_text("Duplicate active texture set").clicked() {
-                                let cur_idx = self.project.active_texture_set_idx;
-                                self.project.duplicate_texture_set(cur_idx);
-                                if let Some(wgpu) = &mut self.wgpu_viewport {
-                                    wgpu.sync_textures(&mut self.project);
-                                }
-                            }
-                            if ui.small_button("+ Set").on_hover_text("Add new empty Texture Set").clicked() {
-                                let new_id = self.project.texture_sets.len() + 1;
-                                self.project.add_texture_set(
-                                    format!("Material_{}", new_id),
-                                    format!("Material_{}", new_id),
-                                    vec![],
-                                );
-                                if let Some(wgpu) = &mut self.wgpu_viewport {
-                                    wgpu.sync_textures(&mut self.project);
-                                }
-                            }
-                        });
-                    });
-                });
-                ui.add_space(3.0);
-
-                ui.horizontal(|ui| {
-                    ui.selectable_value(&mut self.right_panel_tab, RightPanelTab::Layers, "Layers");
-                    ui.selectable_value(&mut self.right_panel_tab, RightPanelTab::MeshMaps, "Mesh Maps");
-                });
-                ui.separator();
-
-                match self.right_panel_tab {
-                    RightPanelTab::Layers => {
-                    let total_height = ui.available_height();
-                    let layers_pane_height = (total_height * 0.36).clamp(175.0, 320.0);
-    
-                    // ==========================================
-                    // 1. DEDICATED LAYERS PANEL (TOP)
-                    // ==========================================
-                    ui.group(|ui| {
-                        ui.set_height(layers_pane_height);
-    
-                        // Layers Window Header & Active Blend / Opacity Controls
-                        ui.horizontal(|ui| {
-                            ui.heading("Layers");
-
-                            // Substance 3D Painter Layer Stack Channel Selector
-                            ui.label("Channel:");
-                            egui::ComboBox::from_id_source("layer_stack_channel_selector")
-                                .selected_text(self.layer_stack_channel.short_name())
-                                .show_ui(ui, |ui| {
-                                    let channels = [
-                                        crate::channel::ChannelType::BaseColor,
-                                        crate::channel::ChannelType::Roughness,
-                                        crate::channel::ChannelType::Metallic,
-                                        crate::channel::ChannelType::Normal,
-                                        crate::channel::ChannelType::Height,
-                                        crate::channel::ChannelType::AmbientOcclusion,
-                                        crate::channel::ChannelType::Emission,
-                                        crate::channel::ChannelType::Opacity,
-                                        crate::channel::ChannelType::Clearcoat,
-                                        crate::channel::ChannelType::Anisotropy,
-                                    ];
-                                    for ch in channels {
-                                        ui.selectable_value(&mut self.layer_stack_channel, ch, ch.name());
-                                    }
-                                });
-                        });
-
-                        let act_idx = self.project.active_layer_idx;
-                        let mut blend_or_opacity_changed = false;
-
-                        // Blend Mode and Opacity (Affecting the active selected layer's active channel)
-                        if let Some(act_layer) = self.project.layers.get_mut(act_idx) {
-                            let cur_ch = self.layer_stack_channel;
-                            let mut cur_mode = act_layer.get_channel_blend_mode(cur_ch);
-                            let mut cur_ch_op = act_layer.get_channel_opacity(cur_ch);
-
-                            ui.horizontal(|ui| {
-                                ui.label("Blend:");
-                                egui::ComboBox::from_id_source("active_layer_channel_blend_mode")
-                                    .selected_text(cur_mode.name())
-                                    .show_ui(ui, |ui| {
-                                        let modes = [
-                                            BlendMode::PassThrough,
-                                            BlendMode::Normal,
-                                            BlendMode::Multiply,
-                                            BlendMode::Screen,
-                                            BlendMode::Overlay,
-                                            BlendMode::Add,
-                                            BlendMode::Subtract,
-                                            BlendMode::Darken,
-                                            BlendMode::Lighten,
-                                            BlendMode::Replace,
-                                        ];
-                                        for m in modes {
-                                            if ui.selectable_value(&mut cur_mode, m, m.name()).clicked() {
-                                                act_layer.set_channel_blend_mode(cur_ch, m);
-                                                blend_or_opacity_changed = true;
-                                            }
-                                        }
-                                    });
-
-                                ui.label("Opac:");
-                                if ui.add_sized([55.0, 18.0], egui::Slider::new(&mut cur_ch_op, 0.0..=1.0)).changed() {
-                                    act_layer.set_channel_opacity(cur_ch, cur_ch_op);
-                                    blend_or_opacity_changed = true;
-                                }
-
-                                ui.label("Layer:");
-                                if ui.add_sized([45.0, 18.0], egui::Slider::new(&mut act_layer.opacity, 0.0..=1.0)).on_hover_text("Master layer opacity").changed() {
-                                    blend_or_opacity_changed = true;
-                                }
-                            });
-                        }
-    
-                        if blend_or_opacity_changed {
-                            if self.wgpu_viewport.is_some() && ui.input(|i| i.pointer.any_down()) {
-                                self.project.gpu_sync_needed = true;
-                                self.need_cpu_composite_sync = true;
-                            } else {
-                                self.project.rebuild_composite();
-                            }
-                        }
-    
-                        // Layer Stack Toolbar
-                        let opt_icons = self.icons.as_ref();
-                        ui.horizontal(|ui| {
-                            let btn_paint = if let Some(icons) = opt_icons {
-                                egui::Button::image_and_text((icons.layer_paint.id(), egui::vec2(13.0, 13.0)), "Paint")
-                            } else {
-                                egui::Button::new("+ Paint")
-                            };
-                            if ui.add(btn_paint).on_hover_text("Add Paint Layer").clicked() {
-                                let prev_active = self.project.active_layer_idx;
-                                let new_idx = self.project.add_paint_layer(None);
-                                self.brush_engine.settings.target = PaintTarget::Material;
-                                let layer_clone = self.project.layers[new_idx].clone_stroke_snapshot();
-                                self.history.push("Add Paint Layer", HistoryAction::AddLayer {
-                                    layer_idx: new_idx,
-                                    layer: layer_clone,
-                                    prev_active,
-                                });
-                                self.status_message = "Added Paint Layer.".to_string();
-                            }
-
-                            let btn_fill = if let Some(icons) = opt_icons {
-                                egui::Button::image_and_text((icons.layer_fill.id(), egui::vec2(13.0, 13.0)), "Fill")
-                            } else {
-                                egui::Button::new("+ Fill")
-                            };
-                            if ui.add(btn_fill).on_hover_text("Add Fill Layer").clicked() {
-                                let prev_active = self.project.active_layer_idx;
-                                let new_idx = self.project.add_fill_layer(
-                                    None,
-                                    glam::Vec4::ONE,
-                                    0.5,
-                                    0.0,
-                                );
-                                self.brush_engine.settings.target = PaintTarget::Material;
-                                let layer_clone = self.project.layers[new_idx].clone_stroke_snapshot();
-                                self.history.push("Add Fill Layer", HistoryAction::AddLayer {
-                                    layer_idx: new_idx,
-                                    layer: layer_clone,
-                                    prev_active,
-                                });
-                                self.status_message = "Added Fill Layer.".to_string();
-                            }
-
-                            let btn_folder = if let Some(icons) = opt_icons {
-                                egui::Button::image_and_text((icons.layer_folder.id(), egui::vec2(13.0, 13.0)), "Folder")
-                            } else {
-                                egui::Button::new("+ Folder")
-                            };
-                            if ui.add(btn_folder).on_hover_text("Add Layer Folder / Group").clicked() {
-                                let prev_active = self.project.active_layer_idx;
-                                let new_idx = self.project.add_folder_layer(None);
-                                let layer_clone = self.project.layers[new_idx].clone_stroke_snapshot();
-                                self.history.push("Add Folder", HistoryAction::AddLayer {
-                                    layer_idx: new_idx,
-                                    layer: layer_clone,
-                                    prev_active,
-                                });
-                                self.status_message = "Added Layer Folder.".to_string();
-                            }
-
-                            if ui.button("Filters...").on_hover_text("Apply filter (Blur, Levels, Invert, Sharpen)").clicked() {
-                                self.show_filter_modal = true;
-                            }
-
-                            if ui.button("Duplicate").on_hover_text("Duplicate selected layer").clicked() {
-                                if let Some(new_idx) = self.project.duplicate_layer(act_idx) {
-                                    let layer_clone = Box::new(self.project.layers[new_idx].clone());
-                                    self.history.push("Duplicate Layer", HistoryAction::AddLayer {
-                                        layer_idx: new_idx,
-                                        layer: layer_clone,
-                                        prev_active: act_idx,
-                                    });
-                                    self.status_message = format!("Duplicated layer #{}", new_idx);
-                                }
-                            }
-
-                            if ui.button("Save as Mat").on_hover_text("Save selected layer as a reusable PBR material in the Shelf").clicked() {
-                                if let Some(layer) = self.project.layers.get(act_idx) {
-                                    let name = layer.name.clone();
-                                    let clean_id = name.trim().replace(' ', "_").to_lowercase();
-                                    let mat = crate::asset_manager::CustomMaterialEntry {
-                                        id: clean_id,
-                                        name: name.clone(),
-                                        description: format!("Custom PBR material created from layer '{}'", name),
-                                        path: std::path::PathBuf::new(),
-                                        file_name: String::new(),
-                                        base_color: [layer.fill_color.x, layer.fill_color.y, layer.fill_color.z, layer.fill_color.w],
-                                        roughness: layer.fill_roughness,
-                                        metallic: layer.fill_metallic,
-                                        height: layer.fill_height,
-                                        normal: [0.5, 0.5, 1.0, 0.5],
-                                        emissive: [layer.fill_emissive.x, layer.fill_emissive.y, layer.fill_emissive.z, layer.fill_emissive.w],
-                                        opacity: layer.fill_opacity,
-                                        clearcoat: layer.fill_clearcoat,
-                                        anisotropy: layer.fill_anisotropy,
-                                    };
-                                    match self.asset_manager.save_material(&mat) {
-                                        Ok(path) => {
-                                            self.status_message = format!("Saved Material '{}' to {:?}", mat.name, path.file_name().unwrap_or_default());
-                                        }
-                                        Err(e) => {
-                                            self.status_message = format!("Failed to save material: {}", e);
-                                        }
-                                    }
-                                }
-                            }
-    
-                            #[derive(Clone, Copy)]
-                            enum MaskAddAction {
-                                Black,
-                                White,
-                                Curvature,
-                                Grunge,
-                            }
-                            let mut mask_add_action = None;
-    
-                            ui.menu_button("+ Mask", |ui| {
-                                if ui.button("Black Mask (Hide All)").clicked() {
-                                    mask_add_action = Some(MaskAddAction::Black);
-                                    ui.close_menu();
-                                }
-                                if ui.button("White Mask (Reveal All)").clicked() {
-                                    mask_add_action = Some(MaskAddAction::White);
-                                    ui.close_menu();
-                                }
-                                if ui.button("Edge Wear Mask (Curvature)").clicked() {
-                                    mask_add_action = Some(MaskAddAction::Curvature);
-                                    ui.close_menu();
-                                }
-                                if ui.button("Grunge Mask").clicked() {
-                                    mask_add_action = Some(MaskAddAction::Grunge);
-                                    ui.close_menu();
-                                }
-                            });
-    
-                            if let Some(action) = mask_add_action {
-                                let curv = self.project.curvature_map.clone();
-                                if let Some(layer) = self.project.layers.get_mut(act_idx) {
-                                    match action {
-                                        MaskAddAction::Black => {
-                                            layer.add_black_mask();
-                                            self.brush_engine.settings.target = PaintTarget::Mask;
-                                            self.brush_engine.settings.mask_paint_value = 1.0;
-                                        }
-                                        MaskAddAction::White => {
-                                            layer.add_white_mask();
-                                            self.brush_engine.settings.target = PaintTarget::Mask;
-                                            self.brush_engine.settings.mask_paint_value = 0.0;
-                                        }
-                                        MaskAddAction::Curvature => {
-                                            layer.add_curvature_mask(curv.as_ref());
-                                            self.brush_engine.settings.target = PaintTarget::Mask;
-                                        }
-                                        MaskAddAction::Grunge => {
-                                            layer.add_grunge_mask();
-                                            self.brush_engine.settings.target = PaintTarget::Mask;
-                                        }
-                                    }
-                                }
-                                self.project.rebuild_composite();
-                            }
-    
-                            if ui.button("Up").on_hover_text("Move layer up").clicked() {
-                                self.project.move_layer_up(act_idx);
-                                self.project.rebuild_composite();
-                            }
-                            if ui.button("Down").on_hover_text("Move layer down").clicked() {
-                                self.project.move_layer_down(act_idx);
-                                self.project.rebuild_composite();
-                            }
-                            if ui.button("Del").on_hover_text("Delete selected layer").clicked() {
-                                let prev_active = self.project.active_layer_idx;
-                                if let Some(removed_layer) = self.project.delete_layer(act_idx) {
-                                    self.history.push("Delete Layer", HistoryAction::DeleteLayer {
-                                        layer_idx: act_idx,
-                                        layer: Box::new(removed_layer),
-                                        prev_active,
-                                    });
-                                    self.status_message = format!("Deleted layer #{}", act_idx + 1);
-                                }
-                            }
-                        });
-    
-                        ui.separator();
-    
-                        // Dedicated Scroll Area for Layer Stack
-                        egui::ScrollArea::vertical()
-                            .id_source("layers_stack_scroll")
-                            .max_height(layers_pane_height - 90.0)
-                            .show(ui, |ui| {
-                                struct LayerCardSummary {
-                                    id: u64,
-                                    name: String,
-                                    parent_folder_id: Option<u64>,
-                                    folder_collapsed: bool,
-                                    visible: bool,
-                                    layer_type: LayerType,
-                                    fill_color: Vec4,
-                                    has_mask: bool,
-                                }
-
-                                let layer_count = self.project.layers.len();
-                                let summaries: Vec<LayerCardSummary> = self.project.layers.iter().map(|l| LayerCardSummary {
-                                    id: l.id,
-                                    name: l.name.clone(),
-                                    parent_folder_id: l.parent_folder_id,
-                                    folder_collapsed: l.folder_collapsed,
-                                    visible: l.visible,
-                                    layer_type: l.layer_type,
-                                    fill_color: l.fill_color,
-                                    has_mask: l.has_mask,
-                                }).collect();
-
-                                let folders: Vec<(u64, String)> = summaries.iter()
-                                    .filter(|l| l.layer_type == LayerType::Folder)
-                                    .map(|l| (l.id, l.name.clone()))
-                                    .collect();
-
-                                let mut reorder_request = None;
-                                let mut toggle_visible_idx = None;
-                                let mut toggle_collapse_idx = None;
-                                let mut add_mask_idx = None;
-                                let mut rename_request = None;
-                                let mut folder_change = None;
-
-                                let mouse_pos = ui.input(|i| i.pointer.hover_pos());
-                                let mouse_released = ui.input(|i| i.pointer.any_released());
-
-                                for rev_i in 0..layer_count {
-                                    let i = layer_count - 1 - rev_i;
-                                    let layer = &summaries[i];
-
-                                    // Check if this layer is inside a collapsed folder
-                                    if let Some(pid) = layer.parent_folder_id {
-                                        if summaries.iter().any(|l| l.id == pid && l.folder_collapsed) {
-                                            continue;
-                                        }
-                                    }
-
-                                    let is_active = self.project.active_layer_idx == i;
-                                    let _is_target_mat = is_active && self.brush_engine.settings.target == PaintTarget::Material;
-                                    let is_target_mask = is_active && self.brush_engine.settings.target == PaintTarget::Mask;
-
-                                    let card_bg = if is_active {
-                                        Color32::from_rgb(44, 48, 56)
-                                    } else {
-                                        Color32::from_rgb(26, 28, 32)
-                                    };
-                                    // Highlight the OUTLINE of the active layer card!
-                                    let card_stroke = if is_active {
-                                        egui::Stroke::new(2.0_f32, Color32::from_rgb(243, 94, 24))
-                                    } else {
-                                        egui::Stroke::new(1.0_f32, Color32::from_rgb(45, 48, 55))
-                                    };
-
-                                    let card_response = egui::Frame::none()
-                                        .fill(card_bg)
-                                        .stroke(card_stroke)
-                                        .rounding(4.0)
-                                        .inner_margin(egui::Margin::symmetric(6.0, 5.0))
-                                        .show(ui, |ui| {
-                                            ui.horizontal(|ui| {
-                                                // 0. Child indentation
-                                                if layer.parent_folder_id.is_some() {
-                                                    ui.add_space(14.0);
-                                                }
-
-                                                // 1. Drag & Drop Handle
-                                                let drag_label = egui::RichText::new("::")
-                                                    .color(if is_active { Color32::from_rgb(243, 94, 24) } else { Color32::from_rgb(120, 125, 135) })
-                                                    .strong();
-                                                let drag_resp = ui.add(egui::Label::new(drag_label).selectable(false).sense(egui::Sense::drag()))
-                                                    .on_hover_text("Drag to reorder layer in stack");
-                                                if drag_resp.drag_started() {
-                                                    self.dragged_layer_idx = Some(i);
-                                                }
-
-                                                // 2. Visibility toggle
-                                                let (eye_rect, eye_resp) = ui.allocate_exact_size(egui::vec2(15.0, 15.0), egui::Sense::click());
-                                                if let Some(icons) = opt_icons {
-                                                    let tint = if layer.visible {
-                                                        Color32::WHITE
-                                                    } else {
-                                                        Color32::from_rgba_unmultiplied(100, 105, 115, 110)
-                                                    };
-                                                    ui.painter().image(
-                                                        icons.layer_eye.id(),
-                                                        eye_rect,
-                                                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                                                        tint,
-                                                    );
-                                                } else {
-                                                    let eye_icon = if layer.visible { "[o]" } else { "[-]" };
-                                                    let eye_color = if layer.visible { Color32::from_rgb(220, 225, 235) } else { Color32::from_rgb(110, 115, 125) };
-                                                    ui.painter().text(eye_rect.center(), egui::Align2::CENTER_CENTER, eye_icon, egui::FontId::proportional(11.0), eye_color);
-                                                }
-                                                if eye_resp.on_hover_text("Toggle Layer Visibility").clicked() {
-                                                    toggle_visible_idx = Some(i);
-                                                }
-
-                                                // 3. Type badge & Folder Chevron
-                                                if layer.layer_type == LayerType::Folder {
-                                                    let chev = if layer.folder_collapsed { "[+]" } else { "[-]" };
-                                                    if ui.add(egui::Label::new(egui::RichText::new(chev).color(Color32::from_rgb(243, 156, 18))).selectable(false).sense(egui::Sense::click())).on_hover_text("Expand/collapse folder").clicked() {
-                                                        toggle_collapse_idx = Some(i);
-                                                    }
-                                                }
-                                                // 3. Dual Swatch Thumbnails: Material Swatch & Mask Swatch (Substance Painter 1:1)
-                                                // 3a. Material Swatch Thumbnail
-                                                let (mat_rect, mat_resp) = ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::click());
-                                                let mat_bg = match layer.layer_type {
-                                                    LayerType::Fill => Color32::from_rgb(
-                                                        (layer.fill_color.x * 255.0) as u8,
-                                                        (layer.fill_color.y * 255.0) as u8,
-                                                        (layer.fill_color.z * 255.0) as u8,
-                                                    ),
-                                                    LayerType::Paint => Color32::from_rgb(46, 52, 64),
-                                                    LayerType::Folder => Color32::from_rgb(160, 115, 35),
-                                                };
-                                                let mat_stroke = if is_active && !is_target_mask {
-                                                    egui::Stroke::new(1.8_f32, Color32::from_rgb(243, 94, 24))
-                                                } else {
-                                                    egui::Stroke::new(1.0_f32, Color32::from_rgb(58, 62, 72))
-                                                };
-                                                ui.painter().rect(mat_rect, 2.0, mat_bg, mat_stroke);
-                                                if let Some(icons) = opt_icons {
-                                                    let icon_tex = match layer.layer_type {
-                                                        LayerType::Paint => Some(icons.layer_paint.id()),
-                                                        LayerType::Folder => Some(icons.layer_folder.id()),
-                                                        LayerType::Fill => Some(icons.layer_fill.id()),
-                                                    };
-                                                    if let Some(tex) = icon_tex {
-                                                        let icon_inset = egui::Rect::from_center_size(mat_rect.center(), egui::vec2(12.0, 12.0));
-                                                        ui.painter().image(
-                                                            tex,
-                                                            icon_inset,
-                                                            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                                                            Color32::WHITE,
-                                                        );
-                                                    }
-                                                } else {
-                                                    if layer.layer_type == LayerType::Paint {
-                                                        ui.painter().text(mat_rect.center(), egui::Align2::CENTER_CENTER, "P", egui::FontId::proportional(10.0), Color32::WHITE);
-                                                    } else if layer.layer_type == LayerType::Folder {
-                                                        ui.painter().text(mat_rect.center(), egui::Align2::CENTER_CENTER, "D", egui::FontId::proportional(10.0), Color32::WHITE);
-                                                    }
-                                                }
-                                                if mat_resp.on_hover_text("Target Material (Click to activate material editing)").clicked() {
-                                                    self.project.active_layer_idx = i;
-                                                    self.brush_engine.settings.target = PaintTarget::Material;
-                                                }
-
-                                                // 3b. Mask Swatch Thumbnail (if layer has mask)
-                                                if layer.has_mask {
-                                                    ui.painter().text(
-                                                        ui.cursor().min + egui::vec2(2.0, 9.0),
-                                                        egui::Align2::CENTER_CENTER,
-                                                        "-",
-                                                        egui::FontId::proportional(10.0),
-                                                        Color32::from_rgb(110, 115, 125),
-                                                    );
-                                                    let (mask_rect, mask_resp) = ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::click());
-                                                    let mask_stroke = if is_active && is_target_mask {
-                                                        egui::Stroke::new(1.8_f32, Color32::from_rgb(243, 94, 24))
-                                                    } else {
-                                                        egui::Stroke::new(1.0_f32, Color32::from_rgb(65, 70, 80))
-                                                    };
-                                                    ui.painter().rect(mask_rect, 2.0, Color32::from_rgb(20, 22, 26), mask_stroke);
-                                                    // Draw small mask shape
-                                                    ui.painter().circle_filled(mask_rect.center(), 5.0, Color32::from_rgb(235, 235, 240));
-                                                    if mask_resp.on_hover_text("Target Mask (Click to activate mask editing)").clicked() {
-                                                        self.project.active_layer_idx = i;
-                                                        self.brush_engine.settings.target = PaintTarget::Mask;
-                                                    }
-                                                } else {
-                                                    if ui.small_button("+M").on_hover_text("Add layer mask").clicked() {
-                                                        add_mask_idx = Some(i);
-                                                        self.project.active_layer_idx = i;
-                                                        self.brush_engine.settings.target = PaintTarget::Mask;
-                                                    }
-                                                }
-
-                                                // 4. Layer Name & Inline Renaming
-                                                if self.renaming_layer_idx == Some(i) {
-                                                    let text_res = ui.add(egui::TextEdit::singleline(&mut self.rename_buffer).desired_width(110.0));
-                                                    text_res.request_focus();
-                                                    if ui.input(|inp| inp.key_pressed(egui::Key::Enter)) || ui.small_button("OK").clicked() {
-                                                        if !self.rename_buffer.trim().is_empty() {
-                                                            rename_request = Some((i, self.rename_buffer.trim().to_string()));
-                                                        }
-                                                        self.renaming_layer_idx = None;
-                                                    }
-                                                    if ui.input(|inp| inp.key_pressed(egui::Key::Escape)) || ui.small_button("X").clicked() {
-                                                        self.renaming_layer_idx = None;
-                                                    }
-                                                } else {
-                                                    let name_color = if is_active {
-                                                        Color32::from_rgb(255, 255, 255)
-                                                    } else {
-                                                        Color32::from_rgb(195, 200, 210)
-                                                    };
-                                                    let name_text = egui::RichText::new(&layer.name)
-                                                        .color(name_color)
-                                                        .strong();
-                                                    let name_resp = ui.add(egui::Label::new(name_text).selectable(false).sense(egui::Sense::click_and_drag()))
-                                                        .on_hover_text("Click to select material • Drag to reorder • Double-click to rename");
-
-                                                    if name_resp.drag_started() {
-                                                        self.dragged_layer_idx = Some(i);
-                                                    }
-                                                    if name_resp.clicked() {
-                                                        self.project.active_layer_idx = i;
-                                                        self.brush_engine.settings.target = PaintTarget::Material;
-                                                    }
-                                                    if name_resp.double_clicked() {
-                                                        self.renaming_layer_idx = Some(i);
-                                                        self.rename_buffer = layer.name.clone();
-                                                    }
-
-                                                    // Small edit button on active layer
-                                                    if is_active {
-                                                        if ui.small_button("Edit").on_hover_text("Rename layer").clicked() {
-                                                            self.renaming_layer_idx = Some(i);
-                                                            self.rename_buffer = layer.name.clone();
-                                                        }
-                                                    }
-                                                }
-
-                                                // 6. Folder membership (Move in/out)
-                                                if layer.layer_type != LayerType::Folder && !folders.is_empty() {
-                                                    let cur_layer_id = layer.id;
-                                                    if layer.parent_folder_id.is_some() {
-                                                        if ui.small_button("^").on_hover_text("Remove from folder").clicked() {
-                                                            folder_change = Some((i, None));
-                                                        }
-                                                    } else {
-                                                        ui.menu_button(">", |ui| {
-                                                            for (fid, fname) in &folders {
-                                                                if *fid != cur_layer_id && ui.button(fname).clicked() {
-                                                                    folder_change = Some((i, Some(*fid)));
-                                                                    ui.close_menu();
-                                                                }
-                                                            }
-                                                        });
-                                                    }
-                                                }
-                                            });
-                                        });
-
-                                    let card_rect = card_response.response.rect;
-
-                                    // Active layer left accent indicator bar
-                                    if is_active {
-                                        ui.painter().rect_filled(
-                                            egui::Rect::from_min_max(
-                                                card_rect.min,
-                                                egui::pos2(card_rect.min.x + 3.5, card_rect.max.y),
-                                            ),
-                                            2.0,
-                                            Color32::from_rgb(243, 94, 24),
-                                        );
-                                    }
-
-                                    // Drag-and-drop drop zone detection & guidelines
-                                    if let Some(dragged_from) = self.dragged_layer_idx {
-                                        if let Some(pos) = mouse_pos {
-                                            if card_rect.contains(pos) && dragged_from != i {
-                                                // Draw insertion highlight line
-                                                let is_upper = pos.y < card_rect.center().y;
-                                                let line_y = if is_upper { card_rect.min.y } else { card_rect.max.y };
-                                                ui.painter().line_segment(
-                                                    [egui::pos2(card_rect.min.x, line_y), egui::pos2(card_rect.max.x, line_y)],
-                                                    egui::Stroke::new(2.5_f32, Color32::from_rgb(243, 94, 24)),
-                                                );
-
-                                                if mouse_released {
-                                                    reorder_request = Some((dragged_from, i));
-                                                }
-                                            }
-                                        }
-                                    }
-
-                                    ui.add_space(2.0);
-                                }
-
-                                if mouse_released {
-                                    self.dragged_layer_idx = None;
-                                }
-
-                                if let Some((from, to)) = reorder_request {
-                                    self.project.reorder_layer(from, to);
-                                    self.status_message = format!("Reordered layer {} -> {}", from, to);
-                                    self.dragged_layer_idx = None;
-                                }
-
-                                if let Some(idx) = toggle_visible_idx {
-                                    if let Some(l) = self.project.layers.get_mut(idx) {
-                                        l.visible = !l.visible;
-                                    }
-                                    self.project.rebuild_composite();
-                                    self.project.gpu_sync_needed = true;
-                                }
-                                if let Some(idx) = toggle_collapse_idx {
-                                    if let Some(l) = self.project.layers.get_mut(idx) {
-                                        l.folder_collapsed = !l.folder_collapsed;
-                                    }
-                                }
-                                if let Some(idx) = add_mask_idx {
-                                    if let Some(l) = self.project.layers.get_mut(idx) {
-                                        l.add_white_mask();
-                                    }
-                                    self.project.rebuild_composite();
-                                    self.project.gpu_sync_needed = true;
-                                }
-                                if let Some((idx, name)) = rename_request {
-                                    if let Some(l) = self.project.layers.get_mut(idx) {
-                                        l.name = name;
-                                    }
-                                }
-                                if let Some((idx, pid)) = folder_change {
-                                    if let Some(l) = self.project.layers.get_mut(idx) {
-                                        l.parent_folder_id = pid;
-                                    }
-                                    self.project.rebuild_composite();
-                                    self.project.gpu_sync_needed = true;
-                                }
-                            });
-                    });
-    
-                    ui.add_space(4.0);
-                    ui.separator();
-                    ui.add_space(4.0);
-    
-                    // ==========================================
-                    // 2. DEDICATED PROPERTIES PANEL (BOTTOM)
-                    // ==========================================
-                    let act_idx = self.project.active_layer_idx;
-                    let is_mask_editing = self.brush_engine.settings.target == PaintTarget::Mask;
-    
-                    let (has_layer, prop_title) = if let Some(layer) = self.project.layers.get(act_idx) {
-                        let title = if is_mask_editing {
-                            format!("Properties - Mask: {}", layer.name)
-                        } else {
-                            match layer.layer_type {
-                                LayerType::Fill => format!("Properties - Fill: {}", layer.name),
-                                LayerType::Paint => format!("Properties - Paint: {}", layer.name),
-                                LayerType::Folder => format!("Properties - Folder: {}", layer.name),
-                            }
-                        };
-                        (true, title)
-                    } else {
-                        (false, String::new())
-                    };
-
-                    if has_layer {
-                        let mut prop_changed = false;
-                        let mut mask_changed = false;
-                        let mut open_shelf_picker = None;
-                        let mut import_to_shelf_and_assign = None;
-                        ui.heading(&prop_title);
-                        ui.add_space(2.0);
-
-                        egui::ScrollArea::vertical()
-                            .id_source("properties_panel_scroll")
-                            .show(ui, |ui| {
-                                let (lower_layers, higher_layers) = self.project.layers.split_at_mut(act_idx);
-                                let available_anchors: Vec<String> = lower_layers
-                                    .iter()
-                                    .filter_map(|l| l.anchor_point.clone())
-                                    .collect();
-                                let anchor_refs: Vec<crate::layer::AnchorLayerRef<'_>> = lower_layers
-                                    .iter()
-                                    .filter_map(|l| l.as_anchor_ref())
-                                    .collect();
-                                let layer = &mut higher_layers[0];
-                                let curv_ref = self.project.curvature_map.as_ref();
-                                let ao_ref = self.project.ao_map.as_ref();
-                                let pos_ref = self.project.position_map.as_ref();
-                                let wn_ref = self.project.world_space_normal_map.as_ref();
-                                let id_ref = self.project.id_map.as_ref();
-
-                                ui.horizontal(|ui| {
-                                    ui.label("Name:");
-                                    if ui.text_edit_singleline(&mut layer.name).changed() {
-                                        prop_changed = true;
-                                    }
-                                    ui.add_space(8.0);
-                                    let mut is_anchor = layer.anchor_point.is_some();
-                                    if ui.checkbox(&mut is_anchor, "Anchor Point").on_hover_text("Expose layer channels as an Anchor Point for procedural mask referencing in layers above").changed() {
-                                        if is_anchor {
-                                            layer.anchor_point = Some(layer.name.clone());
-                                        } else {
-                                            layer.anchor_point = None;
-                                        }
-                                        prop_changed = true;
-                                    }
-                                    if let Some(ref mut name) = layer.anchor_point {
-                                        ui.label("Tag:");
-                                        if ui.text_edit_singleline(name).changed() {
-                                            prop_changed = true;
-                                        }
-                                    }
-                                });
-                                ui.add_space(4.0);
-                                ui.separator();
-                                ui.add_space(4.0);
-
-                                if is_mask_editing {
-                                    let mut prop_changed = false;
-                                    // --- PROPERTIES: MASK (Substance 3D Painter Non-Destructive Effect Stack) ---
-                                    ui.group(|ui| {
-                                        ui.strong("Mask Effect Stack (Non-Destructive):");
-                                        ui.horizontal_wrapped(|ui| {
-                                            if ui.button("+ Add Fill").on_hover_text("Add procedural noise or generator fill to mask").clicked() {
-                                                layer.add_mask_fill_effect_advanced(ProceduralGenerator::PerlinNoise, curv_ref, ao_ref, pos_ref, wn_ref);
-                                                prop_changed = true;
-                                            }
-                                            if ui.button("+ Add Paint").on_hover_text("Add paint modifier to mask").clicked() {
-                                                layer.add_mask_paint_effect(curv_ref);
-                                                prop_changed = true;
-                                            }
-                                            egui::ComboBox::from_id_source("add_generator_quick_menu")
-                                                .selected_text("+ Add Generator...")
-                                                .show_ui(ui, |ui| {
-                                                    if ui.selectable_label(false, "Curvature Edge Wear").on_hover_text("Substance convex edge wear & paint chipping").clicked() {
-                                                        layer.add_mask_generator_curvature_wear(curv_ref, ao_ref, pos_ref, wn_ref);
-                                                        prop_changed = true;
-                                                    }
-                                                    if ui.selectable_label(false, "Cavity Dirt (AO)").on_hover_text("Substance concave crevice grime & sediment accumulation").clicked() {
-                                                        layer.add_mask_generator_cavity_dirt(curv_ref, ao_ref, pos_ref, wn_ref);
-                                                        prop_changed = true;
-                                                    }
-                                                    if ui.selectable_label(false, "Directional Dust (+Y)").on_hover_text("Sky-facing dust settling into upward concave pockets").clicked() {
-                                                        layer.add_mask_generator_directional_dust(curv_ref, ao_ref, pos_ref, wn_ref);
-                                                        prop_changed = true;
-                                                    }
-                                                    if ui.selectable_label(false, "Ground Mud & Splash").on_hover_text("Height-based ground mud accumulation with organic splatter").clicked() {
-                                                        layer.add_mask_generator_ground_dirt(curv_ref, ao_ref, pos_ref, wn_ref);
-                                                        prop_changed = true;
-                                                    }
-                                                    if ui.selectable_label(false, "Mask Editor (Compound)").on_hover_text("Compound mask editor fusing all baked mesh maps").clicked() {
-                                                        layer.add_mask_generator_mask_editor(curv_ref, ao_ref, pos_ref, wn_ref);
-                                                        prop_changed = true;
-                                                    }
-                                                });
-                                            if ui.button("+ Color Select").on_hover_text("Isolate submesh or UV island using baked ID Map").clicked() {
-                                                layer.add_mask_color_selection_effect([1.0, 0.0, 0.0], 0.1, 0.05);
-                                                prop_changed = true;
-                                            }
-                                            if ui.button("+ Anchor").on_hover_text("Reference channel from layer below").clicked() {
-                                                let def_name = available_anchors.first().cloned().unwrap_or_else(|| "Anchor".to_string());
-                                                layer.add_mask_anchor_effect(def_name, crate::channel::ChannelType::BaseColor);
-                                                prop_changed = true;
-                                            }
-                                            if ui.button("+ Add Blur").on_hover_text("Add gaussian blur filter to mask").clicked() {
-                                                layer.add_mask_filter_blur(3.0, curv_ref);
-                                                prop_changed = true;
-                                            }
-                                            if ui.button("+ Add Levels").on_hover_text("Add histogram levels filter to mask").clicked() {
-                                                layer.add_mask_filter_levels(curv_ref);
-                                                prop_changed = true;
-                                            }
-                                            if ui.button("+ Add Sharpen").on_hover_text("Add sharpen filter to mask").clicked() {
-                                                layer.add_mask_filter_sharpen(1.0, curv_ref);
-                                                prop_changed = true;
-                                            }
-                                            if ui.button("+ Add High Pass").on_hover_text("Add high-pass filter to mask").clicked() {
-                                                layer.add_mask_filter_high_pass(2.0, curv_ref);
-                                                prop_changed = true;
-                                            }
-                                            if ui.button("+ Add Contrast").on_hover_text("Add contrast & brightness filter to mask").clicked() {
-                                                layer.add_mask_filter_contrast(1.2, 0.0, curv_ref);
-                                                prop_changed = true;
-                                            }
-                                            if ui.button("+ Add Invert").on_hover_text("Add invert filter to mask").clicked() {
-                                                layer.add_mask_filter_invert(curv_ref);
-                                                prop_changed = true;
-                                            }
-
-                                            egui::ComboBox::from_id_source("smart_mask_quick_add")
-                                                .selected_text("+ Smart Mask...")
-                                                .show_ui(ui, |ui| {
-                                                    for sm in crate::smart_materials::SmartMaterialLibrary::smart_masks() {
-                                                        if ui.selectable_label(false, sm.name).on_hover_text(sm.description).clicked() {
-                                                            crate::smart_materials::SmartMaterialLibrary::apply_smart_mask_advanced(
-                                                                sm.id,
-                                                                layer,
-                                                                curv_ref,
-                                                                ao_ref,
-                                                                pos_ref,
-                                                                wn_ref,
-                                                            );
-                                                            prop_changed = true;
-                                                        }
-                                                    }
-                                                });
-                                        });
-
-                                        ui.add_space(4.0);
-                                        ui.horizontal(|ui| {
-                                            if ui.small_button("Clear White").clicked() {
-                                                layer.clear_mask(1.0);
-                                                prop_changed = true;
-                                            }
-                                            if ui.small_button("Clear Black").clicked() {
-                                                layer.clear_mask(0.0);
-                                                prop_changed = true;
-                                            }
-                                            if ui.small_button("Invert Base").clicked() {
-                                                layer.invert_mask();
-                                                prop_changed = true;
-                                            }
-                                            if ui.small_button("Remove Mask").clicked() {
-                                                layer.remove_mask();
-                                                self.brush_engine.settings.target = PaintTarget::Material;
-                                                prop_changed = true;
-                                            }
-                                        });
-                                    });
-
-                                    ui.add_space(4.0);
-
-                                    // Render mask effects stack list (top effect evaluates on top)
-                                    if layer.mask_effects.is_empty() {
-                                        ui.group(|ui| {
-                                            ui.label(egui::RichText::new("No modifiers in mask stack. Direct brush painting or whole-mask actions will apply to base mask buffer. Click '+ Add Fill' to add non-destructive noise.").small().italics().color(Color32::from_rgb(160, 165, 175)));
-                                        });
-                                    } else {
-                                        let eff_count = layer.mask_effects.len();
-                                        let mut remove_eff_id = None;
-                                        let mut reorder_eff = None;
-
-                                        for rev_idx in 0..eff_count {
-                                            let idx = eff_count - 1 - rev_idx;
-                                            let eff = &mut layer.mask_effects[idx];
-                                            let eff_id = eff.id;
-
-                                            ui.group(|ui| {
-                                                ui.horizontal(|ui| {
-                                                    if ui.checkbox(&mut eff.visible, "").changed() {
-                                                        prop_changed = true;
-                                                    }
-                                                    ui.strong(&eff.name);
-
-                                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                                        if ui.small_button("X").on_hover_text("Delete effect").clicked() {
-                                                            remove_eff_id = Some(eff_id);
-                                                        }
-                                                        if idx > 0 && ui.small_button("v").on_hover_text("Move down").clicked() {
-                                                            reorder_eff = Some((eff_id, false));
-                                                        }
-                                                        if idx + 1 < eff_count && ui.small_button("^").on_hover_text("Move up").clicked() {
-                                                            reorder_eff = Some((eff_id, true));
-                                                        }
-                                                    });
-                                                });
-
-                                                ui.horizontal(|ui| {
-                                                    ui.label("Blend:");
-                                                    egui::ComboBox::from_id_source(format!("mask_eff_blend_{}", eff_id))
-                                                        .selected_text(eff.blend_mode.name())
-                                                        .width(90.0)
-                                                        .show_ui(ui, |ui| {
-                                                            let modes = [
-                                                                BlendMode::Normal,
-                                                                BlendMode::Multiply,
-                                                                BlendMode::Screen,
-                                                                BlendMode::Overlay,
-                                                                BlendMode::Add,
-                                                                BlendMode::Subtract,
-                                                                BlendMode::Darken,
-                                                                BlendMode::Lighten,
-                                                            ];
-                                                            for m in modes {
-                                                                if ui.selectable_value(&mut eff.blend_mode, m, m.name()).clicked() {
-                                                                    prop_changed = true;
-                                                                }
-                                                            }
-                                                        });
-                                                    ui.label("Opacity:");
-                                                    if ui.add(egui::Slider::new(&mut eff.opacity, 0.0..=1.0)).changed() {
-                                                        prop_changed = true;
-                                                    }
-                                                });
-
-                                                // Parameter controls per effect type
-                                                match &mut eff.effect_type {
-                                                    crate::layer::MaskEffectType::Fill {
-                                                        ref mut generator,
-                                                        ref mut scale,
-                                                        ref mut contrast,
-                                                        ref mut invert,
-                                                        ref mut balance,
-                                                    } => {
-                                                        ui.horizontal(|ui| {
-                                                            ui.label("Generator:");
-                                                            egui::ComboBox::from_id_source(format!("mask_eff_gen_{}", eff_id))
-                                                                .selected_text(generator.name())
-                                                                .show_ui(ui, |ui| {
-                                                                    for g in ProceduralGenerator::all() {
-                                                                        if ui.selectable_value(generator, *g, g.name()).clicked() {
-                                                                            prop_changed = true;
-                                                                        }
-                                                                    }
-                                                                });
-                                                        });
-                                                        ui.horizontal(|ui| {
-                                                            ui.label("Scale:");
-                                                            if ui.add(egui::Slider::new(scale, 0.5..=64.0).clamp_to_range(false)).changed() {
-                                                                prop_changed = true;
-                                                            }
-                                                        });
-                                                        ui.horizontal(|ui| {
-                                                            ui.label("Contrast:");
-                                                            if ui.add(egui::Slider::new(contrast, 0.1..=4.0)).changed() {
-                                                                prop_changed = true;
-                                                            }
-                                                        });
-                                                        ui.horizontal(|ui| {
-                                                            ui.label("Balance:");
-                                                            if ui.add(egui::Slider::new(balance, 0.0..=1.0)).changed() {
-                                                                prop_changed = true;
-                                                            }
-                                                        });
-                                                        if ui.checkbox(invert, "Invert Generator").changed() {
-                                                            prop_changed = true;
-                                                        }
-                                                    }
-                                                    crate::layer::MaskEffectType::FilterBlur { ref mut sigma } => {
-                                                        ui.horizontal(|ui| {
-                                                            ui.label("Blur Radius:");
-                                                            if ui.add(egui::Slider::new(sigma, 0.5..=20.0)).changed() {
-                                                                prop_changed = true;
-                                                            }
-                                                        });
-                                                    }
-                                                    crate::layer::MaskEffectType::FilterLevels {
-                                                        ref mut in_black,
-                                                        ref mut in_white,
-                                                        ref mut gamma,
-                                                        ref mut out_black,
-                                                        ref mut out_white,
-                                                    } => {
-                                                        ui.horizontal(|ui| {
-                                                            ui.label("In Black:");
-                                                            if ui.add(egui::Slider::new(in_black, 0.0..=1.0)).changed() { prop_changed = true; }
-                                                        });
-                                                        ui.horizontal(|ui| {
-                                                            ui.label("In White:");
-                                                            if ui.add(egui::Slider::new(in_white, 0.0..=1.0)).changed() { prop_changed = true; }
-                                                        });
-                                                        ui.horizontal(|ui| {
-                                                            ui.label("Gamma:");
-                                                            if ui.add(egui::Slider::new(gamma, 0.1..=5.0)).changed() { prop_changed = true; }
-                                                        });
-                                                        ui.horizontal(|ui| {
-                                                            ui.label("Out Black:");
-                                                            if ui.add(egui::Slider::new(out_black, 0.0..=1.0)).changed() { prop_changed = true; }
-                                                        });
-                                                        ui.horizontal(|ui| {
-                                                            ui.label("Out White:");
-                                                            if ui.add(egui::Slider::new(out_white, 0.0..=1.0)).changed() { prop_changed = true; }
-                                                        });
-                                                    }
-                                                    crate::layer::MaskEffectType::FilterSharpen { ref mut strength } => {
-                                                        ui.horizontal(|ui| {
-                                                            ui.label("Sharpen Strength:");
-                                                            if ui.add(egui::Slider::new(strength, 0.1..=5.0)).changed() { prop_changed = true; }
-                                                        });
-                                                    }
-                                                    crate::layer::MaskEffectType::FilterHighPass { ref mut radius } => {
-                                                        ui.horizontal(|ui| {
-                                                            ui.label("High Pass Radius:");
-                                                            if ui.add(egui::Slider::new(radius, 0.5..=20.0)).changed() { prop_changed = true; }
-                                                        });
-                                                    }
-                                                    crate::layer::MaskEffectType::FilterContrast { ref mut contrast, ref mut brightness } => {
-                                                        ui.horizontal(|ui| {
-                                                            ui.label("Contrast:");
-                                                            if ui.add(egui::Slider::new(contrast, 0.1..=4.0)).changed() { prop_changed = true; }
-                                                        });
-                                                        ui.horizontal(|ui| {
-                                                            ui.label("Brightness:");
-                                                            if ui.add(egui::Slider::new(brightness, -1.0..=1.0)).changed() { prop_changed = true; }
-                                                        });
-                                                    }
-                                                    crate::layer::MaskEffectType::FilterInvert => {
-                                                        ui.label("Filter: Inverts lower layers in mask stack.");
-                                                    }
-                                                    crate::layer::MaskEffectType::Paint { ref mut buffer, ref mut alpha } => {
-                                                        let is_active = layer.active_mask_effect_id == Some(eff_id);
-                                                        ui.horizontal(|ui| {
-                                                            if is_active {
-                                                                ui.label(egui::RichText::new("Active Paint Target").color(Color32::from_rgb(80, 220, 120)).strong());
-                                                            } else if ui.small_button("Set Active Paint Target").clicked() {
-                                                                layer.active_mask_effect_id = Some(eff_id);
-                                                                prop_changed = true;
-                                                            }
-                                                            if ui.small_button("Clear Paint").clicked() {
-                                                                buffer.data.fill(0.0);
-                                                                alpha.data.fill(0.0);
-                                                                prop_changed = true;
-                                                            }
-                                                        });
-                                                    }
-                                                    crate::layer::MaskEffectType::ColorSelection { ref mut target_color, ref mut tolerance, ref mut softness } => {
-                                                        ui.horizontal(|ui| {
-                                                            ui.label("ID Color:");
-                                                            let mut col_arr = *target_color;
-                                                            if ui.color_edit_button_rgb(&mut col_arr).changed() {
-                                                                *target_color = col_arr;
-                                                                prop_changed = true;
-                                                            }
-                                                            ui.label(format!("RGB: {:.2}, {:.2}, {:.2}", target_color[0], target_color[1], target_color[2]));
-                                                        });
-                                                        ui.horizontal(|ui| {
-                                                            ui.label("Tolerance:");
-                                                            if ui.add(egui::Slider::new(tolerance, 0.0..=1.0)).changed() {
-                                                                prop_changed = true;
-                                                            }
-                                                        });
-                                                        ui.horizontal(|ui| {
-                                                            ui.label("Softness:");
-                                                            if ui.add(egui::Slider::new(softness, 0.0..=0.5)).changed() {
-                                                                prop_changed = true;
-                                                            }
-                                                        });
-                                                        ui.label(egui::RichText::new("Isolates submeshes or UV islands via baked ID Map.").small().color(Color32::from_rgb(160, 165, 175)));
-                                                    }
-                                                    crate::layer::MaskEffectType::AnchorReference { ref mut anchor_name, ref mut source_channel, ref mut blur, ref mut invert } => {
-                                                        ui.horizontal(|ui| {
-                                                            ui.label("Anchor Layer:");
-                                                            egui::ComboBox::from_id_source(format!("anchor_name_sel_{}", eff_id))
-                                                                .selected_text(if anchor_name.is_empty() { "Select Anchor..." } else { anchor_name.as_str() })
-                                                                .show_ui(ui, |ui| {
-                                                                    if available_anchors.is_empty() {
-                                                                        ui.label(egui::RichText::new("(No anchor points exposed below)").italics().small());
-                                                                    } else {
-                                                                        for anc in &available_anchors {
-                                                                            if ui.selectable_label(anchor_name == anc, anc).clicked() {
-                                                                                *anchor_name = anc.clone();
-                                                                                prop_changed = true;
-                                                                            }
-                                                                        }
-                                                                    }
-                                                                });
-                                                        });
-                                                        ui.horizontal(|ui| {
-                                                            ui.label("Source Channel:");
-                                                            egui::ComboBox::from_id_source(format!("anchor_ch_sel_{}", eff_id))
-                                                                .selected_text(source_channel.name())
-                                                                .show_ui(ui, |ui| {
-                                                                    let channels = [
-                                                                        crate::channel::ChannelType::BaseColor,
-                                                                        crate::channel::ChannelType::Roughness,
-                                                                        crate::channel::ChannelType::Metallic,
-                                                                        crate::channel::ChannelType::Height,
-                                                                        crate::channel::ChannelType::Emission,
-                                                                        crate::channel::ChannelType::Opacity,
-                                                                    ];
-                                                                    for ch in channels {
-                                                                        if ui.selectable_label(*source_channel == ch, ch.name()).clicked() {
-                                                                            *source_channel = ch;
-                                                                            prop_changed = true;
-                                                                        }
-                                                                    }
-                                                                });
-                                                        });
-                                                        ui.horizontal(|ui| {
-                                                            ui.label("Blur:");
-                                                            if ui.add(egui::Slider::new(blur, 0.0..=20.0)).changed() {
-                                                                prop_changed = true;
-                                                            }
-                                                        });
-                                                        if ui.checkbox(invert, "Invert Anchor").changed() {
-                                                            prop_changed = true;
-                                                        }
-                                                    }
-                                                    crate::layer::MaskEffectType::GeneratorCurvatureWear {
-                                                        ref mut wear_level,
-                                                        ref mut edge_width,
-                                                        ref mut edge_contrast,
-                                                        ref mut grunge_amount,
-                                                        ref mut grunge_scale,
-                                                        ref mut ao_inhibit,
-                                                        ref mut invert,
-                                                    } => {
-                                                        ui.label(egui::RichText::new("Substance Curvature Edge Wear").strong().color(Color32::from_rgb(220, 180, 80)));
-                                                        ui.horizontal(|ui| {
-                                                            ui.label("Wear Level:");
-                                                            if ui.add(egui::Slider::new(wear_level, 0.0..=1.0)).changed() { prop_changed = true; }
-                                                        });
-                                                        ui.horizontal(|ui| {
-                                                            ui.label("Edge Width:");
-                                                            if ui.add(egui::Slider::new(edge_width, 0.1..=4.0)).changed() { prop_changed = true; }
-                                                        });
-                                                        ui.horizontal(|ui| {
-                                                            ui.label("Edge Contrast:");
-                                                            if ui.add(egui::Slider::new(edge_contrast, 0.5..=5.0)).changed() { prop_changed = true; }
-                                                        });
-                                                        ui.horizontal(|ui| {
-                                                            ui.label("Grunge Breakup:");
-                                                            if ui.add(egui::Slider::new(grunge_amount, 0.0..=1.0)).changed() { prop_changed = true; }
-                                                        });
-                                                        ui.horizontal(|ui| {
-                                                            ui.label("Grunge Scale:");
-                                                            if ui.add(egui::Slider::new(grunge_scale, 1.0..=64.0).clamp_to_range(false)).changed() { prop_changed = true; }
-                                                        });
-                                                        ui.horizontal(|ui| {
-                                                            ui.label("AO Inhibit (Cavities):");
-                                                            if ui.add(egui::Slider::new(ao_inhibit, 0.0..=1.0)).changed() { prop_changed = true; }
-                                                        });
-                                                        if ui.checkbox(invert, "Invert Wear").changed() { prop_changed = true; }
-                                                    }
-                                                    crate::layer::MaskEffectType::GeneratorCavityDirt {
-                                                        ref mut dirt_level,
-                                                        ref mut dirt_contrast,
-                                                        ref mut dirt_reach,
-                                                        ref mut grunge_clumping,
-                                                        ref mut grunge_scale,
-                                                        ref mut invert,
-                                                    } => {
-                                                        ui.label(egui::RichText::new("Substance Cavity & Crevice Grime (AO)").strong().color(Color32::from_rgb(180, 140, 100)));
-                                                        ui.horizontal(|ui| {
-                                                            ui.label("Dirt Level:");
-                                                            if ui.add(egui::Slider::new(dirt_level, 0.0..=1.0)).changed() { prop_changed = true; }
-                                                        });
-                                                        ui.horizontal(|ui| {
-                                                            ui.label("Dirt Contrast:");
-                                                            if ui.add(egui::Slider::new(dirt_contrast, 0.5..=5.0)).changed() { prop_changed = true; }
-                                                        });
-                                                        ui.horizontal(|ui| {
-                                                            ui.label("Dirt Reach / Bleed:");
-                                                            if ui.add(egui::Slider::new(dirt_reach, 0.1..=4.0)).changed() { prop_changed = true; }
-                                                        });
-                                                        ui.horizontal(|ui| {
-                                                            ui.label("Grunge Clumping:");
-                                                            if ui.add(egui::Slider::new(grunge_clumping, 0.0..=1.0)).changed() { prop_changed = true; }
-                                                        });
-                                                        ui.horizontal(|ui| {
-                                                            ui.label("Grunge Scale:");
-                                                            if ui.add(egui::Slider::new(grunge_scale, 1.0..=64.0).clamp_to_range(false)).changed() { prop_changed = true; }
-                                                        });
-                                                        if ui.checkbox(invert, "Invert Cavity").changed() { prop_changed = true; }
-                                                    }
-                                                    crate::layer::MaskEffectType::GeneratorDirectionalDust {
-                                                        ref mut dust_direction,
-                                                        ref mut dust_level,
-                                                        ref mut angle_tolerance,
-                                                        ref mut cavity_trap,
-                                                        ref mut grunge_breakup,
-                                                        ref mut grunge_scale,
-                                                    } => {
-                                                        ui.label(egui::RichText::new("Substance Directional Dust (World Normal)").strong().color(Color32::from_rgb(200, 200, 180)));
-                                                        ui.horizontal(|ui| {
-                                                            ui.label("Direction:");
-                                                            if ui.selectable_label(dust_direction[1] > 0.5, "Up (+Y)").clicked() {
-                                                                *dust_direction = [0.0, 1.0, 0.0];
-                                                                prop_changed = true;
-                                                            }
-                                                            if ui.selectable_label(dust_direction[1] < -0.5, "Down (-Y)").clicked() {
-                                                                *dust_direction = [0.0, -1.0, 0.0];
-                                                                prop_changed = true;
-                                                            }
-                                                            if ui.selectable_label(dust_direction[2] > 0.5, "Forward (+Z)").clicked() {
-                                                                *dust_direction = [0.0, 0.0, 1.0];
-                                                                prop_changed = true;
-                                                            }
-                                                            if ui.selectable_label(dust_direction[0] > 0.5, "Right (+X)").clicked() {
-                                                                *dust_direction = [1.0, 0.0, 0.0];
-                                                                prop_changed = true;
-                                                            }
-                                                        });
-                                                        ui.horizontal(|ui| {
-                                                            ui.label("Dust Level:");
-                                                            if ui.add(egui::Slider::new(dust_level, 0.0..=1.0)).changed() { prop_changed = true; }
-                                                        });
-                                                        ui.horizontal(|ui| {
-                                                            ui.label("Angle Spread:");
-                                                            if ui.add(egui::Slider::new(angle_tolerance, 0.1..=2.0)).changed() { prop_changed = true; }
-                                                        });
-                                                        ui.horizontal(|ui| {
-                                                            ui.label("Cavity Trap:");
-                                                            if ui.add(egui::Slider::new(cavity_trap, 0.0..=1.0)).changed() { prop_changed = true; }
-                                                        });
-                                                        ui.horizontal(|ui| {
-                                                            ui.label("Grunge Breakup:");
-                                                            if ui.add(egui::Slider::new(grunge_breakup, 0.0..=1.0)).changed() { prop_changed = true; }
-                                                        });
-                                                        ui.horizontal(|ui| {
-                                                            ui.label("Grunge Scale:");
-                                                            if ui.add(egui::Slider::new(grunge_scale, 1.0..=64.0).clamp_to_range(false)).changed() { prop_changed = true; }
-                                                        });
-                                                    }
-                                                    crate::layer::MaskEffectType::GeneratorGroundDirt {
-                                                        ref mut bottom_level,
-                                                        ref mut gradient_softness,
-                                                        ref mut splash_amount,
-                                                        ref mut splash_scale,
-                                                    } => {
-                                                        ui.label(egui::RichText::new("Substance Ground Mud & Splash (Position)").strong().color(Color32::from_rgb(170, 130, 90)));
-                                                        ui.horizontal(|ui| {
-                                                            ui.label("Bottom Height Level:");
-                                                            if ui.add(egui::Slider::new(bottom_level, 0.0..=1.0)).changed() { prop_changed = true; }
-                                                        });
-                                                        ui.horizontal(|ui| {
-                                                            ui.label("Gradient Softness:");
-                                                            if ui.add(egui::Slider::new(gradient_softness, 0.01..=1.0)).changed() { prop_changed = true; }
-                                                        });
-                                                        ui.horizontal(|ui| {
-                                                            ui.label("Splash Amount:");
-                                                            if ui.add(egui::Slider::new(splash_amount, 0.0..=1.0)).changed() { prop_changed = true; }
-                                                        });
-                                                        ui.horizontal(|ui| {
-                                                            ui.label("Splash Scale:");
-                                                            if ui.add(egui::Slider::new(splash_scale, 1.0..=64.0).clamp_to_range(false)).changed() { prop_changed = true; }
-                                                        });
-                                                    }
-                                                    crate::layer::MaskEffectType::GeneratorMaskEditor {
-                                                        ref mut curv_weight,
-                                                        ref mut curv_width,
-                                                        ref mut curv_contrast,
-                                                        ref mut curv_invert,
-                                                        ref mut ao_weight,
-                                                        ref mut ao_contrast,
-                                                        ref mut world_normal_weight,
-                                                        ref mut world_normal_dir,
-                                                        ref mut pos_weight,
-                                                        ref mut pos_height,
-                                                        ref mut grunge_weight,
-                                                        ref mut grunge_scale,
-                                                        ref mut global_balance,
-                                                        ref mut global_contrast,
-                                                        ref mut invert,
-                                                    } => {
-                                                        ui.label(egui::RichText::new("Substance Painter Mask Editor (Compound)").strong().color(Color32::from_rgb(200, 160, 240)));
-                                                        ui.collapsing("Curvature Parameters", |ui| {
-                                                            ui.horizontal(|ui| {
-                                                                ui.label("Weight:");
-                                                                if ui.add(egui::Slider::new(curv_weight, 0.0..=1.0)).changed() { prop_changed = true; }
-                                                            });
-                                                            ui.horizontal(|ui| {
-                                                                ui.label("Edge Width:");
-                                                                if ui.add(egui::Slider::new(curv_width, 0.1..=4.0)).changed() { prop_changed = true; }
-                                                            });
-                                                            ui.horizontal(|ui| {
-                                                                ui.label("Contrast:");
-                                                                if ui.add(egui::Slider::new(curv_contrast, 0.5..=5.0)).changed() { prop_changed = true; }
-                                                            });
-                                                            if ui.checkbox(curv_invert, "Invert Curvature (Cavities)").changed() { prop_changed = true; }
-                                                        });
-                                                        ui.collapsing("Ambient Occlusion Parameters", |ui| {
-                                                            ui.horizontal(|ui| {
-                                                                ui.label("Weight:");
-                                                                if ui.add(egui::Slider::new(ao_weight, 0.0..=1.0)).changed() { prop_changed = true; }
-                                                            });
-                                                            ui.horizontal(|ui| {
-                                                                ui.label("Contrast:");
-                                                                if ui.add(egui::Slider::new(ao_contrast, 0.5..=5.0)).changed() { prop_changed = true; }
-                                                            });
-                                                        });
-                                                        ui.collapsing("World Normal Direction", |ui| {
-                                                            ui.horizontal(|ui| {
-                                                                ui.label("Weight:");
-                                                                if ui.add(egui::Slider::new(world_normal_weight, 0.0..=1.0)).changed() { prop_changed = true; }
-                                                            });
-                                                            ui.horizontal(|ui| {
-                                                                ui.label("Preset:");
-                                                                if ui.selectable_label(world_normal_dir[1] > 0.5, "Up (+Y)").clicked() {
-                                                                    *world_normal_dir = [0.0, 1.0, 0.0];
-                                                                    prop_changed = true;
-                                                                }
-                                                                if ui.selectable_label(world_normal_dir[1] < -0.5, "Down (-Y)").clicked() {
-                                                                    *world_normal_dir = [0.0, -1.0, 0.0];
-                                                                    prop_changed = true;
-                                                                }
-                                                                if ui.selectable_label(world_normal_dir[2] > 0.5, "Forward (+Z)").clicked() {
-                                                                    *world_normal_dir = [0.0, 0.0, 1.0];
-                                                                    prop_changed = true;
-                                                                }
-                                                            });
-                                                        });
-                                                        ui.collapsing("Position Height", |ui| {
-                                                            ui.horizontal(|ui| {
-                                                                ui.label("Weight:");
-                                                                if ui.add(egui::Slider::new(pos_weight, 0.0..=1.0)).changed() { prop_changed = true; }
-                                                            });
-                                                            ui.horizontal(|ui| {
-                                                                ui.label("Target Height:");
-                                                                if ui.add(egui::Slider::new(pos_height, 0.0..=1.0)).changed() { prop_changed = true; }
-                                                            });
-                                                        });
-                                                        ui.collapsing("Grunge Modulation", |ui| {
-                                                            ui.horizontal(|ui| {
-                                                                ui.label("Grunge Weight:");
-                                                                if ui.add(egui::Slider::new(grunge_weight, 0.0..=1.0)).changed() { prop_changed = true; }
-                                                            });
-                                                            ui.horizontal(|ui| {
-                                                                ui.label("Grunge Scale:");
-                                                                if ui.add(egui::Slider::new(grunge_scale, 1.0..=64.0).clamp_to_range(false)).changed() { prop_changed = true; }
-                                                            });
-                                                        });
-                                                        ui.separator();
-                                                        ui.horizontal(|ui| {
-                                                            ui.label("Global Balance:");
-                                                            if ui.add(egui::Slider::new(global_balance, 0.0..=1.0)).changed() { prop_changed = true; }
-                                                        });
-                                                        ui.horizontal(|ui| {
-                                                            ui.label("Global Contrast:");
-                                                            if ui.add(egui::Slider::new(global_contrast, 0.1..=4.0)).changed() { prop_changed = true; }
-                                                        });
-                                                        if ui.checkbox(invert, "Global Invert").changed() { prop_changed = true; }
-                                                    }
-                                                }
-                                            });
-                                        }
-
-                                        if let Some(id) = remove_eff_id {
-                                            layer.remove_mask_effect(id, curv_ref);
-                                            layer.evaluate_mask_full(curv_ref, ao_ref, pos_ref, wn_ref, id_ref, &anchor_refs);
-                                            prop_changed = true;
-                                        }
-                                        if let Some((id, up)) = reorder_eff {
-                                            layer.reorder_mask_effect(id, up, curv_ref);
-                                            layer.evaluate_mask_full(curv_ref, ao_ref, pos_ref, wn_ref, id_ref, &anchor_refs);
-                                            prop_changed = true;
-                                        }
-                                    }
-
-                                    // Mask Brush Parameters
-                                    ui.group(|ui| {
-                                        ui.label("Mask Brush Settings:");
-                                        ui.horizontal(|ui| {
-                                            ui.label("Paint Value:");
-                                            ui.add(egui::Slider::new(&mut self.brush_engine.settings.mask_paint_value, 0.0..=1.0));
-                                            if ui.button("Swap [X]").clicked() {
-                                                self.brush_engine.settings.mask_paint_value =
-                                                    if self.brush_engine.settings.mask_paint_value > 0.5 { 0.0 } else { 1.0 };
-                                            }
-                                        });
-                                        ui.label(if self.brush_engine.settings.mask_paint_value > 0.5 {
-                                            "White (Reveals Layer)"
-                                        } else {
-                                            "Black (Hides Layer)"
-                                        });
-                                        ui.add(egui::Slider::new(&mut self.brush_engine.settings.radius, 1.0..=160.0).text("Size [ / ]"));
-                                        ui.add(egui::Slider::new(&mut self.brush_engine.settings.hardness, 0.0..=1.0).text("Hardness"));
-                                        ui.add(egui::Slider::new(&mut self.brush_engine.settings.opacity, 0.0..=1.0).text("Opacity"));
-                                        ui.add(egui::Slider::new(&mut self.brush_engine.settings.flow, 0.0..=1.0).text("Flow"));
-                                    });
-                                    if prop_changed {
-                                        mask_changed = true;
-                                    }
-                                } else if layer.layer_type == LayerType::Fill {
-                                    // --- PROPERTIES: FILL (PBR Material Maps Manipulation 1:1) ---
-    
-                                    // 1. Transformation (UV Wrap)
-                                    ui.collapsing("Transformation (UV Wrap)", |ui| {
-                                        ui.horizontal(|ui| {
-                                            ui.label("UV Scale / Tiling:");
-                                            if ui.add(egui::Slider::new(&mut layer.uv_scale, 0.2..=32.0).logarithmic(true).clamp_to_range(false)).changed() {
-                                                prop_changed = true;
-                                            }
-                                        });
-                                        ui.horizontal(|ui| {
-                                            if ui.button("1x").clicked() { layer.uv_scale = 1.0; prop_changed = true; }
-                                            if ui.button("2x").clicked() { layer.uv_scale = 2.0; prop_changed = true; }
-                                            if ui.button("4x").clicked() { layer.uv_scale = 4.0; prop_changed = true; }
-                                            if ui.button("8x").clicked() { layer.uv_scale = 8.0; prop_changed = true; }
-                                            if ui.button("16x").clicked() { layer.uv_scale = 16.0; prop_changed = true; }
-                                        });
-                                        ui.horizontal(|ui| {
-                                            ui.label("UV Offset:");
-                                            if ui.add(egui::Slider::new(&mut layer.uv_offset.x, 0.0..=1.0).text("U")).changed() { prop_changed = true; }
-                                            if ui.add(egui::Slider::new(&mut layer.uv_offset.y, 0.0..=1.0).text("V")).changed() { prop_changed = true; }
-                                        });
-                                        ui.horizontal(|ui| {
-                                            ui.label("UV Rotation:");
-                                            if ui.add(egui::Slider::new(&mut layer.uv_rotation, 0.0..=360.0).suffix("°")).changed() { prop_changed = true; }
-                                        });
-                                    });
-    
-                                    // 2. Material Channel Toggles (Substance Painter iconic pill buttons)
-                                    ui.group(|ui| {
-                                        ui.label("Material Channels:");
-                                        ui.horizontal(|ui| {
-                                            if channel_pill_button(ui, "color", layer.channel_flags.base_color).clicked() {
-                                                layer.channel_flags.base_color = !layer.channel_flags.base_color;
-                                                prop_changed = true;
-                                            }
-                                            if channel_pill_button(ui, "metal", layer.channel_flags.metallic).clicked() {
-                                                layer.channel_flags.metallic = !layer.channel_flags.metallic;
-                                                prop_changed = true;
-                                            }
-                                            if channel_pill_button(ui, "rough", layer.channel_flags.roughness).clicked() {
-                                                layer.channel_flags.roughness = !layer.channel_flags.roughness;
-                                                prop_changed = true;
-                                            }
-                                            if channel_pill_button(ui, "nrm", layer.channel_flags.normal).clicked() {
-                                                layer.channel_flags.normal = !layer.channel_flags.normal;
-                                                prop_changed = true;
-                                            }
-                                            if channel_pill_button(ui, "height", layer.channel_flags.height).clicked() {
-                                                layer.channel_flags.height = !layer.channel_flags.height;
-                                                prop_changed = true;
-                                            }
-                                            if channel_pill_button(ui, "emis", layer.channel_flags.emission).clicked() {
-                                                layer.channel_flags.emission = !layer.channel_flags.emission;
-                                                prop_changed = true;
-                                            }
-                                            if channel_pill_button(ui, "opac", layer.channel_flags.opacity).clicked() {
-                                                layer.channel_flags.opacity = !layer.channel_flags.opacity;
-                                                prop_changed = true;
-                                            }
-                                            if channel_pill_button(ui, "coat", layer.channel_flags.clearcoat).clicked() {
-                                                layer.channel_flags.clearcoat = !layer.channel_flags.clearcoat;
-                                                prop_changed = true;
-                                            }
-                                            if channel_pill_button(ui, "aniso", layer.channel_flags.anisotropy).clicked() {
-                                                layer.channel_flags.anisotropy = !layer.channel_flags.anisotropy;
-                                                prop_changed = true;
-                                            }
-                                        });
-                                    });
-    
-                                    // 3. Channel Value Controllers (PBR Maps)
-                                    ui.group(|ui| {
-                                        if layer.channel_flags.base_color {
-                                            ui.horizontal(|ui| {
-                                                ui.label("Base Color:");
-                                                if crate::color_picker::color_picker_button_vec4(
-                                                    ui,
-                                                    egui::Id::new(format!("layer_base_col_{}", layer.id)),
-                                                    &mut layer.fill_color,
-                                                ) {
-                                                    prop_changed = true;
-                                                }
-                                                ui.label(crate::color_picker::rgb_to_hex(layer.fill_color.x, layer.fill_color.y, layer.fill_color.z));
-                                            });
-                                            ui.horizontal(|ui| {
-                                                if layer.fill_color_tex.is_some() {
-                                                    ui.colored_label(Color32::from_rgb(80, 220, 120), "Texture Active");
-                                                    if ui.button("Shelf...").on_hover_text("Select or replace texture from Shelf").clicked() {
-                                                        open_shelf_picker = Some(ShelfPickerTarget::FillBaseColor);
-                                                    }
-                                                    if ui.button("Import...").on_hover_text("Import texture into Project Shelf and assign").clicked() {
-                                                        if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "tga", "bmp", "exr", "hdr"]).pick_file() {
-                                                            import_to_shelf_and_assign = Some((path, ShelfPickerTarget::FillBaseColor));
-                                                        }
-                                                    }
-                                                    if ui.button("Remove").clicked() { layer.fill_color_tex = None; prop_changed = true; }
-                                                } else {
-                                                    if ui.button("Pick from Shelf...").on_hover_text("Pick texture or baked map from Project Shelf").clicked() {
-                                                        open_shelf_picker = Some(ShelfPickerTarget::FillBaseColor);
-                                                    }
-                                                    if ui.button("Import...").on_hover_text("Import texture file into Project Shelf and assign").clicked() {
-                                                        if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "tga", "bmp", "exr", "hdr"]).pick_file() {
-                                                            import_to_shelf_and_assign = Some((path, ShelfPickerTarget::FillBaseColor));
-                                                        }
-                                                    }
-                                                }
-                                            });
-                                        }
-    
-                                        if layer.channel_flags.metallic {
-                                            ui.horizontal(|ui| {
-                                                ui.label("Metallic:");
-                                                if ui.add(egui::Slider::new(&mut layer.fill_metallic, 0.0..=1.0)).changed() {
-                                                    prop_changed = true;
-                                                }
-                                            });
-                                            ui.horizontal(|ui| {
-                                                if ui.small_button("0.0 Dielectric").clicked() { layer.fill_metallic = 0.0; prop_changed = true; }
-                                                if ui.small_button("0.5 Semi").clicked() { layer.fill_metallic = 0.5; prop_changed = true; }
-                                                if ui.small_button("1.0 Metal").clicked() { layer.fill_metallic = 1.0; prop_changed = true; }
-                                            });
-                                            ui.horizontal(|ui| {
-                                                if layer.fill_metallic_tex.is_some() {
-                                                    ui.colored_label(Color32::from_rgb(80, 220, 120), "Metallic Map Active");
-                                                    if ui.button("Shelf...").on_hover_text("Select or replace metallic map from Shelf").clicked() {
-                                                        open_shelf_picker = Some(ShelfPickerTarget::FillMetallic);
-                                                    }
-                                                    if ui.button("Import...").on_hover_text("Import metallic texture into Project Shelf and assign").clicked() {
-                                                        if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "tga", "bmp", "exr", "hdr"]).pick_file() {
-                                                            import_to_shelf_and_assign = Some((path, ShelfPickerTarget::FillMetallic));
-                                                        }
-                                                    }
-                                                    if ui.button("Remove").clicked() { layer.fill_metallic_tex = None; prop_changed = true; }
-                                                } else {
-                                                    if ui.button("Pick from Shelf...").on_hover_text("Pick metallic map or texture from Project Shelf").clicked() {
-                                                        open_shelf_picker = Some(ShelfPickerTarget::FillMetallic);
-                                                    }
-                                                    if ui.button("Import...").on_hover_text("Import metallic texture into Project Shelf and assign").clicked() {
-                                                        if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "tga", "bmp", "exr", "hdr"]).pick_file() {
-                                                            import_to_shelf_and_assign = Some((path, ShelfPickerTarget::FillMetallic));
-                                                        }
-                                                    }
-                                                }
-                                            });
-                                        }
-    
-                                        if layer.channel_flags.roughness {
-                                            ui.horizontal(|ui| {
-                                                ui.label("Roughness:");
-                                                if ui.add(egui::Slider::new(&mut layer.fill_roughness, 0.0..=1.0)).changed() {
-                                                    prop_changed = true;
-                                                }
-                                            });
-                                            ui.horizontal(|ui| {
-                                                if ui.small_button("0.05 Gloss").clicked() { layer.fill_roughness = 0.05; prop_changed = true; }
-                                                if ui.small_button("0.40 Satin").clicked() { layer.fill_roughness = 0.40; prop_changed = true; }
-                                                if ui.small_button("0.85 Matte").clicked() { layer.fill_roughness = 0.85; prop_changed = true; }
-                                            });
-                                            ui.horizontal(|ui| {
-                                                if layer.fill_roughness_tex.is_some() {
-                                                    ui.colored_label(Color32::from_rgb(80, 220, 120), "Roughness Map Active");
-                                                    if ui.button("Shelf...").on_hover_text("Select or replace roughness map from Shelf").clicked() {
-                                                        open_shelf_picker = Some(ShelfPickerTarget::FillRoughness);
-                                                    }
-                                                    if ui.button("Import...").on_hover_text("Import roughness texture into Project Shelf and assign").clicked() {
-                                                        if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "tga", "bmp", "exr", "hdr"]).pick_file() {
-                                                            import_to_shelf_and_assign = Some((path, ShelfPickerTarget::FillRoughness));
-                                                        }
-                                                    }
-                                                    if ui.button("Remove").clicked() { layer.fill_roughness_tex = None; prop_changed = true; }
-                                                } else {
-                                                    if ui.button("Pick from Shelf...").on_hover_text("Pick roughness map or texture from Project Shelf").clicked() {
-                                                        open_shelf_picker = Some(ShelfPickerTarget::FillRoughness);
-                                                    }
-                                                    if ui.button("Import...").on_hover_text("Import roughness texture into Project Shelf and assign").clicked() {
-                                                        if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "tga", "bmp", "exr", "hdr"]).pick_file() {
-                                                            import_to_shelf_and_assign = Some((path, ShelfPickerTarget::FillRoughness));
-                                                        }
-                                                    }
-                                                }
-                                            });
-                                        }
-    
-                                        if layer.channel_flags.normal {
-                                            ui.horizontal(|ui| {
-                                                ui.label("Normal Intensity:");
-                                                if ui.add(egui::Slider::new(&mut layer.fill_normal_strength, 0.0..=2.0)).changed() {
-                                                    prop_changed = true;
-                                                }
-                                            });
-                                            ui.horizontal(|ui| {
-                                                if layer.fill_normal_tex.is_some() {
-                                                    ui.colored_label(Color32::from_rgb(80, 220, 120), "Normal Map Active");
-                                                    if ui.button("Shelf...").on_hover_text("Select or replace normal map from Shelf").clicked() {
-                                                        open_shelf_picker = Some(ShelfPickerTarget::FillNormal);
-                                                    }
-                                                    if ui.button("Import...").on_hover_text("Import normal map into Project Shelf and assign").clicked() {
-                                                        if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "tga", "bmp", "exr", "hdr"]).pick_file() {
-                                                            import_to_shelf_and_assign = Some((path, ShelfPickerTarget::FillNormal));
-                                                        }
-                                                    }
-                                                    if ui.button("Remove").clicked() { layer.fill_normal_tex = None; prop_changed = true; }
-                                                } else {
-                                                    if ui.button("Pick from Shelf...").on_hover_text("Pick normal map from Project Shelf").clicked() {
-                                                        open_shelf_picker = Some(ShelfPickerTarget::FillNormal);
-                                                    }
-                                                    if ui.button("Import...").on_hover_text("Import normal map into Project Shelf and assign").clicked() {
-                                                        if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "tga", "bmp", "exr", "hdr"]).pick_file() {
-                                                            import_to_shelf_and_assign = Some((path, ShelfPickerTarget::FillNormal));
-                                                        }
-                                                    }
-                                                }
-                                            });
-                                        }
-    
-                                        if layer.channel_flags.height {
-                                            ui.horizontal(|ui| {
-                                                ui.label("Height / Bump:");
-                                                if ui.add(egui::Slider::new(&mut layer.fill_height, 0.0..=1.0)).changed() {
-                                                    prop_changed = true;
-                                                }
-                                            });
-                                            ui.horizontal(|ui| {
-                                                if layer.fill_height_tex.is_some() {
-                                                    ui.colored_label(Color32::from_rgb(80, 220, 120), "Height Map Active");
-                                                    if ui.button("Shelf...").on_hover_text("Select or replace height map from Shelf").clicked() {
-                                                        open_shelf_picker = Some(ShelfPickerTarget::FillHeight);
-                                                    }
-                                                    if ui.button("Import...").on_hover_text("Import height texture into Project Shelf and assign").clicked() {
-                                                        if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "tga", "bmp", "exr", "hdr"]).pick_file() {
-                                                            import_to_shelf_and_assign = Some((path, ShelfPickerTarget::FillHeight));
-                                                        }
-                                                    }
-                                                    if ui.button("Remove").clicked() { layer.fill_height_tex = None; prop_changed = true; }
-                                                } else {
-                                                    if ui.button("Pick from Shelf...").on_hover_text("Pick height texture or baked map from Project Shelf").clicked() {
-                                                        open_shelf_picker = Some(ShelfPickerTarget::FillHeight);
-                                                    }
-                                                    if ui.button("Import...").on_hover_text("Import height texture into Project Shelf and assign").clicked() {
-                                                        if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "tga", "bmp", "exr", "hdr"]).pick_file() {
-                                                            import_to_shelf_and_assign = Some((path, ShelfPickerTarget::FillHeight));
-                                                        }
-                                                    }
-                                                }
-                                            });
-                                        }
-
-                                        if layer.channel_flags.emission {
-                                            ui.horizontal(|ui| {
-                                                ui.label("Emission:");
-                                                if crate::color_picker::color_picker_button_vec4(
-                                                    ui,
-                                                    egui::Id::new(format!("layer_emissive_col_{}", layer.id)),
-                                                    &mut layer.fill_emissive,
-                                                ) {
-                                                    prop_changed = true;
-                                                }
-                                                ui.label(crate::color_picker::rgb_to_hex(layer.fill_emissive.x, layer.fill_emissive.y, layer.fill_emissive.z));
-                                            });
-                                            ui.horizontal(|ui| {
-                                                ui.label("Emission Intensity:");
-                                                if ui.add(egui::Slider::new(&mut layer.fill_emissive.w, 0.0..=10.0)).changed() {
-                                                    prop_changed = true;
-                                                }
-                                            });
-                                            ui.horizontal(|ui| {
-                                                if layer.fill_emissive_tex.is_some() {
-                                                    ui.colored_label(Color32::from_rgb(80, 220, 120), "Emissive Map Active");
-                                                    if ui.button("Shelf...").on_hover_text("Select or replace emissive texture from Shelf").clicked() {
-                                                        open_shelf_picker = Some(ShelfPickerTarget::FillEmissive);
-                                                    }
-                                                    if ui.button("Import...").on_hover_text("Import emissive texture into Project Shelf and assign").clicked() {
-                                                        if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "tga", "bmp", "exr", "hdr"]).pick_file() {
-                                                            import_to_shelf_and_assign = Some((path, ShelfPickerTarget::FillEmissive));
-                                                        }
-                                                    }
-                                                    if ui.button("Remove").clicked() { layer.fill_emissive_tex = None; prop_changed = true; }
-                                                } else {
-                                                    if ui.button("Pick from Shelf...").on_hover_text("Pick emissive texture from Project Shelf").clicked() {
-                                                        open_shelf_picker = Some(ShelfPickerTarget::FillEmissive);
-                                                    }
-                                                    if ui.button("Import...").on_hover_text("Import emissive texture into Project Shelf and assign").clicked() {
-                                                        if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "tga", "bmp", "exr", "hdr"]).pick_file() {
-                                                            import_to_shelf_and_assign = Some((path, ShelfPickerTarget::FillEmissive));
-                                                        }
-                                                    }
-                                                }
-                                            });
-                                        }
-
-                                        if layer.channel_flags.opacity {
-                                            ui.horizontal(|ui| {
-                                                ui.label("Opacity / Alpha:");
-                                                if ui.add(egui::Slider::new(&mut layer.fill_opacity, 0.0..=1.0)).changed() {
-                                                    prop_changed = true;
-                                                }
-                                                if ui.small_button("Hole (0%)").clicked() {
-                                                    layer.fill_opacity = 0.0;
-                                                    prop_changed = true;
-                                                }
-                                                if ui.small_button("Glass (50%)").clicked() {
-                                                    layer.fill_opacity = 0.5;
-                                                    prop_changed = true;
-                                                }
-                                                if ui.small_button("Solid (100%)").clicked() {
-                                                    layer.fill_opacity = 1.0;
-                                                    prop_changed = true;
-                                                }
-                                            });
-                                            ui.horizontal(|ui| {
-                                                if layer.fill_opacity_tex.is_some() {
-                                                    ui.colored_label(Color32::from_rgb(80, 220, 120), "Opacity Map Active");
-                                                    if ui.button("Shelf...").on_hover_text("Select or replace opacity map from Shelf").clicked() {
-                                                        open_shelf_picker = Some(ShelfPickerTarget::FillOpacity);
-                                                    }
-                                                    if ui.button("Import...").on_hover_text("Import opacity map into Project Shelf and assign").clicked() {
-                                                        if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "tga", "bmp", "exr", "hdr"]).pick_file() {
-                                                            import_to_shelf_and_assign = Some((path, ShelfPickerTarget::FillOpacity));
-                                                        }
-                                                    }
-                                                    if ui.button("Remove").clicked() { layer.fill_opacity_tex = None; prop_changed = true; }
-                                                } else {
-                                                    if ui.button("Pick from Shelf...").on_hover_text("Pick opacity map from Project Shelf").clicked() {
-                                                        open_shelf_picker = Some(ShelfPickerTarget::FillOpacity);
-                                                    }
-                                                    if ui.button("Import...").on_hover_text("Import opacity map into Project Shelf and assign").clicked() {
-                                                        if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "tga", "bmp", "exr", "hdr"]).pick_file() {
-                                                            import_to_shelf_and_assign = Some((path, ShelfPickerTarget::FillOpacity));
-                                                        }
-                                                    }
-                                                }
-                                            });
-                                        }
-
-                                        if layer.channel_flags.clearcoat {
-                                            ui.horizontal(|ui| {
-                                                ui.label("Clearcoat:");
-                                                let mut cc = layer.fill_clearcoat;
-                                                if ui.add(egui::Slider::new(&mut cc, 0.0..=1.0)).changed() {
-                                                    layer.set_fill_clearcoat(cc);
-                                                    prop_changed = true;
-                                                }
-                                            });
-                                        }
-
-                                        if layer.channel_flags.anisotropy {
-                                            ui.horizontal(|ui| {
-                                                ui.label("Anisotropy Strength:");
-                                                if ui.add(egui::Slider::new(&mut layer.fill_anisotropy, -1.0..=1.0)).changed() {
-                                                    prop_changed = true;
-                                                }
-                                            });
-                                            ui.horizontal(|ui| {
-                                                ui.label("Anisotropy Angle:");
-                                                if ui.add(egui::Slider::new(&mut layer.fill_anisotropy_angle, 0.0..=1.0)).changed() {
-                                                    prop_changed = true;
-                                                }
-                                            });
-                                        }
-                                    });
-    
-                                    // 4. Procedural Generator / Texture Pattern
-                                    ui.group(|ui| {
-                                        ui.label("Procedural Generator / Pattern:");
-                                        ui.horizontal(|ui| {
-                                            egui::ComboBox::from_id_source(format!("prop_gen_{}", layer.id))
-                                                .selected_text(layer.fill_generator.name())
-                                                .show_ui(ui, |ui| {
-                                                    if ui.selectable_value(&mut layer.fill_generator, ProceduralGenerator::None, ProceduralGenerator::None.name()).clicked() {
-                                                        prop_changed = true;
-                                                    }
-                                                    for g in ProceduralGenerator::all() {
-                                                        if ui.selectable_value(&mut layer.fill_generator, *g, g.name()).clicked() {
-                                                            prop_changed = true;
-                                                        }
-                                                    }
-                                                });
-                                        });
-
-                                        if ui.checkbox(&mut layer.triplanar, "Triplanar Projection (Seamless)").on_hover_text("Projects noise across 3D object space to eliminate UV seams").changed() {
-                                            prop_changed = true;
-                                        }
-    
-                                        if layer.fill_generator != ProceduralGenerator::None {
-                                            ui.horizontal(|ui| {
-                                                ui.label("Pattern Scale:");
-                                                if ui.add(egui::Slider::new(&mut layer.generator_scale, 1.0..=64.0).clamp_to_range(false)).changed() {
-                                                    prop_changed = true;
-                                                }
-                                            });
-                                            ui.horizontal(|ui| {
-                                                ui.label("Contrast:");
-                                                if ui.add(egui::Slider::new(&mut layer.generator_contrast, 0.1..=4.0)).changed() {
-                                                    prop_changed = true;
-                                                }
-                                            });
-                                            if ui.checkbox(&mut layer.generator_invert, "Invert Pattern").changed() {
-                                                prop_changed = true;
-                                            }
-                                        }
-                                    });
-                                } else if layer.layer_type == LayerType::Folder {
-                                    // --- PROPERTIES: FOLDER / GROUP ---
-                                    ui.group(|ui| {
-                                        ui.label(egui::RichText::new("Folder / Group Properties").strong().color(Color32::from_rgb(243, 94, 24)));
-                                        ui.horizontal(|ui| {
-                                            ui.label("Folder Opacity:");
-                                            if ui.add(egui::Slider::new(&mut layer.opacity, 0.0..=1.0)).changed() {
-                                                prop_changed = true;
-                                            }
-                                        });
-                                        ui.horizontal(|ui| {
-                                            ui.label("Collapsed:");
-                                            if ui.checkbox(&mut layer.folder_collapsed, "Collapse contents in stack").changed() {
-                                                prop_changed = true;
-                                            }
-                                        });
-                                        ui.separator();
-                                        ui.label("Folder Masking (Affects all contained layers):");
-                                        if layer.has_mask {
-                                            ui.horizontal(|ui| {
-                                                if ui.button("Invert Mask").clicked() {
-                                                    layer.invert_mask();
-                                                    prop_changed = true;
-                                                }
-                                                if ui.button("Clear White").clicked() {
-                                                    layer.clear_mask(1.0);
-                                                    prop_changed = true;
-                                                }
-                                                if ui.button("Clear Black").clicked() {
-                                                    layer.clear_mask(0.0);
-                                                    prop_changed = true;
-                                                }
-                                                if ui.button("Remove Mask").clicked() {
-                                                    layer.remove_mask();
-                                                    prop_changed = true;
-                                                }
-                                            });
-                                        } else {
-                                            ui.horizontal(|ui| {
-                                                if ui.button("+ White Mask").clicked() {
-                                                    layer.add_white_mask();
-                                                    prop_changed = true;
-                                                }
-                                                if ui.button("+ Black Mask").clicked() {
-                                                    layer.add_black_mask();
-                                                    prop_changed = true;
-                                                }
-                                            });
-                                        }
-                                    });
-                                } else {
-                                    // --- PROPERTIES: PAINT ---
-                                    ui.group(|ui| {
-                                        ui.label("Brush Parameters:");
-                                        ui.add(egui::Slider::new(&mut self.brush_engine.settings.radius, 1.0..=160.0).text("Size [ / ]"));
-                                        ui.add(egui::Slider::new(&mut self.brush_engine.settings.hardness, 0.0..=1.0).text("Hardness"));
-                                        ui.add(egui::Slider::new(&mut self.brush_engine.settings.opacity, 0.0..=1.0).text("Opacity"));
-                                        ui.add(egui::Slider::new(&mut self.brush_engine.settings.flow, 0.0..=1.0).text("Flow"));
-    
-                                        ui.horizontal(|ui| {
-                                            ui.label("Alpha:");
-                                            egui::ComboBox::from_id_source("brush_alpha_select")
-                                                .selected_text(self.brush_engine.settings.alpha.name())
-                                                .show_ui(ui, |ui| {
-                                                    let alphas = [
-                                                        AlphaType::SoftRound,
-                                                        AlphaType::HardRound,
-                                                        AlphaType::NoiseSplatter,
-                                                        AlphaType::Chisel,
-                                                        AlphaType::Stipple,
-                                                        AlphaType::Scratches,
-                                                    ];
-                                                    for a in alphas {
-                                                        ui.selectable_value(&mut self.brush_engine.settings.alpha, a, a.name());
-                                                    }
-                                                });
-                                            if ui.small_button("Shelf...").on_hover_text("Choose Alpha from the Shelf").clicked() {
-                                                self.shelf_picker = Some(ShelfPickerState::new(ShelfPickerTarget::BrushAlpha));
-                                            }
-                                        });
-    
-                                        ui.collapsing("Jitter Dynamics", |ui| {
-                                            ui.add(egui::Slider::new(&mut self.brush_engine.settings.size_jitter, 0.0..=1.0).text("Size Jitter"));
-                                            ui.add(egui::Slider::new(&mut self.brush_engine.settings.position_jitter, 0.0..=1.0).text("Scatter"));
-                                        });
-                                    });
-    
-                                    ui.group(|ui| {
-                                        ui.label("Material Stamp Channels:");
-                                        ui.horizontal(|ui| {
-                                            if channel_pill_button(ui, "color", self.brush_engine.settings.channels.base_color).clicked() {
-                                                self.brush_engine.settings.channels.base_color = !self.brush_engine.settings.channels.base_color;
-                                            }
-                                            if channel_pill_button(ui, "metal", self.brush_engine.settings.channels.metallic).clicked() {
-                                                self.brush_engine.settings.channels.metallic = !self.brush_engine.settings.channels.metallic;
-                                            }
-                                            if channel_pill_button(ui, "rough", self.brush_engine.settings.channels.roughness).clicked() {
-                                                self.brush_engine.settings.channels.roughness = !self.brush_engine.settings.channels.roughness;
-                                            }
-                                            if channel_pill_button(ui, "height", self.brush_engine.settings.channels.height).clicked() {
-                                                self.brush_engine.settings.channels.height = !self.brush_engine.settings.channels.height;
-                                            }
-                                            if channel_pill_button(ui, "emis", self.brush_engine.settings.channels.emission).clicked() {
-                                                self.brush_engine.settings.channels.emission = !self.brush_engine.settings.channels.emission;
-                                            }
-                                            if channel_pill_button(ui, "opac", self.brush_engine.settings.channels.opacity).clicked() {
-                                                self.brush_engine.settings.channels.opacity = !self.brush_engine.settings.channels.opacity;
-                                            }
-                                            if channel_pill_button(ui, "coat", self.brush_engine.settings.channels.clearcoat).clicked() {
-                                                self.brush_engine.settings.channels.clearcoat = !self.brush_engine.settings.channels.clearcoat;
-                                            }
-                                            if channel_pill_button(ui, "aniso", self.brush_engine.settings.channels.anisotropy).clicked() {
-                                                self.brush_engine.settings.channels.anisotropy = !self.brush_engine.settings.channels.anisotropy;
-                                            }
-                                        });
-    
-                                        if self.brush_engine.settings.channels.base_color {
-                                            ui.horizontal(|ui| {
-                                                ui.label("Base Color:");
-                                                crate::color_picker::color_picker_button_vec4(
-                                                    ui,
-                                                    egui::Id::new("brush_paint_base_color"),
-                                                    &mut self.brush_engine.settings.paint_color,
-                                                );
-                                                ui.label(crate::color_picker::rgb_to_hex(
-                                                    self.brush_engine.settings.paint_color.x,
-                                                    self.brush_engine.settings.paint_color.y,
-                                                    self.brush_engine.settings.paint_color.z,
-                                                ));
-                                            });
-                                        }
-    
-                                        if self.brush_engine.settings.channels.roughness {
-                                            ui.add(egui::Slider::new(&mut self.brush_engine.settings.paint_roughness, 0.0..=1.0).text("Roughness"));
-                                        }
-                                        if self.brush_engine.settings.channels.metallic {
-                                            ui.add(egui::Slider::new(&mut self.brush_engine.settings.paint_metallic, 0.0..=1.0).text("Metallic"));
-                                        }
-                                        if self.brush_engine.settings.channels.height {
-                                            ui.add(egui::Slider::new(&mut self.brush_engine.settings.paint_height, 0.0..=1.0).text("Height"));
-                                        }
-                                        if self.brush_engine.settings.channels.emission {
-                                            ui.horizontal(|ui| {
-                                                ui.label("Emission:");
-                                                crate::color_picker::color_picker_button_vec4(
-                                                    ui,
-                                                    egui::Id::new("brush_paint_emissive_color"),
-                                                    &mut self.brush_engine.settings.paint_emissive,
-                                                );
-                                                ui.label(crate::color_picker::rgb_to_hex(
-                                                    self.brush_engine.settings.paint_emissive.x,
-                                                    self.brush_engine.settings.paint_emissive.y,
-                                                    self.brush_engine.settings.paint_emissive.z,
-                                                ));
-                                            });
-                                            ui.add(egui::Slider::new(&mut self.brush_engine.settings.paint_emissive.w, 0.0..=10.0).text("Emission Intensity"));
-                                        }
-                                        if self.brush_engine.settings.channels.opacity {
-                                            ui.horizontal(|ui| {
-                                                ui.add(egui::Slider::new(&mut self.brush_engine.settings.paint_opacity, 0.0..=1.0).text("Opacity"));
-                                                if ui.small_button("Hole (0%)").clicked() {
-                                                    self.brush_engine.settings.paint_opacity = 0.0;
-                                                }
-                                                if ui.small_button("Glass (50%)").clicked() {
-                                                    self.brush_engine.settings.paint_opacity = 0.5;
-                                                }
-                                                if ui.small_button("Solid (100%)").clicked() {
-                                                    self.brush_engine.settings.paint_opacity = 1.0;
-                                                }
-                                            });
-                                        }
-                                        if self.brush_engine.settings.channels.clearcoat {
-                                            ui.add(egui::Slider::new(&mut self.brush_engine.settings.paint_clearcoat, 0.0..=1.0).text("Clearcoat"));
-                                        }
-                                        if self.brush_engine.settings.channels.anisotropy {
-                                            ui.add(egui::Slider::new(&mut self.brush_engine.settings.paint_anisotropy, -1.0..=1.0).text("Anisotropy"));
-                                            ui.add(egui::Slider::new(&mut self.brush_engine.settings.paint_anisotropy_angle, 0.0..=1.0).text("Aniso Angle"));
-                                        }
-                                    });
-                                }
-    
-                                ui.add_space(8.0);
-                                ui.separator();
-                                if ui.button("Export Textures... (Ctrl+E)").clicked() {
-                                    self.show_export_modal = true;
-                                }
-                            });
-    
-                        if prop_changed || mask_changed {
-                            let proj = &mut self.project;
-                            let curv = proj.curvature_map.as_ref();
-                            let pos = proj.position_map.as_ref();
-                            let wn = proj.world_space_normal_map.as_ref();
-                            let ao = proj.ao_map.as_ref();
-                            let id_ref = proj.id_map.as_ref();
-                            let (lower, higher) = proj.layers.split_at_mut(act_idx);
-                            let anchor_refs: Vec<crate::layer::AnchorLayerRef<'_>> = lower
-                                .iter()
-                                .filter_map(|l| l.as_anchor_ref())
-                                .collect();
-                            let layer = &mut higher[0];
-                            if prop_changed && layer.layer_type == LayerType::Fill {
-                                layer.evaluate_fill_advanced(curv, pos, wn, ao);
-                            }
-                            if mask_changed && layer.has_mask {
-                                layer.evaluate_mask_full(curv, ao, pos, wn, id_ref, &anchor_refs);
-                            }
-                            let is_extended_change = layer.channel_flags.clearcoat
-                                || layer.channel_flags.emission
-                                || layer.channel_flags.opacity
-                                || layer.channel_flags.anisotropy;
-                            if self.wgpu_viewport.is_some() && ui.input(|i| i.pointer.any_down()) && !is_extended_change {
-                                self.project.gpu_sync_needed = true;
-                                self.need_cpu_composite_sync = true;
-                            } else {
-                                self.project.rebuild_composite();
-                                self.project.gpu_sync_needed = true;
-                            }
-                        }
-
-                        if let Some(target) = open_shelf_picker {
-                            self.shelf_picker = Some(ShelfPickerState::new(target));
-                        }
-                        if let Some((path, target)) = import_to_shelf_and_assign {
-                            if let Ok(id) = self.project.import_texture_resource(&path, crate::project::ProjectResourceType::Texture) {
-                                if let Some(res) = self.project.get_resource(&id).cloned() {
-                                    self.assign_resource_to_target(&res, target);
-                                    self.refresh_shelf_thumbnails(ui.ctx());
-                                }
-                            }
-                        }
-                    }
-                    }
-                    RightPanelTab::MeshMaps => {
-                        ui.heading("Texture Set Settings");
-                        ui.add_space(4.0);
-
+                .resizable(true)
+                .default_width(self.workspace.right_panel_width)
+                .min_width(280.0)
+                .max_width(700.0)
+                .show(ctx, |ui| {
+                    self.workspace.right_panel_width = ui.available_width().max(280.0);
+
+                    // 1. Texture Set List (if docked)
+                    if self.workspace.show_texture_sets && !self.workspace.texture_sets_floating {
                         ui.group(|ui| {
-                            ui.label(format!("Mesh: {}", self.project.mesh.name));
-                            ui.label(format!("Triangles: {}", self.project.mesh.indices.len() / 3));
-                            ui.label(format!("Working Resolution: {} x {}", self.project.texture_width, self.project.texture_height));
-
                             ui.horizontal(|ui| {
-                                ui.label("Change Resolution:");
-                                let res_options = [512, 1024, 2048, 4096];
-                                egui::ComboBox::from_id_source("texture_set_res_select")
-                                    .selected_text(format!("{}x{}", self.new_project_width, self.new_project_height))
-                                    .show_ui(ui, |ui| {
-                                        for &r in &res_options {
-                                            if ui.selectable_label(self.new_project_width == r, format!("{}x{}", r, r)).clicked() {
-                                                self.new_project_width = r;
-                                                self.new_project_height = r;
-                                            }
-                                        }
-                                    });
-                            });
-                            if self.new_project_width != self.project.texture_width || self.new_project_height != self.project.texture_height {
-                                if ui.button(format!("Resample Textures to {}x{}", self.new_project_width, self.new_project_height)).clicked() {
-                                    self.project.resize_textures(self.new_project_width, self.new_project_height);
-                                    self.project.rebuild_composite();
-                                    self.project.gpu_sync_needed = true;
-                                    self.status_message = format!("Resized textures to {}x{}", self.new_project_width, self.new_project_height);
+                                let col_btn = if self.workspace.texture_sets_collapsed { "[+]" } else { "[-]" };
+                                if ui.small_button(col_btn).on_hover_text("Collapse/Expand Texture Set List").clicked() {
+                                    self.workspace.texture_sets_collapsed = !self.workspace.texture_sets_collapsed;
                                 }
+                                ui.strong(egui::RichText::new("TEXTURE SET LIST").size(10.5).color(Color32::from_rgb(175, 180, 190)));
+                                ui.label(egui::RichText::new(format!("[{}]", self.project.texture_sets.len())).small().color(Color32::from_rgb(226, 91, 16)));
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    if ui.small_button("↗ Pop Out").on_hover_text("Undock Texture Set List into floating window").clicked() {
+                                        self.workspace.texture_sets_floating = true;
+                                    }
+                                    ui.checkbox(&mut self.project.auto_switch_texture_set, "Auto-Switch")
+                                        .on_hover_text("Automatically activate Texture Set when painting or clicking on its sub-mesh in the 3D viewport");
+                                });
+                            });
+
+                            if !self.workspace.texture_sets_collapsed {
+                                self.render_texture_sets_content(ui);
                             }
                         });
-
-                        ui.add_space(6.0);
-                        let bake_btn = if let Some(icons) = self.icons.as_ref() {
-                            egui::Button::image_and_text((icons.bake.id(), egui::vec2(15.0, 15.0)), "Bake Mesh Maps...")
-                        } else {
-                            egui::Button::new("Bake Mesh Maps...")
-                        };
-                        if ui.add(bake_btn).on_hover_text("Open Baking dialog to bake Normals, AO, and Curvature from geometry").clicked() {
-                            self.show_bake_modal = true;
-                        }
-
-                        ui.add_space(6.0);
-                        ui.separator();
-                        ui.heading("Baked Mesh Maps (Geometry)");
-                        ui.label(egui::RichText::new("Persistent underlying maps that blend with your layer stack:").small());
-                        ui.add_space(4.0);
-
-                        egui::ScrollArea::vertical()
-                            .id_source("mesh_maps_scroll")
-                            .show(ui, |ui| {
-                                // 1. Normal Map (Tangent Space)
-                                ui.group(|ui| {
-                                    ui.horizontal(|ui| {
-                                        ui.strong("Normal (Tangent Space):");
-                                        if self.project.world_normal_map.is_some() {
-                                            ui.colored_label(egui::Color32::from_rgb(80, 220, 120), "Active");
-                                        } else {
-                                            ui.colored_label(egui::Color32::from_rgb(160, 160, 160), "Not Baked");
-                                        }
-                                    });
-                                    ui.horizontal(|ui| {
-                                        if ui.button("Shelf...").on_hover_text("Select Normal map from Project Shelf").clicked() {
-                                            self.shelf_picker = Some(ShelfPickerState::new(ShelfPickerTarget::MeshMapTangentNormal));
-                                        }
-                                        if ui.button("Import File...").on_hover_text("Import normal map file into Project Shelf and assign").clicked() {
-                                            if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "tga", "exr", "hdr"]).pick_file() {
-                                                if let Ok(id) = self.project.import_texture_resource(&path, crate::project::ProjectResourceType::Texture) {
-                                                    if let Some(res) = self.project.get_resource(&id).cloned() {
-                                                        self.assign_resource_to_target(&res, ShelfPickerTarget::MeshMapTangentNormal);
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        if self.project.world_normal_map.is_some() {
-                                            if ui.button("Remove").clicked() {
-                                                self.project.world_normal_map = None;
-                                                self.project.gpu_mesh_maps_sync_needed = true;
-                                                self.project.gpu_sync_needed = true;
-                                                self.project.sync_baked_maps_to_resources();
-                                            }
-                                            if ui.button("View").clicked() {
-                                                self.view_mode = ViewportChannelMode::Normal;
-                                            }
-                                        }
-                                    });
-                                });
-
-                                // 2. Ambient Occlusion (AO)
-                                ui.group(|ui| {
-                                    ui.horizontal(|ui| {
-                                        ui.strong("Ambient Occlusion (AO):");
-                                        if self.project.ao_map.is_some() {
-                                            ui.colored_label(egui::Color32::from_rgb(80, 220, 120), "Active");
-                                        } else {
-                                            ui.colored_label(egui::Color32::from_rgb(160, 160, 160), "Not Baked");
-                                        }
-                                    });
-                                    ui.horizontal(|ui| {
-                                        if ui.button("Shelf...").on_hover_text("Select AO map from Project Shelf").clicked() {
-                                            self.shelf_picker = Some(ShelfPickerState::new(ShelfPickerTarget::MeshMapAo));
-                                        }
-                                        if ui.button("Import File...").on_hover_text("Import AO map file into Project Shelf and assign").clicked() {
-                                            if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "tga", "exr", "hdr"]).pick_file() {
-                                                if let Ok(id) = self.project.import_texture_resource(&path, crate::project::ProjectResourceType::Texture) {
-                                                    if let Some(res) = self.project.get_resource(&id).cloned() {
-                                                        self.assign_resource_to_target(&res, ShelfPickerTarget::MeshMapAo);
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        if self.project.ao_map.is_some() {
-                                            if ui.button("Remove").clicked() {
-                                                self.project.ao_map = None;
-                                                self.project.gpu_mesh_maps_sync_needed = true;
-                                                self.project.gpu_sync_needed = true;
-                                                self.project.sync_baked_maps_to_resources();
-                                            }
-                                            if ui.button("View").clicked() {
-                                                self.view_mode = ViewportChannelMode::AmbientOcclusion;
-                                            }
-                                        }
-                                    });
-                                });
-
-                                // 3. Curvature Map
-                                ui.group(|ui| {
-                                    ui.horizontal(|ui| {
-                                        ui.strong("Curvature:");
-                                        if self.project.curvature_map.is_some() {
-                                            ui.colored_label(egui::Color32::from_rgb(80, 220, 120), "Active");
-                                        } else {
-                                            ui.colored_label(egui::Color32::from_rgb(160, 160, 160), "Not Baked");
-                                        }
-                                    });
-                                    ui.horizontal(|ui| {
-                                        if ui.button("Shelf...").on_hover_text("Select Curvature map from Project Shelf").clicked() {
-                                            self.shelf_picker = Some(ShelfPickerState::new(ShelfPickerTarget::MeshMapCurvature));
-                                        }
-                                        if ui.button("Import File...").on_hover_text("Import Curvature map file into Project Shelf and assign").clicked() {
-                                            if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "tga", "exr", "hdr"]).pick_file() {
-                                                if let Ok(id) = self.project.import_texture_resource(&path, crate::project::ProjectResourceType::Texture) {
-                                                    if let Some(res) = self.project.get_resource(&id).cloned() {
-                                                        self.assign_resource_to_target(&res, ShelfPickerTarget::MeshMapCurvature);
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        if self.project.curvature_map.is_some() {
-                                            if ui.button("Remove").clicked() {
-                                                self.project.curvature_map = None;
-                                                self.project.gpu_mesh_maps_sync_needed = true;
-                                                self.project.gpu_sync_needed = true;
-                                                self.project.sync_baked_maps_to_resources();
-                                            }
-                                            if ui.button("View").clicked() {
-                                                self.view_mode = ViewportChannelMode::Curvature;
-                                            }
-                                        }
-                                    });
-                                });
-
-                                // 4. World Space Normal Map
-                                ui.group(|ui| {
-                                    ui.horizontal(|ui| {
-                                        ui.strong("World Space Normal:");
-                                        if self.project.world_space_normal_map.is_some() {
-                                            ui.colored_label(egui::Color32::from_rgb(80, 220, 120), "Active");
-                                        } else {
-                                            ui.colored_label(egui::Color32::from_rgb(160, 160, 160), "Not Baked");
-                                        }
-                                    });
-                                    ui.horizontal(|ui| {
-                                        if ui.button("Shelf...").on_hover_text("Select World Space Normal map from Project Shelf").clicked() {
-                                            self.shelf_picker = Some(ShelfPickerState::new(ShelfPickerTarget::MeshMapWorldSpaceNormal));
-                                        }
-                                        if ui.button("Import File...").on_hover_text("Import World Space Normal map file into Project Shelf and assign").clicked() {
-                                            if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "tga", "exr", "hdr"]).pick_file() {
-                                                if let Ok(id) = self.project.import_texture_resource(&path, crate::project::ProjectResourceType::Texture) {
-                                                    if let Some(res) = self.project.get_resource(&id).cloned() {
-                                                        self.assign_resource_to_target(&res, ShelfPickerTarget::MeshMapWorldSpaceNormal);
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        if self.project.world_space_normal_map.is_some() {
-                                            if ui.button("Remove").clicked() {
-                                                self.project.world_space_normal_map = None;
-                                                self.project.gpu_mesh_maps_sync_needed = true;
-                                                self.project.gpu_sync_needed = true;
-                                                self.project.sync_baked_maps_to_resources();
-                                            }
-                                            if ui.button("View").clicked() {
-                                                self.view_mode = ViewportChannelMode::WorldNormal;
-                                            }
-                                        }
-                                    });
-                                });
-
-                                // 5. Position Map (WPO)
-                                ui.group(|ui| {
-                                    ui.horizontal(|ui| {
-                                        ui.strong("Position (WPO):");
-                                        if self.project.position_map.is_some() {
-                                            ui.colored_label(egui::Color32::from_rgb(80, 220, 120), "Active");
-                                        } else {
-                                            ui.colored_label(egui::Color32::from_rgb(160, 160, 160), "Not Baked");
-                                        }
-                                    });
-                                    ui.horizontal(|ui| {
-                                        if ui.button("Shelf...").on_hover_text("Select Position map from Project Shelf").clicked() {
-                                            self.shelf_picker = Some(ShelfPickerState::new(ShelfPickerTarget::MeshMapPosition));
-                                        }
-                                        if ui.button("Import File...").on_hover_text("Import Position map file into Project Shelf and assign").clicked() {
-                                            if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "tga", "exr", "hdr"]).pick_file() {
-                                                if let Ok(id) = self.project.import_texture_resource(&path, crate::project::ProjectResourceType::Texture) {
-                                                    if let Some(res) = self.project.get_resource(&id).cloned() {
-                                                        self.assign_resource_to_target(&res, ShelfPickerTarget::MeshMapPosition);
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        if self.project.position_map.is_some() {
-                                            if ui.button("Remove").clicked() {
-                                                self.project.position_map = None;
-                                                self.project.gpu_mesh_maps_sync_needed = true;
-                                                self.project.gpu_sync_needed = true;
-                                                self.project.sync_baked_maps_to_resources();
-                                            }
-                                            if ui.button("View").clicked() {
-                                                self.view_mode = ViewportChannelMode::Position;
-                                            }
-                                        }
-                                    });
-                                });
-
-                                // 6. Thickness Map
-                                ui.group(|ui| {
-                                    ui.horizontal(|ui| {
-                                        ui.strong("Thickness:");
-                                        if self.project.thickness_map.is_some() {
-                                            ui.colored_label(egui::Color32::from_rgb(80, 220, 120), "Active");
-                                        } else {
-                                            ui.colored_label(egui::Color32::from_rgb(160, 160, 160), "Not Baked");
-                                        }
-                                    });
-                                    ui.horizontal(|ui| {
-                                        if ui.button("Shelf...").on_hover_text("Select Thickness map from Project Shelf").clicked() {
-                                            self.shelf_picker = Some(ShelfPickerState::new(ShelfPickerTarget::MeshMapThickness));
-                                        }
-                                        if ui.button("Import File...").on_hover_text("Import Thickness map file into Project Shelf and assign").clicked() {
-                                            if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "tga", "exr", "hdr"]).pick_file() {
-                                                if let Ok(id) = self.project.import_texture_resource(&path, crate::project::ProjectResourceType::Texture) {
-                                                    if let Some(res) = self.project.get_resource(&id).cloned() {
-                                                        self.assign_resource_to_target(&res, ShelfPickerTarget::MeshMapThickness);
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        if self.project.thickness_map.is_some() {
-                                            if ui.button("Invert").on_hover_text("Invert thickness map (toggle between White=Thick and White=Thin)").clicked() {
-                                                if let Some(th) = &mut self.project.thickness_map {
-                                                    th.invert();
-                                                    self.project.gpu_mesh_maps_sync_needed = true;
-                                                    self.project.gpu_sync_needed = true;
-                                                    self.project.sync_baked_maps_to_resources();
-                                                    self.status_message = "Inverted thickness map".to_string();
-                                                }
-                                            }
-                                            if ui.button("Remove").clicked() {
-                                                self.project.thickness_map = None;
-                                                self.project.gpu_mesh_maps_sync_needed = true;
-                                                self.project.gpu_sync_needed = true;
-                                                self.project.sync_baked_maps_to_resources();
-                                            }
-                                            if ui.button("View").clicked() {
-                                                self.view_mode = ViewportChannelMode::Thickness;
-                                            }
-                                        }
-                                    });
-                                });
-
-                                // 7. ID Map
-                                ui.group(|ui| {
-                                    ui.horizontal(|ui| {
-                                        ui.strong("ID (Color Mask):");
-                                        if self.project.id_map.is_some() {
-                                            ui.colored_label(egui::Color32::from_rgb(80, 220, 120), "Active");
-                                        } else {
-                                            ui.colored_label(egui::Color32::from_rgb(160, 160, 160), "Not Baked");
-                                        }
-                                    });
-                                    ui.horizontal(|ui| {
-                                        if ui.button("Shelf...").on_hover_text("Select ID map from Project Shelf").clicked() {
-                                            self.shelf_picker = Some(ShelfPickerState::new(ShelfPickerTarget::MeshMapId));
-                                        }
-                                        if ui.button("Import File...").on_hover_text("Import ID map file into Project Shelf and assign").clicked() {
-                                            if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "tga", "exr", "hdr"]).pick_file() {
-                                                if let Ok(id) = self.project.import_texture_resource(&path, crate::project::ProjectResourceType::Texture) {
-                                                    if let Some(res) = self.project.get_resource(&id).cloned() {
-                                                        self.assign_resource_to_target(&res, ShelfPickerTarget::MeshMapId);
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        if self.project.id_map.is_some() {
-                                            if ui.button("Remove").clicked() {
-                                                self.project.id_map = None;
-                                                self.project.gpu_mesh_maps_sync_needed = true;
-                                                self.project.sync_baked_maps_to_resources();
-                                                self.status_message = "Removed ID map".to_string();
-                                            }
-                                        }
-                                    });
-                                });
-
-                                ui.add_space(8.0);
-                                ui.label(egui::RichText::new("Tip: Baked Normal and AO maps are permanently integrated into the PBR shader. Layers and paint strokes seamlessly blend on top of them. Curvature and AO maps also directly power the Smart Edge Wear and Crevice Dirt mask generators.").small().color(egui::Color32::from_rgb(170, 170, 170)));
-                            });
+                        ui.add_space(3.0);
                     }
+
+                    // 2. Layers / Mesh Maps Tabs (if docked)
+                    let layers_docked = self.workspace.show_layers && !self.workspace.layers_floating;
+                    let props_docked = self.workspace.show_properties && !self.workspace.properties_floating;
+
+                    if layers_docked {
+                        ui.horizontal(|ui| {
+                            let col_btn = if self.workspace.layers_collapsed { "[+]" } else { "[-]" };
+                            if ui.small_button(col_btn).on_hover_text("Collapse/Expand Layers Panel").clicked() {
+                                self.workspace.layers_collapsed = !self.workspace.layers_collapsed;
+                            }
+                            ui.selectable_value(&mut self.right_panel_tab, RightPanelTab::Layers, "Layers");
+                            ui.selectable_value(&mut self.right_panel_tab, RightPanelTab::MeshMaps, "Mesh Maps");
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.small_button("↗ Pop Out").on_hover_text("Undock Layers Stack into floating window").clicked() {
+                                    self.workspace.layers_floating = true;
+                                }
+                            });
+                        });
+                        ui.separator();
+
+                        if !self.workspace.layers_collapsed {
+                            match self.right_panel_tab {
+                                RightPanelTab::Layers => {
+                                    self.render_layers_content(ui, Some(self.workspace.layers_pane_height));
+                                }
+                                RightPanelTab::MeshMaps => {
+                                    self.render_mesh_maps_content(ui);
+                                }
+                            }
+                        }
+                    }
+
+                    // 3. Resizable Splitter Handle between Layers and Properties
+                    if layers_docked && props_docked && !self.workspace.layers_collapsed && !self.workspace.properties_collapsed && self.right_panel_tab == RightPanelTab::Layers {
+                        let (splitter_rect, splitter_resp) = ui.allocate_exact_size(
+                            egui::vec2(ui.available_width(), 6.0),
+                            egui::Sense::click_and_drag(),
+                        );
+                        let splitter_resp = splitter_resp.on_hover_cursor(egui::CursorIcon::ResizeVertical);
+                        if splitter_resp.dragged() {
+                            self.workspace.layers_pane_height = (self.workspace.layers_pane_height + splitter_resp.drag_delta().y).clamp(120.0, 600.0);
+                        }
+                        if splitter_resp.double_clicked() {
+                            self.workspace.layers_pane_height = 240.0;
+                        }
+                        let is_hover = splitter_resp.hovered() || splitter_resp.dragged();
+                        let bar_color = if is_hover {
+                            egui::Color32::from_rgb(243, 94, 24)
+                        } else {
+                            egui::Color32::from_rgb(45, 48, 56)
+                        };
+                        ui.painter().rect_filled(splitter_rect, 1.0, bar_color);
+                        ui.add_space(2.0);
+                    }
+
+                    // 4. Properties Panel (if docked and RightPanelTab is Layers)
+                    if props_docked && self.right_panel_tab == RightPanelTab::Layers {
+                        ui.horizontal(|ui| {
+                            let col_btn = if self.workspace.properties_collapsed { "[+]" } else { "[-]" };
+                            if ui.small_button(col_btn).on_hover_text("Collapse/Expand Properties Panel").clicked() {
+                                self.workspace.properties_collapsed = !self.workspace.properties_collapsed;
+                            }
+                            ui.strong(egui::RichText::new("PROPERTIES").size(11.0).color(Color32::from_rgb(220, 225, 235)));
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.small_button("↗ Pop Out").on_hover_text("Undock Properties into floating window").clicked() {
+                                    self.workspace.properties_floating = true;
+                                }
+                            });
+                        });
+                        ui.separator();
+
+                        if !self.workspace.properties_collapsed {
+                            self.render_properties_content(ui);
+                        }
+                    }
+                });
+        }
+
+        // --- SUBSTANCE 3D PAINTER BOTTOM ASSETS DOCK (Substance 3D Painter Default) ---
+        if !self.zen_mode && self.show_shelf && self.workspace.shelf_dock == ShelfDockLocation::Bottom {
+            egui::TopBottomPanel::bottom("bottom_shelf")
+                .resizable(true)
+                .default_height(self.workspace.bottom_shelf_height)
+                .min_height(120.0)
+                .max_height(600.0)
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.strong(egui::RichText::new("ASSETS & SHELF").size(11.5).color(Color32::WHITE));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.small_button("X").on_hover_text("Close Shelf").clicked() {
+                                self.show_shelf = false;
+                                self.workspace.show_shelf = false;
+                            }
+                            if ui.small_button("↗ Pop Out").on_hover_text("Undock Shelf into floating window").clicked() {
+                                self.workspace.shelf_dock = ShelfDockLocation::Floating;
+                            }
+                            if ui.small_button("← Dock Left").on_hover_text("Dock Shelf to Left Sidebar").clicked() {
+                                self.workspace.shelf_dock = ShelfDockLocation::Left;
+                            }
+                        });
+                    });
+                    ui.separator();
+                    self.render_assets_panel(ui);
+                });
+        }
+
+        // --- FLOATING WINDOWS (Pop-Out Mode) ---
+        if !self.zen_mode {
+            // 1. Floating Texture Set List
+            if self.workspace.texture_sets_floating && self.workspace.show_texture_sets {
+                let mut open = true;
+                egui::Window::new("Texture Set List")
+                    .default_size(egui::vec2(340.0, 260.0))
+                    .resizable(true)
+                    .collapsible(true)
+                    .open(&mut open)
+                    .show(ctx, |ui| {
+                        ui.horizontal(|ui| {
+                            if ui.small_button("↙ Dock to Right Panel").clicked() {
+                                self.workspace.texture_sets_floating = false;
+                            }
+                        });
+                        ui.separator();
+                        self.render_texture_sets_content(ui);
+                    });
+                if !open {
+                    self.workspace.show_texture_sets = false;
                 }
-            });
+            }
+
+            // 2. Floating Layers Stack
+            if self.workspace.layers_floating && self.workspace.show_layers {
+                let mut open = true;
+                egui::Window::new("Layers Stack")
+                    .default_size(egui::vec2(360.0, 420.0))
+                    .resizable(true)
+                    .collapsible(true)
+                    .open(&mut open)
+                    .show(ctx, |ui| {
+                        ui.horizontal(|ui| {
+                            if ui.small_button("↙ Dock to Right Panel").clicked() {
+                                self.workspace.layers_floating = false;
+                            }
+                        });
+                        ui.separator();
+                        self.render_layers_content(ui, None);
+                    });
+                if !open {
+                    self.workspace.show_layers = false;
+                }
+            }
+
+            // 3. Floating Properties Panel
+            if self.workspace.properties_floating && self.workspace.show_properties {
+                let mut open = true;
+                let title = match self.right_panel_tab {
+                    RightPanelTab::Layers => "Properties",
+                    RightPanelTab::MeshMaps => "Mesh Maps & Baker",
+                };
+                egui::Window::new(title)
+                    .default_size(egui::vec2(380.0, 520.0))
+                    .resizable(true)
+                    .collapsible(true)
+                    .open(&mut open)
+                    .show(ctx, |ui| {
+                        ui.horizontal(|ui| {
+                            if ui.small_button("↙ Dock to Right Panel").clicked() {
+                                self.workspace.properties_floating = false;
+                            }
+                            ui.separator();
+                            ui.selectable_value(&mut self.right_panel_tab, RightPanelTab::Layers, "Properties");
+                            ui.selectable_value(&mut self.right_panel_tab, RightPanelTab::MeshMaps, "Mesh Maps");
+                        });
+                        ui.separator();
+                        match self.right_panel_tab {
+                            RightPanelTab::Layers => self.render_properties_content(ui),
+                            RightPanelTab::MeshMaps => self.render_mesh_maps_content(ui),
+                        }
+                    });
+                if !open {
+                    self.workspace.show_properties = false;
+                }
+            }
+
+            // 4. Floating Assets & Shelf
+            if self.workspace.shelf_dock == ShelfDockLocation::Floating && self.workspace.show_shelf {
+                let mut open = true;
+                egui::Window::new("Assets & Shelf")
+                    .default_size(egui::vec2(680.0, 380.0))
+                    .resizable(true)
+                    .collapsible(true)
+                    .open(&mut open)
+                    .show(ctx, |ui| {
+                        ui.horizontal(|ui| {
+                            if ui.small_button("↙ Dock Bottom").clicked() {
+                                self.workspace.shelf_dock = ShelfDockLocation::Bottom;
+                            }
+                            if ui.small_button("↙ Dock Left").clicked() {
+                                self.workspace.shelf_dock = ShelfDockLocation::Left;
+                            }
+                        });
+                        ui.separator();
+                        self.render_assets_panel(ui);
+                    });
+                if !open {
+                    self.workspace.show_shelf = false;
+                    self.show_shelf = false;
+                }
+            }
         }
 
         // --- CENTRAL VIEWPORT AREA ---
@@ -9218,6 +7180,7 @@ impl PaintcraftApp {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.small_button("X").on_hover_text("Close Assets Panel").clicked() {
                     self.show_shelf = false;
+                    self.workspace.show_shelf = false;
                 }
             });
         });
@@ -9421,10 +7384,11 @@ impl PaintcraftApp {
             })
             .collect();
 
-        // 2-Column Grid in Vertical ScrollArea
+        // Adaptive Grid in Vertical ScrollArea (wide in bottom shelf dock, compact in left dock)
         let avail_w = ui.available_width();
-        let card_w = ((avail_w - 6.0) / 2.0).clamp(70.0, 92.0);
-        let card_h = card_w + 14.0;
+        let card_w = 78.0_f32;
+        let card_h = card_w + 16.0;
+        let cols = ((avail_w - 6.0) / (card_w + 4.0)).floor().max(2.0) as usize;
 
         if self.shelf_category == crate::shelf::ShelfCategory::Environments {
             let hdri_query = self.shelf_search_query.to_lowercase();
@@ -9444,7 +7408,7 @@ impl PaintcraftApp {
                     if filtered_hdris.is_empty() {
                         ui.label(egui::RichText::new("No HDRIs found.\nDrop .hdr files into assets/hdris/").italics().color(Color32::from_rgb(140, 145, 155)));
                     } else {
-                        let chunks: Vec<_> = filtered_hdris.chunks(2).collect();
+                        let chunks: Vec<_> = filtered_hdris.chunks(cols).collect();
                         for row in chunks {
                             ui.horizontal(|ui| {
                                 ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
@@ -9560,7 +7524,7 @@ impl PaintcraftApp {
                             }
                         });
                     } else {
-                        let chunks: Vec<_> = filtered_mats.chunks(2).collect();
+                        let chunks: Vec<_> = filtered_mats.chunks(cols).collect();
                         for row in chunks {
                             ui.horizontal(|ui| {
                                 ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
@@ -9746,7 +7710,7 @@ impl PaintcraftApp {
                             ui.label(egui::RichText::new("No project resources found.\nBake mesh maps or click '+ Import...' to add textures to project shelf.").italics().color(Color32::from_rgb(140, 145, 155)));
                         }
                     } else {
-                        let chunks: Vec<_> = filtered_resources.chunks(2).collect();
+                        let chunks: Vec<_> = filtered_resources.chunks(cols).collect();
                         for row in chunks {
                             ui.horizontal(|ui| {
                                 ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
@@ -9853,7 +7817,7 @@ impl PaintcraftApp {
 
                     if !project_matches.is_empty() {
                         ui.label(egui::RichText::new("PROJECT RESOURCES").small().strong().color(Color32::from_rgb(243, 94, 24)));
-                        let pchunks: Vec<_> = project_matches.chunks(2).collect();
+                        let pchunks: Vec<_> = project_matches.chunks(cols).collect();
                         for row in pchunks {
                             ui.horizontal(|ui| {
                                 ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
@@ -9949,7 +7913,7 @@ impl PaintcraftApp {
 
                     if !mat_matches.is_empty() {
                         ui.label(egui::RichText::new("USER MATERIALS").small().strong().color(Color32::from_rgb(45, 140, 255)));
-                        let mchunks: Vec<_> = mat_matches.chunks(2).collect();
+                        let mchunks: Vec<_> = mat_matches.chunks(cols).collect();
                         for row in mchunks {
                             ui.horizontal(|ui| {
                                 ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
@@ -10008,7 +7972,7 @@ impl PaintcraftApp {
                         ui.add_space(2.0);
                     }
                 }
-                let chunks: Vec<_> = filtered_assets.chunks(2).collect();
+                let chunks: Vec<_> = filtered_assets.chunks(cols).collect();
                 for row in chunks {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
@@ -12006,7 +9970,2517 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&temp_dir_with_mesh);
     }
+
+    #[test]
+    fn test_workspace_layout_defaults_and_resets() {
+        let layout = WorkspaceLayout::default();
+        assert!(layout.show_toolbar);
+        assert!(layout.show_context_bar);
+        assert!(layout.show_status_bar);
+        assert!(layout.show_texture_sets);
+        assert!(layout.show_layers);
+        assert!(layout.show_properties);
+        assert!(layout.show_shelf);
+
+        assert!(!layout.texture_sets_floating);
+        assert!(!layout.layers_floating);
+        assert!(!layout.properties_floating);
+        assert_eq!(layout.shelf_dock, ShelfDockLocation::Bottom);
+
+        assert_eq!(layout.right_panel_width, 380.0);
+        assert_eq!(layout.bottom_shelf_height, 220.0);
+        assert_eq!(layout.layers_pane_height, 240.0);
+
+        assert!(!layout.texture_sets_collapsed);
+        assert!(!layout.layers_collapsed);
+        assert!(!layout.properties_collapsed);
+    }
+
+    #[test]
+    fn test_workspace_layout_dock_and_float_transitions() {
+        let mut layout = WorkspaceLayout::default();
+
+        // Undock all panels to floating mode
+        layout.texture_sets_floating = true;
+        layout.layers_floating = true;
+        layout.properties_floating = true;
+        layout.shelf_dock = ShelfDockLocation::Floating;
+
+        assert!(layout.texture_sets_floating);
+        assert!(layout.layers_floating);
+        assert!(layout.properties_floating);
+        assert_eq!(layout.shelf_dock, ShelfDockLocation::Floating);
+
+        // Dock all panels back to standard Substance Painter desktop layout
+        layout.texture_sets_floating = false;
+        layout.layers_floating = false;
+        layout.properties_floating = false;
+        layout.shelf_dock = ShelfDockLocation::Bottom;
+
+        assert!(!layout.texture_sets_floating);
+        assert!(!layout.layers_floating);
+        assert!(!layout.properties_floating);
+        assert_eq!(layout.shelf_dock, ShelfDockLocation::Bottom);
+    }
+
+    #[test]
+    fn test_workspace_shelf_dock_locations() {
+        let mut layout = WorkspaceLayout::default();
+        assert_eq!(layout.shelf_dock, ShelfDockLocation::Bottom);
+
+        layout.shelf_dock = ShelfDockLocation::Left;
+        assert_eq!(layout.shelf_dock, ShelfDockLocation::Left);
+
+        layout.shelf_dock = ShelfDockLocation::Floating;
+        assert_eq!(layout.shelf_dock, ShelfDockLocation::Floating);
+
+        layout.shelf_dock = ShelfDockLocation::Bottom;
+        assert_eq!(layout.shelf_dock, ShelfDockLocation::Bottom);
+    }
+
+    #[test]
+    fn test_workspace_layout_collapsed_states() {
+        let mut layout = WorkspaceLayout::default();
+        assert!(!layout.texture_sets_collapsed);
+        assert!(!layout.layers_collapsed);
+        assert!(!layout.properties_collapsed);
+
+        layout.texture_sets_collapsed = true;
+        layout.layers_collapsed = true;
+        layout.properties_collapsed = true;
+
+        assert!(layout.texture_sets_collapsed);
+        assert!(layout.layers_collapsed);
+        assert!(layout.properties_collapsed);
+    }
 }
 
 
 
+
+
+impl PaintcraftApp {
+    /// Render Texture Set List content (scrollable list of texture sets and actions)
+    pub fn render_texture_sets_content(&mut self, ui: &mut egui::Ui) {
+                    // Scrollable list of texture sets
+                    let max_ts_height = (self.project.texture_sets.len() as f32 * 28.0).clamp(40.0, 130.0);
+                    egui::ScrollArea::vertical()
+                        .max_height(max_ts_height)
+                        .show(ui, |ui| {
+                            let mut switch_to = None;
+                            let mut toggle_vis = None;
+                            let mut toggle_solo = None;
+
+                            for (idx, ts) in self.project.texture_sets.iter().enumerate() {
+                                let is_active = idx == self.project.active_texture_set_idx;
+                                let is_visible = ts.visible;
+                                
+                                ui.horizontal(|ui| {
+                                    // Eye visibility toggle
+                                    let eye_txt = if is_visible { "[V]" } else { "[ ]" };
+                                    let eye_col = if is_visible { Color32::from_rgb(220, 225, 235) } else { Color32::from_rgb(100, 105, 115) };
+                                    if ui.button(egui::RichText::new(eye_txt).monospace().color(eye_col)).on_hover_text("Toggle Texture Set / Sub-mesh visibility in 3D viewport").clicked() {
+                                        toggle_vis = Some(idx);
+                                    }
+
+                                    // Solo toggle
+                                    let solo_col = if is_active { Color32::from_rgb(243, 94, 24) } else { Color32::from_rgb(130, 135, 145) };
+                                    if ui.small_button(egui::RichText::new("S").strong().color(solo_col)).on_hover_text("Solo Texture Set (isolate in viewport)").clicked() {
+                                        toggle_solo = Some(idx);
+                                    }
+
+                                    // Name and tri count
+                                    let tri_count: usize = ts.submesh_indices.iter()
+                                        .filter_map(|&sm_idx| self.project.mesh.submeshes.get(sm_idx))
+                                        .map(|sm| sm.index_count / 3)
+                                        .sum();
+
+                                    let label_text = format!("{}  ({} tris)", ts.name, tri_count);
+                                    let resp = if is_active {
+                                        ui.selectable_label(true, egui::RichText::new(&label_text).strong().color(Color32::WHITE))
+                                    } else {
+                                        ui.selectable_label(false, egui::RichText::new(&label_text).color(Color32::from_rgb(180, 185, 195)))
+                                    };
+
+                                    if resp.clicked() && !is_active {
+                                        switch_to = Some(idx);
+                                    }
+                                });
+                            }
+
+                            if let Some(idx) = toggle_vis {
+                                self.project.toggle_texture_set_visibility(idx);
+                                if let Some(wgpu) = &mut self.wgpu_viewport {
+                                    wgpu.sync_submesh_visibility(&self.project.mesh.submeshes);
+                                }
+                            }
+                            if let Some(idx) = toggle_solo {
+                                self.project.solo_texture_set(idx);
+                                if let Some(wgpu) = &mut self.wgpu_viewport {
+                                    wgpu.sync_submesh_visibility(&self.project.mesh.submeshes);
+                                }
+                            }
+                            if let Some(idx) = switch_to {
+                                self.project.switch_texture_set(idx);
+                                if let Some(wgpu) = &mut self.wgpu_viewport {
+                                    wgpu.sync_textures(&mut self.project);
+                                }
+                                self.status_message = format!("Active Texture Set: {}", self.project.texture_sets[idx].name);
+                            }
+                        });
+
+                    // Active Texture Set size selector and quick actions
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("Size:").small().color(Color32::from_rgb(140, 145, 155)));
+                        let res_list = [512, 1024, 2048, 4096];
+                        for &r in &res_list {
+                            let is_curr = self.project.texture_width == r;
+                            let btn_text = match r {
+                                512 => "512",
+                                1024 => "1K",
+                                2048 => "2K",
+                                4096 => "4K",
+                                _ => "Custom",
+                            };
+                            if ui.selectable_label(is_curr, btn_text).clicked() && !is_curr {
+                                self.project.resize_textures(r, r);
+                                self.history.adjust_max_undo_for_resolution(r, r);
+                                self.project.rebuild_composite();
+                                self.project.gpu_sync_needed = true;
+                                self.status_message = format!("Resized texture set to {}x{}", r, r);
+                            }
+                        }
+
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if self.project.texture_sets.len() > 1 {
+                                if ui.small_button("Del").on_hover_text("Delete active texture set").clicked() {
+                                    let cur_idx = self.project.active_texture_set_idx;
+                                    self.project.delete_texture_set(cur_idx);
+                                    if let Some(wgpu) = &mut self.wgpu_viewport {
+                                        wgpu.sync_textures(&mut self.project);
+                                    }
+                                }
+                            }
+                            if ui.small_button("Dup").on_hover_text("Duplicate active texture set").clicked() {
+                                let cur_idx = self.project.active_texture_set_idx;
+                                self.project.duplicate_texture_set(cur_idx);
+                                if let Some(wgpu) = &mut self.wgpu_viewport {
+                                    wgpu.sync_textures(&mut self.project);
+                                }
+                            }
+                            if ui.small_button("+ Set").on_hover_text("Add new empty Texture Set").clicked() {
+                                let new_id = self.project.texture_sets.len() + 1;
+                                self.project.add_texture_set(
+                                    format!("Material_{}", new_id),
+                                    format!("Material_{}", new_id),
+                                    vec![],
+                                );
+                                if let Some(wgpu) = &mut self.wgpu_viewport {
+                                    wgpu.sync_textures(&mut self.project);
+                                }
+                            }
+                        });
+                    });
+    }
+
+    /// Render Layers Stack content
+    pub fn render_layers_content(&mut self, ui: &mut egui::Ui, pane_height: Option<f32>) {
+        let total_height = ui.available_height();
+        let layers_pane_height = pane_height.unwrap_or_else(|| (total_height * 0.36).clamp(175.0, 420.0));
+        ui.group(|ui| {
+            if pane_height.is_some() {
+                ui.set_height(layers_pane_height);
+            }
+                        // Layers Window Header & Active Blend / Opacity Controls
+                        ui.horizontal(|ui| {
+                            ui.heading("Layers");
+
+                            // Substance 3D Painter Layer Stack Channel Selector
+                            ui.label("Channel:");
+                            egui::ComboBox::from_id_source("layer_stack_channel_selector")
+                                .selected_text(self.layer_stack_channel.short_name())
+                                .show_ui(ui, |ui| {
+                                    let channels = [
+                                        crate::channel::ChannelType::BaseColor,
+                                        crate::channel::ChannelType::Roughness,
+                                        crate::channel::ChannelType::Metallic,
+                                        crate::channel::ChannelType::Normal,
+                                        crate::channel::ChannelType::Height,
+                                        crate::channel::ChannelType::AmbientOcclusion,
+                                        crate::channel::ChannelType::Emission,
+                                        crate::channel::ChannelType::Opacity,
+                                        crate::channel::ChannelType::Clearcoat,
+                                        crate::channel::ChannelType::Anisotropy,
+                                    ];
+                                    for ch in channels {
+                                        ui.selectable_value(&mut self.layer_stack_channel, ch, ch.name());
+                                    }
+                                });
+                        });
+
+                        let act_idx = self.project.active_layer_idx;
+                        let mut blend_or_opacity_changed = false;
+
+                        // Blend Mode and Opacity (Affecting the active selected layer's active channel)
+                        if let Some(act_layer) = self.project.layers.get_mut(act_idx) {
+                            let cur_ch = self.layer_stack_channel;
+                            let mut cur_mode = act_layer.get_channel_blend_mode(cur_ch);
+                            let mut cur_ch_op = act_layer.get_channel_opacity(cur_ch);
+
+                            ui.horizontal(|ui| {
+                                ui.label("Blend:");
+                                egui::ComboBox::from_id_source("active_layer_channel_blend_mode")
+                                    .selected_text(cur_mode.name())
+                                    .show_ui(ui, |ui| {
+                                        let modes = [
+                                            BlendMode::PassThrough,
+                                            BlendMode::Normal,
+                                            BlendMode::Multiply,
+                                            BlendMode::Screen,
+                                            BlendMode::Overlay,
+                                            BlendMode::Add,
+                                            BlendMode::Subtract,
+                                            BlendMode::Darken,
+                                            BlendMode::Lighten,
+                                            BlendMode::Replace,
+                                        ];
+                                        for m in modes {
+                                            if ui.selectable_value(&mut cur_mode, m, m.name()).clicked() {
+                                                act_layer.set_channel_blend_mode(cur_ch, m);
+                                                blend_or_opacity_changed = true;
+                                            }
+                                        }
+                                    });
+
+                                ui.label("Opac:");
+                                if ui.add_sized([55.0, 18.0], egui::Slider::new(&mut cur_ch_op, 0.0..=1.0)).changed() {
+                                    act_layer.set_channel_opacity(cur_ch, cur_ch_op);
+                                    blend_or_opacity_changed = true;
+                                }
+
+                                ui.label("Layer:");
+                                if ui.add_sized([45.0, 18.0], egui::Slider::new(&mut act_layer.opacity, 0.0..=1.0)).on_hover_text("Master layer opacity").changed() {
+                                    blend_or_opacity_changed = true;
+                                }
+                            });
+                        }
+    
+                        if blend_or_opacity_changed {
+                            if self.wgpu_viewport.is_some() && ui.input(|i| i.pointer.any_down()) {
+                                self.project.gpu_sync_needed = true;
+                                self.need_cpu_composite_sync = true;
+                            } else {
+                                self.project.rebuild_composite();
+                            }
+                        }
+    
+                        // Layer Stack Toolbar
+                        let opt_icons = self.icons.as_ref();
+                        ui.horizontal(|ui| {
+                            let btn_paint = if let Some(icons) = opt_icons {
+                                egui::Button::image_and_text((icons.layer_paint.id(), egui::vec2(13.0, 13.0)), "Paint")
+                            } else {
+                                egui::Button::new("+ Paint")
+                            };
+                            if ui.add(btn_paint).on_hover_text("Add Paint Layer").clicked() {
+                                let prev_active = self.project.active_layer_idx;
+                                let new_idx = self.project.add_paint_layer(None);
+                                self.brush_engine.settings.target = PaintTarget::Material;
+                                let layer_clone = self.project.layers[new_idx].clone_stroke_snapshot();
+                                self.history.push("Add Paint Layer", HistoryAction::AddLayer {
+                                    layer_idx: new_idx,
+                                    layer: layer_clone,
+                                    prev_active,
+                                });
+                                self.status_message = "Added Paint Layer.".to_string();
+                            }
+
+                            let btn_fill = if let Some(icons) = opt_icons {
+                                egui::Button::image_and_text((icons.layer_fill.id(), egui::vec2(13.0, 13.0)), "Fill")
+                            } else {
+                                egui::Button::new("+ Fill")
+                            };
+                            if ui.add(btn_fill).on_hover_text("Add Fill Layer").clicked() {
+                                let prev_active = self.project.active_layer_idx;
+                                let new_idx = self.project.add_fill_layer(
+                                    None,
+                                    glam::Vec4::ONE,
+                                    0.5,
+                                    0.0,
+                                );
+                                self.brush_engine.settings.target = PaintTarget::Material;
+                                let layer_clone = self.project.layers[new_idx].clone_stroke_snapshot();
+                                self.history.push("Add Fill Layer", HistoryAction::AddLayer {
+                                    layer_idx: new_idx,
+                                    layer: layer_clone,
+                                    prev_active,
+                                });
+                                self.status_message = "Added Fill Layer.".to_string();
+                            }
+
+                            let btn_folder = if let Some(icons) = opt_icons {
+                                egui::Button::image_and_text((icons.layer_folder.id(), egui::vec2(13.0, 13.0)), "Folder")
+                            } else {
+                                egui::Button::new("+ Folder")
+                            };
+                            if ui.add(btn_folder).on_hover_text("Add Layer Folder / Group").clicked() {
+                                let prev_active = self.project.active_layer_idx;
+                                let new_idx = self.project.add_folder_layer(None);
+                                let layer_clone = self.project.layers[new_idx].clone_stroke_snapshot();
+                                self.history.push("Add Folder", HistoryAction::AddLayer {
+                                    layer_idx: new_idx,
+                                    layer: layer_clone,
+                                    prev_active,
+                                });
+                                self.status_message = "Added Layer Folder.".to_string();
+                            }
+
+                            if ui.button("Filters...").on_hover_text("Apply filter (Blur, Levels, Invert, Sharpen)").clicked() {
+                                self.show_filter_modal = true;
+                            }
+
+                            if ui.button("Duplicate").on_hover_text("Duplicate selected layer").clicked() {
+                                if let Some(new_idx) = self.project.duplicate_layer(act_idx) {
+                                    let layer_clone = Box::new(self.project.layers[new_idx].clone());
+                                    self.history.push("Duplicate Layer", HistoryAction::AddLayer {
+                                        layer_idx: new_idx,
+                                        layer: layer_clone,
+                                        prev_active: act_idx,
+                                    });
+                                    self.status_message = format!("Duplicated layer #{}", new_idx);
+                                }
+                            }
+
+                            if ui.button("Save as Mat").on_hover_text("Save selected layer as a reusable PBR material in the Shelf").clicked() {
+                                if let Some(layer) = self.project.layers.get(act_idx) {
+                                    let name = layer.name.clone();
+                                    let clean_id = name.trim().replace(' ', "_").to_lowercase();
+                                    let mat = crate::asset_manager::CustomMaterialEntry {
+                                        id: clean_id,
+                                        name: name.clone(),
+                                        description: format!("Custom PBR material created from layer '{}'", name),
+                                        path: std::path::PathBuf::new(),
+                                        file_name: String::new(),
+                                        base_color: [layer.fill_color.x, layer.fill_color.y, layer.fill_color.z, layer.fill_color.w],
+                                        roughness: layer.fill_roughness,
+                                        metallic: layer.fill_metallic,
+                                        height: layer.fill_height,
+                                        normal: [0.5, 0.5, 1.0, 0.5],
+                                        emissive: [layer.fill_emissive.x, layer.fill_emissive.y, layer.fill_emissive.z, layer.fill_emissive.w],
+                                        opacity: layer.fill_opacity,
+                                        clearcoat: layer.fill_clearcoat,
+                                        anisotropy: layer.fill_anisotropy,
+                                    };
+                                    match self.asset_manager.save_material(&mat) {
+                                        Ok(path) => {
+                                            self.status_message = format!("Saved Material '{}' to {:?}", mat.name, path.file_name().unwrap_or_default());
+                                        }
+                                        Err(e) => {
+                                            self.status_message = format!("Failed to save material: {}", e);
+                                        }
+                                    }
+                                }
+                            }
+    
+                            #[derive(Clone, Copy)]
+                            enum MaskAddAction {
+                                Black,
+                                White,
+                                Curvature,
+                                Grunge,
+                            }
+                            let mut mask_add_action = None;
+    
+                            ui.menu_button("+ Mask", |ui| {
+                                if ui.button("Black Mask (Hide All)").clicked() {
+                                    mask_add_action = Some(MaskAddAction::Black);
+                                    ui.close_menu();
+                                }
+                                if ui.button("White Mask (Reveal All)").clicked() {
+                                    mask_add_action = Some(MaskAddAction::White);
+                                    ui.close_menu();
+                                }
+                                if ui.button("Edge Wear Mask (Curvature)").clicked() {
+                                    mask_add_action = Some(MaskAddAction::Curvature);
+                                    ui.close_menu();
+                                }
+                                if ui.button("Grunge Mask").clicked() {
+                                    mask_add_action = Some(MaskAddAction::Grunge);
+                                    ui.close_menu();
+                                }
+                            });
+    
+                            if let Some(action) = mask_add_action {
+                                let curv = self.project.curvature_map.clone();
+                                if let Some(layer) = self.project.layers.get_mut(act_idx) {
+                                    match action {
+                                        MaskAddAction::Black => {
+                                            layer.add_black_mask();
+                                            self.brush_engine.settings.target = PaintTarget::Mask;
+                                            self.brush_engine.settings.mask_paint_value = 1.0;
+                                        }
+                                        MaskAddAction::White => {
+                                            layer.add_white_mask();
+                                            self.brush_engine.settings.target = PaintTarget::Mask;
+                                            self.brush_engine.settings.mask_paint_value = 0.0;
+                                        }
+                                        MaskAddAction::Curvature => {
+                                            layer.add_curvature_mask(curv.as_ref());
+                                            self.brush_engine.settings.target = PaintTarget::Mask;
+                                        }
+                                        MaskAddAction::Grunge => {
+                                            layer.add_grunge_mask();
+                                            self.brush_engine.settings.target = PaintTarget::Mask;
+                                        }
+                                    }
+                                }
+                                self.project.rebuild_composite();
+                            }
+    
+                            if ui.button("Up").on_hover_text("Move layer up").clicked() {
+                                self.project.move_layer_up(act_idx);
+                                self.project.rebuild_composite();
+                            }
+                            if ui.button("Down").on_hover_text("Move layer down").clicked() {
+                                self.project.move_layer_down(act_idx);
+                                self.project.rebuild_composite();
+                            }
+                            if ui.button("Del").on_hover_text("Delete selected layer").clicked() {
+                                let prev_active = self.project.active_layer_idx;
+                                if let Some(removed_layer) = self.project.delete_layer(act_idx) {
+                                    self.history.push("Delete Layer", HistoryAction::DeleteLayer {
+                                        layer_idx: act_idx,
+                                        layer: Box::new(removed_layer),
+                                        prev_active,
+                                    });
+                                    self.status_message = format!("Deleted layer #{}", act_idx + 1);
+                                }
+                            }
+                        });
+    
+                        ui.separator();
+    
+                        // Dedicated Scroll Area for Layer Stack
+                        egui::ScrollArea::vertical()
+                            .id_source("layers_stack_scroll")
+                            .max_height(layers_pane_height - 90.0)
+                            .show(ui, |ui| {
+                                struct LayerCardSummary {
+                                    id: u64,
+                                    name: String,
+                                    parent_folder_id: Option<u64>,
+                                    folder_collapsed: bool,
+                                    visible: bool,
+                                    layer_type: LayerType,
+                                    fill_color: Vec4,
+                                    has_mask: bool,
+                                }
+
+                                let layer_count = self.project.layers.len();
+                                let summaries: Vec<LayerCardSummary> = self.project.layers.iter().map(|l| LayerCardSummary {
+                                    id: l.id,
+                                    name: l.name.clone(),
+                                    parent_folder_id: l.parent_folder_id,
+                                    folder_collapsed: l.folder_collapsed,
+                                    visible: l.visible,
+                                    layer_type: l.layer_type,
+                                    fill_color: l.fill_color,
+                                    has_mask: l.has_mask,
+                                }).collect();
+
+                                let folders: Vec<(u64, String)> = summaries.iter()
+                                    .filter(|l| l.layer_type == LayerType::Folder)
+                                    .map(|l| (l.id, l.name.clone()))
+                                    .collect();
+
+                                let mut reorder_request = None;
+                                let mut toggle_visible_idx = None;
+                                let mut toggle_collapse_idx = None;
+                                let mut add_mask_idx = None;
+                                let mut rename_request = None;
+                                let mut folder_change = None;
+
+                                let mouse_pos = ui.input(|i| i.pointer.hover_pos());
+                                let mouse_released = ui.input(|i| i.pointer.any_released());
+
+                                for rev_i in 0..layer_count {
+                                    let i = layer_count - 1 - rev_i;
+                                    let layer = &summaries[i];
+
+                                    // Check if this layer is inside a collapsed folder
+                                    if let Some(pid) = layer.parent_folder_id {
+                                        if summaries.iter().any(|l| l.id == pid && l.folder_collapsed) {
+                                            continue;
+                                        }
+                                    }
+
+                                    let is_active = self.project.active_layer_idx == i;
+                                    let _is_target_mat = is_active && self.brush_engine.settings.target == PaintTarget::Material;
+                                    let is_target_mask = is_active && self.brush_engine.settings.target == PaintTarget::Mask;
+
+                                    let card_bg = if is_active {
+                                        Color32::from_rgb(44, 48, 56)
+                                    } else {
+                                        Color32::from_rgb(26, 28, 32)
+                                    };
+                                    // Highlight the OUTLINE of the active layer card!
+                                    let card_stroke = if is_active {
+                                        egui::Stroke::new(2.0_f32, Color32::from_rgb(243, 94, 24))
+                                    } else {
+                                        egui::Stroke::new(1.0_f32, Color32::from_rgb(45, 48, 55))
+                                    };
+
+                                    let card_response = egui::Frame::none()
+                                        .fill(card_bg)
+                                        .stroke(card_stroke)
+                                        .rounding(4.0)
+                                        .inner_margin(egui::Margin::symmetric(6.0, 5.0))
+                                        .show(ui, |ui| {
+                                            ui.horizontal(|ui| {
+                                                // 0. Child indentation
+                                                if layer.parent_folder_id.is_some() {
+                                                    ui.add_space(14.0);
+                                                }
+
+                                                // 1. Drag & Drop Handle
+                                                let drag_label = egui::RichText::new("::")
+                                                    .color(if is_active { Color32::from_rgb(243, 94, 24) } else { Color32::from_rgb(120, 125, 135) })
+                                                    .strong();
+                                                let drag_resp = ui.add(egui::Label::new(drag_label).selectable(false).sense(egui::Sense::drag()))
+                                                    .on_hover_text("Drag to reorder layer in stack");
+                                                if drag_resp.drag_started() {
+                                                    self.dragged_layer_idx = Some(i);
+                                                }
+
+                                                // 2. Visibility toggle
+                                                let (eye_rect, eye_resp) = ui.allocate_exact_size(egui::vec2(15.0, 15.0), egui::Sense::click());
+                                                if let Some(icons) = opt_icons {
+                                                    let tint = if layer.visible {
+                                                        Color32::WHITE
+                                                    } else {
+                                                        Color32::from_rgba_unmultiplied(100, 105, 115, 110)
+                                                    };
+                                                    ui.painter().image(
+                                                        icons.layer_eye.id(),
+                                                        eye_rect,
+                                                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                                                        tint,
+                                                    );
+                                                } else {
+                                                    let eye_icon = if layer.visible { "[o]" } else { "[-]" };
+                                                    let eye_color = if layer.visible { Color32::from_rgb(220, 225, 235) } else { Color32::from_rgb(110, 115, 125) };
+                                                    ui.painter().text(eye_rect.center(), egui::Align2::CENTER_CENTER, eye_icon, egui::FontId::proportional(11.0), eye_color);
+                                                }
+                                                if eye_resp.on_hover_text("Toggle Layer Visibility").clicked() {
+                                                    toggle_visible_idx = Some(i);
+                                                }
+
+                                                // 3. Type badge & Folder Chevron
+                                                if layer.layer_type == LayerType::Folder {
+                                                    let chev = if layer.folder_collapsed { "[+]" } else { "[-]" };
+                                                    if ui.add(egui::Label::new(egui::RichText::new(chev).color(Color32::from_rgb(243, 156, 18))).selectable(false).sense(egui::Sense::click())).on_hover_text("Expand/collapse folder").clicked() {
+                                                        toggle_collapse_idx = Some(i);
+                                                    }
+                                                }
+                                                // 3. Dual Swatch Thumbnails: Material Swatch & Mask Swatch (Substance Painter 1:1)
+                                                // 3a. Material Swatch Thumbnail
+                                                let (mat_rect, mat_resp) = ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::click());
+                                                let mat_bg = match layer.layer_type {
+                                                    LayerType::Fill => Color32::from_rgb(
+                                                        (layer.fill_color.x * 255.0) as u8,
+                                                        (layer.fill_color.y * 255.0) as u8,
+                                                        (layer.fill_color.z * 255.0) as u8,
+                                                    ),
+                                                    LayerType::Paint => Color32::from_rgb(46, 52, 64),
+                                                    LayerType::Folder => Color32::from_rgb(160, 115, 35),
+                                                };
+                                                let mat_stroke = if is_active && !is_target_mask {
+                                                    egui::Stroke::new(1.8_f32, Color32::from_rgb(243, 94, 24))
+                                                } else {
+                                                    egui::Stroke::new(1.0_f32, Color32::from_rgb(58, 62, 72))
+                                                };
+                                                ui.painter().rect(mat_rect, 2.0, mat_bg, mat_stroke);
+                                                if let Some(icons) = opt_icons {
+                                                    let icon_tex = match layer.layer_type {
+                                                        LayerType::Paint => Some(icons.layer_paint.id()),
+                                                        LayerType::Folder => Some(icons.layer_folder.id()),
+                                                        LayerType::Fill => Some(icons.layer_fill.id()),
+                                                    };
+                                                    if let Some(tex) = icon_tex {
+                                                        let icon_inset = egui::Rect::from_center_size(mat_rect.center(), egui::vec2(12.0, 12.0));
+                                                        ui.painter().image(
+                                                            tex,
+                                                            icon_inset,
+                                                            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                                                            Color32::WHITE,
+                                                        );
+                                                    }
+                                                } else {
+                                                    if layer.layer_type == LayerType::Paint {
+                                                        ui.painter().text(mat_rect.center(), egui::Align2::CENTER_CENTER, "P", egui::FontId::proportional(10.0), Color32::WHITE);
+                                                    } else if layer.layer_type == LayerType::Folder {
+                                                        ui.painter().text(mat_rect.center(), egui::Align2::CENTER_CENTER, "D", egui::FontId::proportional(10.0), Color32::WHITE);
+                                                    }
+                                                }
+                                                if mat_resp.on_hover_text("Target Material (Click to activate material editing)").clicked() {
+                                                    self.project.active_layer_idx = i;
+                                                    self.brush_engine.settings.target = PaintTarget::Material;
+                                                }
+
+                                                // 3b. Mask Swatch Thumbnail (if layer has mask)
+                                                if layer.has_mask {
+                                                    ui.painter().text(
+                                                        ui.cursor().min + egui::vec2(2.0, 9.0),
+                                                        egui::Align2::CENTER_CENTER,
+                                                        "-",
+                                                        egui::FontId::proportional(10.0),
+                                                        Color32::from_rgb(110, 115, 125),
+                                                    );
+                                                    let (mask_rect, mask_resp) = ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::click());
+                                                    let mask_stroke = if is_active && is_target_mask {
+                                                        egui::Stroke::new(1.8_f32, Color32::from_rgb(243, 94, 24))
+                                                    } else {
+                                                        egui::Stroke::new(1.0_f32, Color32::from_rgb(65, 70, 80))
+                                                    };
+                                                    ui.painter().rect(mask_rect, 2.0, Color32::from_rgb(20, 22, 26), mask_stroke);
+                                                    // Draw small mask shape
+                                                    ui.painter().circle_filled(mask_rect.center(), 5.0, Color32::from_rgb(235, 235, 240));
+                                                    if mask_resp.on_hover_text("Target Mask (Click to activate mask editing)").clicked() {
+                                                        self.project.active_layer_idx = i;
+                                                        self.brush_engine.settings.target = PaintTarget::Mask;
+                                                    }
+                                                } else {
+                                                    if ui.small_button("+M").on_hover_text("Add layer mask").clicked() {
+                                                        add_mask_idx = Some(i);
+                                                        self.project.active_layer_idx = i;
+                                                        self.brush_engine.settings.target = PaintTarget::Mask;
+                                                    }
+                                                }
+
+                                                // 4. Layer Name & Inline Renaming
+                                                if self.renaming_layer_idx == Some(i) {
+                                                    let text_res = ui.add(egui::TextEdit::singleline(&mut self.rename_buffer).desired_width(110.0));
+                                                    text_res.request_focus();
+                                                    if ui.input(|inp| inp.key_pressed(egui::Key::Enter)) || ui.small_button("OK").clicked() {
+                                                        if !self.rename_buffer.trim().is_empty() {
+                                                            rename_request = Some((i, self.rename_buffer.trim().to_string()));
+                                                        }
+                                                        self.renaming_layer_idx = None;
+                                                    }
+                                                    if ui.input(|inp| inp.key_pressed(egui::Key::Escape)) || ui.small_button("X").clicked() {
+                                                        self.renaming_layer_idx = None;
+                                                    }
+                                                } else {
+                                                    let name_color = if is_active {
+                                                        Color32::from_rgb(255, 255, 255)
+                                                    } else {
+                                                        Color32::from_rgb(195, 200, 210)
+                                                    };
+                                                    let name_text = egui::RichText::new(&layer.name)
+                                                        .color(name_color)
+                                                        .strong();
+                                                    let name_resp = ui.add(egui::Label::new(name_text).selectable(false).sense(egui::Sense::click_and_drag()))
+                                                        .on_hover_text("Click to select material • Drag to reorder • Double-click to rename");
+
+                                                    if name_resp.drag_started() {
+                                                        self.dragged_layer_idx = Some(i);
+                                                    }
+                                                    if name_resp.clicked() {
+                                                        self.project.active_layer_idx = i;
+                                                        self.brush_engine.settings.target = PaintTarget::Material;
+                                                    }
+                                                    if name_resp.double_clicked() {
+                                                        self.renaming_layer_idx = Some(i);
+                                                        self.rename_buffer = layer.name.clone();
+                                                    }
+
+                                                    // Small edit button on active layer
+                                                    if is_active {
+                                                        if ui.small_button("Edit").on_hover_text("Rename layer").clicked() {
+                                                            self.renaming_layer_idx = Some(i);
+                                                            self.rename_buffer = layer.name.clone();
+                                                        }
+                                                    }
+                                                }
+
+                                                // 6. Folder membership (Move in/out)
+                                                if layer.layer_type != LayerType::Folder && !folders.is_empty() {
+                                                    let cur_layer_id = layer.id;
+                                                    if layer.parent_folder_id.is_some() {
+                                                        if ui.small_button("^").on_hover_text("Remove from folder").clicked() {
+                                                            folder_change = Some((i, None));
+                                                        }
+                                                    } else {
+                                                        ui.menu_button(">", |ui| {
+                                                            for (fid, fname) in &folders {
+                                                                if *fid != cur_layer_id && ui.button(fname).clicked() {
+                                                                    folder_change = Some((i, Some(*fid)));
+                                                                    ui.close_menu();
+                                                                }
+                                                            }
+                                                        });
+                                                    }
+                                                }
+                                            });
+                                        });
+
+                                    let card_rect = card_response.response.rect;
+
+                                    // Active layer left accent indicator bar
+                                    if is_active {
+                                        ui.painter().rect_filled(
+                                            egui::Rect::from_min_max(
+                                                card_rect.min,
+                                                egui::pos2(card_rect.min.x + 3.5, card_rect.max.y),
+                                            ),
+                                            2.0,
+                                            Color32::from_rgb(243, 94, 24),
+                                        );
+                                    }
+
+                                    // Drag-and-drop drop zone detection & guidelines
+                                    if let Some(dragged_from) = self.dragged_layer_idx {
+                                        if let Some(pos) = mouse_pos {
+                                            if card_rect.contains(pos) && dragged_from != i {
+                                                // Draw insertion highlight line
+                                                let is_upper = pos.y < card_rect.center().y;
+                                                let line_y = if is_upper { card_rect.min.y } else { card_rect.max.y };
+                                                ui.painter().line_segment(
+                                                    [egui::pos2(card_rect.min.x, line_y), egui::pos2(card_rect.max.x, line_y)],
+                                                    egui::Stroke::new(2.5_f32, Color32::from_rgb(243, 94, 24)),
+                                                );
+
+                                                if mouse_released {
+                                                    reorder_request = Some((dragged_from, i));
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    ui.add_space(2.0);
+                                }
+
+                                if mouse_released {
+                                    self.dragged_layer_idx = None;
+                                }
+
+                                if let Some((from, to)) = reorder_request {
+                                    self.project.reorder_layer(from, to);
+                                    self.status_message = format!("Reordered layer {} -> {}", from, to);
+                                    self.dragged_layer_idx = None;
+                                }
+
+                                if let Some(idx) = toggle_visible_idx {
+                                    if let Some(l) = self.project.layers.get_mut(idx) {
+                                        l.visible = !l.visible;
+                                    }
+                                    self.project.rebuild_composite();
+                                    self.project.gpu_sync_needed = true;
+                                }
+                                if let Some(idx) = toggle_collapse_idx {
+                                    if let Some(l) = self.project.layers.get_mut(idx) {
+                                        l.folder_collapsed = !l.folder_collapsed;
+                                    }
+                                }
+                                if let Some(idx) = add_mask_idx {
+                                    if let Some(l) = self.project.layers.get_mut(idx) {
+                                        l.add_white_mask();
+                                    }
+                                    self.project.rebuild_composite();
+                                    self.project.gpu_sync_needed = true;
+                                }
+                                if let Some((idx, name)) = rename_request {
+                                    if let Some(l) = self.project.layers.get_mut(idx) {
+                                        l.name = name;
+                                    }
+                                }
+                                if let Some((idx, pid)) = folder_change {
+                                    if let Some(l) = self.project.layers.get_mut(idx) {
+                                        l.parent_folder_id = pid;
+                                    }
+                                    self.project.rebuild_composite();
+                                    self.project.gpu_sync_needed = true;
+                                }
+                            });
+        });
+    }
+
+    /// Render Properties content (active layer/mask/paint parameters)
+    pub fn render_properties_content(&mut self, ui: &mut egui::Ui) {
+                    let act_idx = self.project.active_layer_idx;
+                    let is_mask_editing = self.brush_engine.settings.target == PaintTarget::Mask;
+    
+                    let (has_layer, prop_title) = if let Some(layer) = self.project.layers.get(act_idx) {
+                        let title = if is_mask_editing {
+                            format!("Properties - Mask: {}", layer.name)
+                        } else {
+                            match layer.layer_type {
+                                LayerType::Fill => format!("Properties - Fill: {}", layer.name),
+                                LayerType::Paint => format!("Properties - Paint: {}", layer.name),
+                                LayerType::Folder => format!("Properties - Folder: {}", layer.name),
+                            }
+                        };
+                        (true, title)
+                    } else {
+                        (false, String::new())
+                    };
+
+                    if has_layer {
+                        let mut prop_changed = false;
+                        let mut mask_changed = false;
+                        let mut open_shelf_picker = None;
+                        let mut import_to_shelf_and_assign = None;
+                        ui.heading(&prop_title);
+                        ui.add_space(2.0);
+
+                        egui::ScrollArea::vertical()
+                            .id_source("properties_panel_scroll")
+                            .show(ui, |ui| {
+                                let (lower_layers, higher_layers) = self.project.layers.split_at_mut(act_idx);
+                                let available_anchors: Vec<String> = lower_layers
+                                    .iter()
+                                    .filter_map(|l| l.anchor_point.clone())
+                                    .collect();
+                                let anchor_refs: Vec<crate::layer::AnchorLayerRef<'_>> = lower_layers
+                                    .iter()
+                                    .filter_map(|l| l.as_anchor_ref())
+                                    .collect();
+                                let layer = &mut higher_layers[0];
+                                let curv_ref = self.project.curvature_map.as_ref();
+                                let ao_ref = self.project.ao_map.as_ref();
+                                let pos_ref = self.project.position_map.as_ref();
+                                let wn_ref = self.project.world_space_normal_map.as_ref();
+                                let id_ref = self.project.id_map.as_ref();
+
+                                ui.horizontal(|ui| {
+                                    ui.label("Name:");
+                                    if ui.text_edit_singleline(&mut layer.name).changed() {
+                                        prop_changed = true;
+                                    }
+                                    ui.add_space(8.0);
+                                    let mut is_anchor = layer.anchor_point.is_some();
+                                    if ui.checkbox(&mut is_anchor, "Anchor Point").on_hover_text("Expose layer channels as an Anchor Point for procedural mask referencing in layers above").changed() {
+                                        if is_anchor {
+                                            layer.anchor_point = Some(layer.name.clone());
+                                        } else {
+                                            layer.anchor_point = None;
+                                        }
+                                        prop_changed = true;
+                                    }
+                                    if let Some(ref mut name) = layer.anchor_point {
+                                        ui.label("Tag:");
+                                        if ui.text_edit_singleline(name).changed() {
+                                            prop_changed = true;
+                                        }
+                                    }
+                                });
+                                ui.add_space(4.0);
+                                ui.separator();
+                                ui.add_space(4.0);
+
+                                if is_mask_editing {
+                                    let mut prop_changed = false;
+                                    // --- PROPERTIES: MASK (Substance 3D Painter Non-Destructive Effect Stack) ---
+                                    ui.group(|ui| {
+                                        ui.strong("Mask Effect Stack (Non-Destructive):");
+                                        ui.horizontal_wrapped(|ui| {
+                                            if ui.button("+ Add Fill").on_hover_text("Add procedural noise or generator fill to mask").clicked() {
+                                                layer.add_mask_fill_effect_advanced(ProceduralGenerator::PerlinNoise, curv_ref, ao_ref, pos_ref, wn_ref);
+                                                prop_changed = true;
+                                            }
+                                            if ui.button("+ Add Paint").on_hover_text("Add paint modifier to mask").clicked() {
+                                                layer.add_mask_paint_effect(curv_ref);
+                                                prop_changed = true;
+                                            }
+                                            egui::ComboBox::from_id_source("add_generator_quick_menu")
+                                                .selected_text("+ Add Generator...")
+                                                .show_ui(ui, |ui| {
+                                                    if ui.selectable_label(false, "Curvature Edge Wear").on_hover_text("Substance convex edge wear & paint chipping").clicked() {
+                                                        layer.add_mask_generator_curvature_wear(curv_ref, ao_ref, pos_ref, wn_ref);
+                                                        prop_changed = true;
+                                                    }
+                                                    if ui.selectable_label(false, "Cavity Dirt (AO)").on_hover_text("Substance concave crevice grime & sediment accumulation").clicked() {
+                                                        layer.add_mask_generator_cavity_dirt(curv_ref, ao_ref, pos_ref, wn_ref);
+                                                        prop_changed = true;
+                                                    }
+                                                    if ui.selectable_label(false, "Directional Dust (+Y)").on_hover_text("Sky-facing dust settling into upward concave pockets").clicked() {
+                                                        layer.add_mask_generator_directional_dust(curv_ref, ao_ref, pos_ref, wn_ref);
+                                                        prop_changed = true;
+                                                    }
+                                                    if ui.selectable_label(false, "Ground Mud & Splash").on_hover_text("Height-based ground mud accumulation with organic splatter").clicked() {
+                                                        layer.add_mask_generator_ground_dirt(curv_ref, ao_ref, pos_ref, wn_ref);
+                                                        prop_changed = true;
+                                                    }
+                                                    if ui.selectable_label(false, "Mask Editor (Compound)").on_hover_text("Compound mask editor fusing all baked mesh maps").clicked() {
+                                                        layer.add_mask_generator_mask_editor(curv_ref, ao_ref, pos_ref, wn_ref);
+                                                        prop_changed = true;
+                                                    }
+                                                });
+                                            if ui.button("+ Color Select").on_hover_text("Isolate submesh or UV island using baked ID Map").clicked() {
+                                                layer.add_mask_color_selection_effect([1.0, 0.0, 0.0], 0.1, 0.05);
+                                                prop_changed = true;
+                                            }
+                                            if ui.button("+ Anchor").on_hover_text("Reference channel from layer below").clicked() {
+                                                let def_name = available_anchors.first().cloned().unwrap_or_else(|| "Anchor".to_string());
+                                                layer.add_mask_anchor_effect(def_name, crate::channel::ChannelType::BaseColor);
+                                                prop_changed = true;
+                                            }
+                                            if ui.button("+ Add Blur").on_hover_text("Add gaussian blur filter to mask").clicked() {
+                                                layer.add_mask_filter_blur(3.0, curv_ref);
+                                                prop_changed = true;
+                                            }
+                                            if ui.button("+ Add Levels").on_hover_text("Add histogram levels filter to mask").clicked() {
+                                                layer.add_mask_filter_levels(curv_ref);
+                                                prop_changed = true;
+                                            }
+                                            if ui.button("+ Add Sharpen").on_hover_text("Add sharpen filter to mask").clicked() {
+                                                layer.add_mask_filter_sharpen(1.0, curv_ref);
+                                                prop_changed = true;
+                                            }
+                                            if ui.button("+ Add High Pass").on_hover_text("Add high-pass filter to mask").clicked() {
+                                                layer.add_mask_filter_high_pass(2.0, curv_ref);
+                                                prop_changed = true;
+                                            }
+                                            if ui.button("+ Add Contrast").on_hover_text("Add contrast & brightness filter to mask").clicked() {
+                                                layer.add_mask_filter_contrast(1.2, 0.0, curv_ref);
+                                                prop_changed = true;
+                                            }
+                                            if ui.button("+ Add Invert").on_hover_text("Add invert filter to mask").clicked() {
+                                                layer.add_mask_filter_invert(curv_ref);
+                                                prop_changed = true;
+                                            }
+
+                                            egui::ComboBox::from_id_source("smart_mask_quick_add")
+                                                .selected_text("+ Smart Mask...")
+                                                .show_ui(ui, |ui| {
+                                                    for sm in crate::smart_materials::SmartMaterialLibrary::smart_masks() {
+                                                        if ui.selectable_label(false, sm.name).on_hover_text(sm.description).clicked() {
+                                                            crate::smart_materials::SmartMaterialLibrary::apply_smart_mask_advanced(
+                                                                sm.id,
+                                                                layer,
+                                                                curv_ref,
+                                                                ao_ref,
+                                                                pos_ref,
+                                                                wn_ref,
+                                                            );
+                                                            prop_changed = true;
+                                                        }
+                                                    }
+                                                });
+                                        });
+
+                                        ui.add_space(4.0);
+                                        ui.horizontal(|ui| {
+                                            if ui.small_button("Clear White").clicked() {
+                                                layer.clear_mask(1.0);
+                                                prop_changed = true;
+                                            }
+                                            if ui.small_button("Clear Black").clicked() {
+                                                layer.clear_mask(0.0);
+                                                prop_changed = true;
+                                            }
+                                            if ui.small_button("Invert Base").clicked() {
+                                                layer.invert_mask();
+                                                prop_changed = true;
+                                            }
+                                            if ui.small_button("Remove Mask").clicked() {
+                                                layer.remove_mask();
+                                                self.brush_engine.settings.target = PaintTarget::Material;
+                                                prop_changed = true;
+                                            }
+                                        });
+                                    });
+
+                                    ui.add_space(4.0);
+
+                                    // Render mask effects stack list (top effect evaluates on top)
+                                    if layer.mask_effects.is_empty() {
+                                        ui.group(|ui| {
+                                            ui.label(egui::RichText::new("No modifiers in mask stack. Direct brush painting or whole-mask actions will apply to base mask buffer. Click '+ Add Fill' to add non-destructive noise.").small().italics().color(Color32::from_rgb(160, 165, 175)));
+                                        });
+                                    } else {
+                                        let eff_count = layer.mask_effects.len();
+                                        let mut remove_eff_id = None;
+                                        let mut reorder_eff = None;
+
+                                        for rev_idx in 0..eff_count {
+                                            let idx = eff_count - 1 - rev_idx;
+                                            let eff = &mut layer.mask_effects[idx];
+                                            let eff_id = eff.id;
+
+                                            ui.group(|ui| {
+                                                ui.horizontal(|ui| {
+                                                    if ui.checkbox(&mut eff.visible, "").changed() {
+                                                        prop_changed = true;
+                                                    }
+                                                    ui.strong(&eff.name);
+
+                                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                        if ui.small_button("X").on_hover_text("Delete effect").clicked() {
+                                                            remove_eff_id = Some(eff_id);
+                                                        }
+                                                        if idx > 0 && ui.small_button("v").on_hover_text("Move down").clicked() {
+                                                            reorder_eff = Some((eff_id, false));
+                                                        }
+                                                        if idx + 1 < eff_count && ui.small_button("^").on_hover_text("Move up").clicked() {
+                                                            reorder_eff = Some((eff_id, true));
+                                                        }
+                                                    });
+                                                });
+
+                                                ui.horizontal(|ui| {
+                                                    ui.label("Blend:");
+                                                    egui::ComboBox::from_id_source(format!("mask_eff_blend_{}", eff_id))
+                                                        .selected_text(eff.blend_mode.name())
+                                                        .width(90.0)
+                                                        .show_ui(ui, |ui| {
+                                                            let modes = [
+                                                                BlendMode::Normal,
+                                                                BlendMode::Multiply,
+                                                                BlendMode::Screen,
+                                                                BlendMode::Overlay,
+                                                                BlendMode::Add,
+                                                                BlendMode::Subtract,
+                                                                BlendMode::Darken,
+                                                                BlendMode::Lighten,
+                                                            ];
+                                                            for m in modes {
+                                                                if ui.selectable_value(&mut eff.blend_mode, m, m.name()).clicked() {
+                                                                    prop_changed = true;
+                                                                }
+                                                            }
+                                                        });
+                                                    ui.label("Opacity:");
+                                                    if ui.add(egui::Slider::new(&mut eff.opacity, 0.0..=1.0)).changed() {
+                                                        prop_changed = true;
+                                                    }
+                                                });
+
+                                                // Parameter controls per effect type
+                                                match &mut eff.effect_type {
+                                                    crate::layer::MaskEffectType::Fill {
+                                                        ref mut generator,
+                                                        ref mut scale,
+                                                        ref mut contrast,
+                                                        ref mut invert,
+                                                        ref mut balance,
+                                                    } => {
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Generator:");
+                                                            egui::ComboBox::from_id_source(format!("mask_eff_gen_{}", eff_id))
+                                                                .selected_text(generator.name())
+                                                                .show_ui(ui, |ui| {
+                                                                    for g in ProceduralGenerator::all() {
+                                                                        if ui.selectable_value(generator, *g, g.name()).clicked() {
+                                                                            prop_changed = true;
+                                                                        }
+                                                                    }
+                                                                });
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Scale:");
+                                                            if ui.add(egui::Slider::new(scale, 0.5..=64.0).clamp_to_range(false)).changed() {
+                                                                prop_changed = true;
+                                                            }
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Contrast:");
+                                                            if ui.add(egui::Slider::new(contrast, 0.1..=4.0)).changed() {
+                                                                prop_changed = true;
+                                                            }
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Balance:");
+                                                            if ui.add(egui::Slider::new(balance, 0.0..=1.0)).changed() {
+                                                                prop_changed = true;
+                                                            }
+                                                        });
+                                                        if ui.checkbox(invert, "Invert Generator").changed() {
+                                                            prop_changed = true;
+                                                        }
+                                                    }
+                                                    crate::layer::MaskEffectType::FilterBlur { ref mut sigma } => {
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Blur Radius:");
+                                                            if ui.add(egui::Slider::new(sigma, 0.5..=20.0)).changed() {
+                                                                prop_changed = true;
+                                                            }
+                                                        });
+                                                    }
+                                                    crate::layer::MaskEffectType::FilterLevels {
+                                                        ref mut in_black,
+                                                        ref mut in_white,
+                                                        ref mut gamma,
+                                                        ref mut out_black,
+                                                        ref mut out_white,
+                                                    } => {
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("In Black:");
+                                                            if ui.add(egui::Slider::new(in_black, 0.0..=1.0)).changed() { prop_changed = true; }
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("In White:");
+                                                            if ui.add(egui::Slider::new(in_white, 0.0..=1.0)).changed() { prop_changed = true; }
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Gamma:");
+                                                            if ui.add(egui::Slider::new(gamma, 0.1..=5.0)).changed() { prop_changed = true; }
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Out Black:");
+                                                            if ui.add(egui::Slider::new(out_black, 0.0..=1.0)).changed() { prop_changed = true; }
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Out White:");
+                                                            if ui.add(egui::Slider::new(out_white, 0.0..=1.0)).changed() { prop_changed = true; }
+                                                        });
+                                                    }
+                                                    crate::layer::MaskEffectType::FilterSharpen { ref mut strength } => {
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Sharpen Strength:");
+                                                            if ui.add(egui::Slider::new(strength, 0.1..=5.0)).changed() { prop_changed = true; }
+                                                        });
+                                                    }
+                                                    crate::layer::MaskEffectType::FilterHighPass { ref mut radius } => {
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("High Pass Radius:");
+                                                            if ui.add(egui::Slider::new(radius, 0.5..=20.0)).changed() { prop_changed = true; }
+                                                        });
+                                                    }
+                                                    crate::layer::MaskEffectType::FilterContrast { ref mut contrast, ref mut brightness } => {
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Contrast:");
+                                                            if ui.add(egui::Slider::new(contrast, 0.1..=4.0)).changed() { prop_changed = true; }
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Brightness:");
+                                                            if ui.add(egui::Slider::new(brightness, -1.0..=1.0)).changed() { prop_changed = true; }
+                                                        });
+                                                    }
+                                                    crate::layer::MaskEffectType::FilterInvert => {
+                                                        ui.label("Filter: Inverts lower layers in mask stack.");
+                                                    }
+                                                    crate::layer::MaskEffectType::Paint { ref mut buffer, ref mut alpha } => {
+                                                        let is_active = layer.active_mask_effect_id == Some(eff_id);
+                                                        ui.horizontal(|ui| {
+                                                            if is_active {
+                                                                ui.label(egui::RichText::new("Active Paint Target").color(Color32::from_rgb(80, 220, 120)).strong());
+                                                            } else if ui.small_button("Set Active Paint Target").clicked() {
+                                                                layer.active_mask_effect_id = Some(eff_id);
+                                                                prop_changed = true;
+                                                            }
+                                                            if ui.small_button("Clear Paint").clicked() {
+                                                                buffer.data.fill(0.0);
+                                                                alpha.data.fill(0.0);
+                                                                prop_changed = true;
+                                                            }
+                                                        });
+                                                    }
+                                                    crate::layer::MaskEffectType::ColorSelection { ref mut target_color, ref mut tolerance, ref mut softness } => {
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("ID Color:");
+                                                            let mut col_arr = *target_color;
+                                                            if ui.color_edit_button_rgb(&mut col_arr).changed() {
+                                                                *target_color = col_arr;
+                                                                prop_changed = true;
+                                                            }
+                                                            ui.label(format!("RGB: {:.2}, {:.2}, {:.2}", target_color[0], target_color[1], target_color[2]));
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Tolerance:");
+                                                            if ui.add(egui::Slider::new(tolerance, 0.0..=1.0)).changed() {
+                                                                prop_changed = true;
+                                                            }
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Softness:");
+                                                            if ui.add(egui::Slider::new(softness, 0.0..=0.5)).changed() {
+                                                                prop_changed = true;
+                                                            }
+                                                        });
+                                                        ui.label(egui::RichText::new("Isolates submeshes or UV islands via baked ID Map.").small().color(Color32::from_rgb(160, 165, 175)));
+                                                    }
+                                                    crate::layer::MaskEffectType::AnchorReference { ref mut anchor_name, ref mut source_channel, ref mut blur, ref mut invert } => {
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Anchor Layer:");
+                                                            egui::ComboBox::from_id_source(format!("anchor_name_sel_{}", eff_id))
+                                                                .selected_text(if anchor_name.is_empty() { "Select Anchor..." } else { anchor_name.as_str() })
+                                                                .show_ui(ui, |ui| {
+                                                                    if available_anchors.is_empty() {
+                                                                        ui.label(egui::RichText::new("(No anchor points exposed below)").italics().small());
+                                                                    } else {
+                                                                        for anc in &available_anchors {
+                                                                            if ui.selectable_label(anchor_name == anc, anc).clicked() {
+                                                                                *anchor_name = anc.clone();
+                                                                                prop_changed = true;
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                });
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Source Channel:");
+                                                            egui::ComboBox::from_id_source(format!("anchor_ch_sel_{}", eff_id))
+                                                                .selected_text(source_channel.name())
+                                                                .show_ui(ui, |ui| {
+                                                                    let channels = [
+                                                                        crate::channel::ChannelType::BaseColor,
+                                                                        crate::channel::ChannelType::Roughness,
+                                                                        crate::channel::ChannelType::Metallic,
+                                                                        crate::channel::ChannelType::Height,
+                                                                        crate::channel::ChannelType::Emission,
+                                                                        crate::channel::ChannelType::Opacity,
+                                                                    ];
+                                                                    for ch in channels {
+                                                                        if ui.selectable_label(*source_channel == ch, ch.name()).clicked() {
+                                                                            *source_channel = ch;
+                                                                            prop_changed = true;
+                                                                        }
+                                                                    }
+                                                                });
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Blur:");
+                                                            if ui.add(egui::Slider::new(blur, 0.0..=20.0)).changed() {
+                                                                prop_changed = true;
+                                                            }
+                                                        });
+                                                        if ui.checkbox(invert, "Invert Anchor").changed() {
+                                                            prop_changed = true;
+                                                        }
+                                                    }
+                                                    crate::layer::MaskEffectType::GeneratorCurvatureWear {
+                                                        ref mut wear_level,
+                                                        ref mut edge_width,
+                                                        ref mut edge_contrast,
+                                                        ref mut grunge_amount,
+                                                        ref mut grunge_scale,
+                                                        ref mut ao_inhibit,
+                                                        ref mut invert,
+                                                    } => {
+                                                        ui.label(egui::RichText::new("Substance Curvature Edge Wear").strong().color(Color32::from_rgb(220, 180, 80)));
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Wear Level:");
+                                                            if ui.add(egui::Slider::new(wear_level, 0.0..=1.0)).changed() { prop_changed = true; }
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Edge Width:");
+                                                            if ui.add(egui::Slider::new(edge_width, 0.1..=4.0)).changed() { prop_changed = true; }
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Edge Contrast:");
+                                                            if ui.add(egui::Slider::new(edge_contrast, 0.5..=5.0)).changed() { prop_changed = true; }
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Grunge Breakup:");
+                                                            if ui.add(egui::Slider::new(grunge_amount, 0.0..=1.0)).changed() { prop_changed = true; }
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Grunge Scale:");
+                                                            if ui.add(egui::Slider::new(grunge_scale, 1.0..=64.0).clamp_to_range(false)).changed() { prop_changed = true; }
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("AO Inhibit (Cavities):");
+                                                            if ui.add(egui::Slider::new(ao_inhibit, 0.0..=1.0)).changed() { prop_changed = true; }
+                                                        });
+                                                        if ui.checkbox(invert, "Invert Wear").changed() { prop_changed = true; }
+                                                    }
+                                                    crate::layer::MaskEffectType::GeneratorCavityDirt {
+                                                        ref mut dirt_level,
+                                                        ref mut dirt_contrast,
+                                                        ref mut dirt_reach,
+                                                        ref mut grunge_clumping,
+                                                        ref mut grunge_scale,
+                                                        ref mut invert,
+                                                    } => {
+                                                        ui.label(egui::RichText::new("Substance Cavity & Crevice Grime (AO)").strong().color(Color32::from_rgb(180, 140, 100)));
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Dirt Level:");
+                                                            if ui.add(egui::Slider::new(dirt_level, 0.0..=1.0)).changed() { prop_changed = true; }
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Dirt Contrast:");
+                                                            if ui.add(egui::Slider::new(dirt_contrast, 0.5..=5.0)).changed() { prop_changed = true; }
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Dirt Reach / Bleed:");
+                                                            if ui.add(egui::Slider::new(dirt_reach, 0.1..=4.0)).changed() { prop_changed = true; }
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Grunge Clumping:");
+                                                            if ui.add(egui::Slider::new(grunge_clumping, 0.0..=1.0)).changed() { prop_changed = true; }
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Grunge Scale:");
+                                                            if ui.add(egui::Slider::new(grunge_scale, 1.0..=64.0).clamp_to_range(false)).changed() { prop_changed = true; }
+                                                        });
+                                                        if ui.checkbox(invert, "Invert Cavity").changed() { prop_changed = true; }
+                                                    }
+                                                    crate::layer::MaskEffectType::GeneratorDirectionalDust {
+                                                        ref mut dust_direction,
+                                                        ref mut dust_level,
+                                                        ref mut angle_tolerance,
+                                                        ref mut cavity_trap,
+                                                        ref mut grunge_breakup,
+                                                        ref mut grunge_scale,
+                                                    } => {
+                                                        ui.label(egui::RichText::new("Substance Directional Dust (World Normal)").strong().color(Color32::from_rgb(200, 200, 180)));
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Direction:");
+                                                            if ui.selectable_label(dust_direction[1] > 0.5, "Up (+Y)").clicked() {
+                                                                *dust_direction = [0.0, 1.0, 0.0];
+                                                                prop_changed = true;
+                                                            }
+                                                            if ui.selectable_label(dust_direction[1] < -0.5, "Down (-Y)").clicked() {
+                                                                *dust_direction = [0.0, -1.0, 0.0];
+                                                                prop_changed = true;
+                                                            }
+                                                            if ui.selectable_label(dust_direction[2] > 0.5, "Forward (+Z)").clicked() {
+                                                                *dust_direction = [0.0, 0.0, 1.0];
+                                                                prop_changed = true;
+                                                            }
+                                                            if ui.selectable_label(dust_direction[0] > 0.5, "Right (+X)").clicked() {
+                                                                *dust_direction = [1.0, 0.0, 0.0];
+                                                                prop_changed = true;
+                                                            }
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Dust Level:");
+                                                            if ui.add(egui::Slider::new(dust_level, 0.0..=1.0)).changed() { prop_changed = true; }
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Angle Spread:");
+                                                            if ui.add(egui::Slider::new(angle_tolerance, 0.1..=2.0)).changed() { prop_changed = true; }
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Cavity Trap:");
+                                                            if ui.add(egui::Slider::new(cavity_trap, 0.0..=1.0)).changed() { prop_changed = true; }
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Grunge Breakup:");
+                                                            if ui.add(egui::Slider::new(grunge_breakup, 0.0..=1.0)).changed() { prop_changed = true; }
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Grunge Scale:");
+                                                            if ui.add(egui::Slider::new(grunge_scale, 1.0..=64.0).clamp_to_range(false)).changed() { prop_changed = true; }
+                                                        });
+                                                    }
+                                                    crate::layer::MaskEffectType::GeneratorGroundDirt {
+                                                        ref mut bottom_level,
+                                                        ref mut gradient_softness,
+                                                        ref mut splash_amount,
+                                                        ref mut splash_scale,
+                                                    } => {
+                                                        ui.label(egui::RichText::new("Substance Ground Mud & Splash (Position)").strong().color(Color32::from_rgb(170, 130, 90)));
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Bottom Height Level:");
+                                                            if ui.add(egui::Slider::new(bottom_level, 0.0..=1.0)).changed() { prop_changed = true; }
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Gradient Softness:");
+                                                            if ui.add(egui::Slider::new(gradient_softness, 0.01..=1.0)).changed() { prop_changed = true; }
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Splash Amount:");
+                                                            if ui.add(egui::Slider::new(splash_amount, 0.0..=1.0)).changed() { prop_changed = true; }
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Splash Scale:");
+                                                            if ui.add(egui::Slider::new(splash_scale, 1.0..=64.0).clamp_to_range(false)).changed() { prop_changed = true; }
+                                                        });
+                                                    }
+                                                    crate::layer::MaskEffectType::GeneratorMaskEditor {
+                                                        ref mut curv_weight,
+                                                        ref mut curv_width,
+                                                        ref mut curv_contrast,
+                                                        ref mut curv_invert,
+                                                        ref mut ao_weight,
+                                                        ref mut ao_contrast,
+                                                        ref mut world_normal_weight,
+                                                        ref mut world_normal_dir,
+                                                        ref mut pos_weight,
+                                                        ref mut pos_height,
+                                                        ref mut grunge_weight,
+                                                        ref mut grunge_scale,
+                                                        ref mut global_balance,
+                                                        ref mut global_contrast,
+                                                        ref mut invert,
+                                                    } => {
+                                                        ui.label(egui::RichText::new("Substance Painter Mask Editor (Compound)").strong().color(Color32::from_rgb(200, 160, 240)));
+                                                        ui.collapsing("Curvature Parameters", |ui| {
+                                                            ui.horizontal(|ui| {
+                                                                ui.label("Weight:");
+                                                                if ui.add(egui::Slider::new(curv_weight, 0.0..=1.0)).changed() { prop_changed = true; }
+                                                            });
+                                                            ui.horizontal(|ui| {
+                                                                ui.label("Edge Width:");
+                                                                if ui.add(egui::Slider::new(curv_width, 0.1..=4.0)).changed() { prop_changed = true; }
+                                                            });
+                                                            ui.horizontal(|ui| {
+                                                                ui.label("Contrast:");
+                                                                if ui.add(egui::Slider::new(curv_contrast, 0.5..=5.0)).changed() { prop_changed = true; }
+                                                            });
+                                                            if ui.checkbox(curv_invert, "Invert Curvature (Cavities)").changed() { prop_changed = true; }
+                                                        });
+                                                        ui.collapsing("Ambient Occlusion Parameters", |ui| {
+                                                            ui.horizontal(|ui| {
+                                                                ui.label("Weight:");
+                                                                if ui.add(egui::Slider::new(ao_weight, 0.0..=1.0)).changed() { prop_changed = true; }
+                                                            });
+                                                            ui.horizontal(|ui| {
+                                                                ui.label("Contrast:");
+                                                                if ui.add(egui::Slider::new(ao_contrast, 0.5..=5.0)).changed() { prop_changed = true; }
+                                                            });
+                                                        });
+                                                        ui.collapsing("World Normal Direction", |ui| {
+                                                            ui.horizontal(|ui| {
+                                                                ui.label("Weight:");
+                                                                if ui.add(egui::Slider::new(world_normal_weight, 0.0..=1.0)).changed() { prop_changed = true; }
+                                                            });
+                                                            ui.horizontal(|ui| {
+                                                                ui.label("Preset:");
+                                                                if ui.selectable_label(world_normal_dir[1] > 0.5, "Up (+Y)").clicked() {
+                                                                    *world_normal_dir = [0.0, 1.0, 0.0];
+                                                                    prop_changed = true;
+                                                                }
+                                                                if ui.selectable_label(world_normal_dir[1] < -0.5, "Down (-Y)").clicked() {
+                                                                    *world_normal_dir = [0.0, -1.0, 0.0];
+                                                                    prop_changed = true;
+                                                                }
+                                                                if ui.selectable_label(world_normal_dir[2] > 0.5, "Forward (+Z)").clicked() {
+                                                                    *world_normal_dir = [0.0, 0.0, 1.0];
+                                                                    prop_changed = true;
+                                                                }
+                                                            });
+                                                        });
+                                                        ui.collapsing("Position Height", |ui| {
+                                                            ui.horizontal(|ui| {
+                                                                ui.label("Weight:");
+                                                                if ui.add(egui::Slider::new(pos_weight, 0.0..=1.0)).changed() { prop_changed = true; }
+                                                            });
+                                                            ui.horizontal(|ui| {
+                                                                ui.label("Target Height:");
+                                                                if ui.add(egui::Slider::new(pos_height, 0.0..=1.0)).changed() { prop_changed = true; }
+                                                            });
+                                                        });
+                                                        ui.collapsing("Grunge Modulation", |ui| {
+                                                            ui.horizontal(|ui| {
+                                                                ui.label("Grunge Weight:");
+                                                                if ui.add(egui::Slider::new(grunge_weight, 0.0..=1.0)).changed() { prop_changed = true; }
+                                                            });
+                                                            ui.horizontal(|ui| {
+                                                                ui.label("Grunge Scale:");
+                                                                if ui.add(egui::Slider::new(grunge_scale, 1.0..=64.0).clamp_to_range(false)).changed() { prop_changed = true; }
+                                                            });
+                                                        });
+                                                        ui.separator();
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Global Balance:");
+                                                            if ui.add(egui::Slider::new(global_balance, 0.0..=1.0)).changed() { prop_changed = true; }
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Global Contrast:");
+                                                            if ui.add(egui::Slider::new(global_contrast, 0.1..=4.0)).changed() { prop_changed = true; }
+                                                        });
+                                                        if ui.checkbox(invert, "Global Invert").changed() { prop_changed = true; }
+                                                    }
+                                                }
+                                            });
+                                        }
+
+                                        if let Some(id) = remove_eff_id {
+                                            layer.remove_mask_effect(id, curv_ref);
+                                            layer.evaluate_mask_full(curv_ref, ao_ref, pos_ref, wn_ref, id_ref, &anchor_refs);
+                                            prop_changed = true;
+                                        }
+                                        if let Some((id, up)) = reorder_eff {
+                                            layer.reorder_mask_effect(id, up, curv_ref);
+                                            layer.evaluate_mask_full(curv_ref, ao_ref, pos_ref, wn_ref, id_ref, &anchor_refs);
+                                            prop_changed = true;
+                                        }
+                                    }
+
+                                    // Mask Brush Parameters
+                                    ui.group(|ui| {
+                                        ui.label("Mask Brush Settings:");
+                                        ui.horizontal(|ui| {
+                                            ui.label("Paint Value:");
+                                            ui.add(egui::Slider::new(&mut self.brush_engine.settings.mask_paint_value, 0.0..=1.0));
+                                            if ui.button("Swap [X]").clicked() {
+                                                self.brush_engine.settings.mask_paint_value =
+                                                    if self.brush_engine.settings.mask_paint_value > 0.5 { 0.0 } else { 1.0 };
+                                            }
+                                        });
+                                        ui.label(if self.brush_engine.settings.mask_paint_value > 0.5 {
+                                            "White (Reveals Layer)"
+                                        } else {
+                                            "Black (Hides Layer)"
+                                        });
+                                        ui.add(egui::Slider::new(&mut self.brush_engine.settings.radius, 1.0..=160.0).text("Size [ / ]"));
+                                        ui.add(egui::Slider::new(&mut self.brush_engine.settings.hardness, 0.0..=1.0).text("Hardness"));
+                                        ui.add(egui::Slider::new(&mut self.brush_engine.settings.opacity, 0.0..=1.0).text("Opacity"));
+                                        ui.add(egui::Slider::new(&mut self.brush_engine.settings.flow, 0.0..=1.0).text("Flow"));
+                                    });
+                                    if prop_changed {
+                                        mask_changed = true;
+                                    }
+                                } else if layer.layer_type == LayerType::Fill {
+                                    // --- PROPERTIES: FILL (PBR Material Maps Manipulation 1:1) ---
+    
+                                    // 1. Transformation (UV Wrap)
+                                    ui.collapsing("Transformation (UV Wrap)", |ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.label("UV Scale / Tiling:");
+                                            if ui.add(egui::Slider::new(&mut layer.uv_scale, 0.2..=32.0).logarithmic(true).clamp_to_range(false)).changed() {
+                                                prop_changed = true;
+                                            }
+                                        });
+                                        ui.horizontal(|ui| {
+                                            if ui.button("1x").clicked() { layer.uv_scale = 1.0; prop_changed = true; }
+                                            if ui.button("2x").clicked() { layer.uv_scale = 2.0; prop_changed = true; }
+                                            if ui.button("4x").clicked() { layer.uv_scale = 4.0; prop_changed = true; }
+                                            if ui.button("8x").clicked() { layer.uv_scale = 8.0; prop_changed = true; }
+                                            if ui.button("16x").clicked() { layer.uv_scale = 16.0; prop_changed = true; }
+                                        });
+                                        ui.horizontal(|ui| {
+                                            ui.label("UV Offset:");
+                                            if ui.add(egui::Slider::new(&mut layer.uv_offset.x, 0.0..=1.0).text("U")).changed() { prop_changed = true; }
+                                            if ui.add(egui::Slider::new(&mut layer.uv_offset.y, 0.0..=1.0).text("V")).changed() { prop_changed = true; }
+                                        });
+                                        ui.horizontal(|ui| {
+                                            ui.label("UV Rotation:");
+                                            if ui.add(egui::Slider::new(&mut layer.uv_rotation, 0.0..=360.0).suffix("°")).changed() { prop_changed = true; }
+                                        });
+                                    });
+    
+                                    // 2. Material Channel Toggles (Substance Painter iconic pill buttons)
+                                    ui.group(|ui| {
+                                        ui.label("Material Channels:");
+                                        ui.horizontal(|ui| {
+                                            if channel_pill_button(ui, "color", layer.channel_flags.base_color).clicked() {
+                                                layer.channel_flags.base_color = !layer.channel_flags.base_color;
+                                                prop_changed = true;
+                                            }
+                                            if channel_pill_button(ui, "metal", layer.channel_flags.metallic).clicked() {
+                                                layer.channel_flags.metallic = !layer.channel_flags.metallic;
+                                                prop_changed = true;
+                                            }
+                                            if channel_pill_button(ui, "rough", layer.channel_flags.roughness).clicked() {
+                                                layer.channel_flags.roughness = !layer.channel_flags.roughness;
+                                                prop_changed = true;
+                                            }
+                                            if channel_pill_button(ui, "nrm", layer.channel_flags.normal).clicked() {
+                                                layer.channel_flags.normal = !layer.channel_flags.normal;
+                                                prop_changed = true;
+                                            }
+                                            if channel_pill_button(ui, "height", layer.channel_flags.height).clicked() {
+                                                layer.channel_flags.height = !layer.channel_flags.height;
+                                                prop_changed = true;
+                                            }
+                                            if channel_pill_button(ui, "emis", layer.channel_flags.emission).clicked() {
+                                                layer.channel_flags.emission = !layer.channel_flags.emission;
+                                                prop_changed = true;
+                                            }
+                                            if channel_pill_button(ui, "opac", layer.channel_flags.opacity).clicked() {
+                                                layer.channel_flags.opacity = !layer.channel_flags.opacity;
+                                                prop_changed = true;
+                                            }
+                                            if channel_pill_button(ui, "coat", layer.channel_flags.clearcoat).clicked() {
+                                                layer.channel_flags.clearcoat = !layer.channel_flags.clearcoat;
+                                                prop_changed = true;
+                                            }
+                                            if channel_pill_button(ui, "aniso", layer.channel_flags.anisotropy).clicked() {
+                                                layer.channel_flags.anisotropy = !layer.channel_flags.anisotropy;
+                                                prop_changed = true;
+                                            }
+                                        });
+                                    });
+    
+                                    // 3. Channel Value Controllers (PBR Maps)
+                                    ui.group(|ui| {
+                                        if layer.channel_flags.base_color {
+                                            ui.horizontal(|ui| {
+                                                ui.label("Base Color:");
+                                                if crate::color_picker::color_picker_button_vec4(
+                                                    ui,
+                                                    egui::Id::new(format!("layer_base_col_{}", layer.id)),
+                                                    &mut layer.fill_color,
+                                                ) {
+                                                    prop_changed = true;
+                                                }
+                                                ui.label(crate::color_picker::rgb_to_hex(layer.fill_color.x, layer.fill_color.y, layer.fill_color.z));
+                                            });
+                                            ui.horizontal(|ui| {
+                                                if layer.fill_color_tex.is_some() {
+                                                    ui.colored_label(Color32::from_rgb(80, 220, 120), "Texture Active");
+                                                    if ui.button("Shelf...").on_hover_text("Select or replace texture from Shelf").clicked() {
+                                                        open_shelf_picker = Some(ShelfPickerTarget::FillBaseColor);
+                                                    }
+                                                    if ui.button("Import...").on_hover_text("Import texture into Project Shelf and assign").clicked() {
+                                                        if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "tga", "bmp", "exr", "hdr"]).pick_file() {
+                                                            import_to_shelf_and_assign = Some((path, ShelfPickerTarget::FillBaseColor));
+                                                        }
+                                                    }
+                                                    if ui.button("Remove").clicked() { layer.fill_color_tex = None; prop_changed = true; }
+                                                } else {
+                                                    if ui.button("Pick from Shelf...").on_hover_text("Pick texture or baked map from Project Shelf").clicked() {
+                                                        open_shelf_picker = Some(ShelfPickerTarget::FillBaseColor);
+                                                    }
+                                                    if ui.button("Import...").on_hover_text("Import texture file into Project Shelf and assign").clicked() {
+                                                        if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "tga", "bmp", "exr", "hdr"]).pick_file() {
+                                                            import_to_shelf_and_assign = Some((path, ShelfPickerTarget::FillBaseColor));
+                                                        }
+                                                    }
+                                                }
+                                            });
+                                        }
+    
+                                        if layer.channel_flags.metallic {
+                                            ui.horizontal(|ui| {
+                                                ui.label("Metallic:");
+                                                if ui.add(egui::Slider::new(&mut layer.fill_metallic, 0.0..=1.0)).changed() {
+                                                    prop_changed = true;
+                                                }
+                                            });
+                                            ui.horizontal(|ui| {
+                                                if ui.small_button("0.0 Dielectric").clicked() { layer.fill_metallic = 0.0; prop_changed = true; }
+                                                if ui.small_button("0.5 Semi").clicked() { layer.fill_metallic = 0.5; prop_changed = true; }
+                                                if ui.small_button("1.0 Metal").clicked() { layer.fill_metallic = 1.0; prop_changed = true; }
+                                            });
+                                            ui.horizontal(|ui| {
+                                                if layer.fill_metallic_tex.is_some() {
+                                                    ui.colored_label(Color32::from_rgb(80, 220, 120), "Metallic Map Active");
+                                                    if ui.button("Shelf...").on_hover_text("Select or replace metallic map from Shelf").clicked() {
+                                                        open_shelf_picker = Some(ShelfPickerTarget::FillMetallic);
+                                                    }
+                                                    if ui.button("Import...").on_hover_text("Import metallic texture into Project Shelf and assign").clicked() {
+                                                        if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "tga", "bmp", "exr", "hdr"]).pick_file() {
+                                                            import_to_shelf_and_assign = Some((path, ShelfPickerTarget::FillMetallic));
+                                                        }
+                                                    }
+                                                    if ui.button("Remove").clicked() { layer.fill_metallic_tex = None; prop_changed = true; }
+                                                } else {
+                                                    if ui.button("Pick from Shelf...").on_hover_text("Pick metallic map or texture from Project Shelf").clicked() {
+                                                        open_shelf_picker = Some(ShelfPickerTarget::FillMetallic);
+                                                    }
+                                                    if ui.button("Import...").on_hover_text("Import metallic texture into Project Shelf and assign").clicked() {
+                                                        if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "tga", "bmp", "exr", "hdr"]).pick_file() {
+                                                            import_to_shelf_and_assign = Some((path, ShelfPickerTarget::FillMetallic));
+                                                        }
+                                                    }
+                                                }
+                                            });
+                                        }
+    
+                                        if layer.channel_flags.roughness {
+                                            ui.horizontal(|ui| {
+                                                ui.label("Roughness:");
+                                                if ui.add(egui::Slider::new(&mut layer.fill_roughness, 0.0..=1.0)).changed() {
+                                                    prop_changed = true;
+                                                }
+                                            });
+                                            ui.horizontal(|ui| {
+                                                if ui.small_button("0.05 Gloss").clicked() { layer.fill_roughness = 0.05; prop_changed = true; }
+                                                if ui.small_button("0.40 Satin").clicked() { layer.fill_roughness = 0.40; prop_changed = true; }
+                                                if ui.small_button("0.85 Matte").clicked() { layer.fill_roughness = 0.85; prop_changed = true; }
+                                            });
+                                            ui.horizontal(|ui| {
+                                                if layer.fill_roughness_tex.is_some() {
+                                                    ui.colored_label(Color32::from_rgb(80, 220, 120), "Roughness Map Active");
+                                                    if ui.button("Shelf...").on_hover_text("Select or replace roughness map from Shelf").clicked() {
+                                                        open_shelf_picker = Some(ShelfPickerTarget::FillRoughness);
+                                                    }
+                                                    if ui.button("Import...").on_hover_text("Import roughness texture into Project Shelf and assign").clicked() {
+                                                        if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "tga", "bmp", "exr", "hdr"]).pick_file() {
+                                                            import_to_shelf_and_assign = Some((path, ShelfPickerTarget::FillRoughness));
+                                                        }
+                                                    }
+                                                    if ui.button("Remove").clicked() { layer.fill_roughness_tex = None; prop_changed = true; }
+                                                } else {
+                                                    if ui.button("Pick from Shelf...").on_hover_text("Pick roughness map or texture from Project Shelf").clicked() {
+                                                        open_shelf_picker = Some(ShelfPickerTarget::FillRoughness);
+                                                    }
+                                                    if ui.button("Import...").on_hover_text("Import roughness texture into Project Shelf and assign").clicked() {
+                                                        if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "tga", "bmp", "exr", "hdr"]).pick_file() {
+                                                            import_to_shelf_and_assign = Some((path, ShelfPickerTarget::FillRoughness));
+                                                        }
+                                                    }
+                                                }
+                                            });
+                                        }
+    
+                                        if layer.channel_flags.normal {
+                                            ui.horizontal(|ui| {
+                                                ui.label("Normal Intensity:");
+                                                if ui.add(egui::Slider::new(&mut layer.fill_normal_strength, 0.0..=2.0)).changed() {
+                                                    prop_changed = true;
+                                                }
+                                            });
+                                            ui.horizontal(|ui| {
+                                                if layer.fill_normal_tex.is_some() {
+                                                    ui.colored_label(Color32::from_rgb(80, 220, 120), "Normal Map Active");
+                                                    if ui.button("Shelf...").on_hover_text("Select or replace normal map from Shelf").clicked() {
+                                                        open_shelf_picker = Some(ShelfPickerTarget::FillNormal);
+                                                    }
+                                                    if ui.button("Import...").on_hover_text("Import normal map into Project Shelf and assign").clicked() {
+                                                        if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "tga", "bmp", "exr", "hdr"]).pick_file() {
+                                                            import_to_shelf_and_assign = Some((path, ShelfPickerTarget::FillNormal));
+                                                        }
+                                                    }
+                                                    if ui.button("Remove").clicked() { layer.fill_normal_tex = None; prop_changed = true; }
+                                                } else {
+                                                    if ui.button("Pick from Shelf...").on_hover_text("Pick normal map from Project Shelf").clicked() {
+                                                        open_shelf_picker = Some(ShelfPickerTarget::FillNormal);
+                                                    }
+                                                    if ui.button("Import...").on_hover_text("Import normal map into Project Shelf and assign").clicked() {
+                                                        if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "tga", "bmp", "exr", "hdr"]).pick_file() {
+                                                            import_to_shelf_and_assign = Some((path, ShelfPickerTarget::FillNormal));
+                                                        }
+                                                    }
+                                                }
+                                            });
+                                        }
+    
+                                        if layer.channel_flags.height {
+                                            ui.horizontal(|ui| {
+                                                ui.label("Height / Bump:");
+                                                if ui.add(egui::Slider::new(&mut layer.fill_height, 0.0..=1.0)).changed() {
+                                                    prop_changed = true;
+                                                }
+                                            });
+                                            ui.horizontal(|ui| {
+                                                if layer.fill_height_tex.is_some() {
+                                                    ui.colored_label(Color32::from_rgb(80, 220, 120), "Height Map Active");
+                                                    if ui.button("Shelf...").on_hover_text("Select or replace height map from Shelf").clicked() {
+                                                        open_shelf_picker = Some(ShelfPickerTarget::FillHeight);
+                                                    }
+                                                    if ui.button("Import...").on_hover_text("Import height texture into Project Shelf and assign").clicked() {
+                                                        if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "tga", "bmp", "exr", "hdr"]).pick_file() {
+                                                            import_to_shelf_and_assign = Some((path, ShelfPickerTarget::FillHeight));
+                                                        }
+                                                    }
+                                                    if ui.button("Remove").clicked() { layer.fill_height_tex = None; prop_changed = true; }
+                                                } else {
+                                                    if ui.button("Pick from Shelf...").on_hover_text("Pick height texture or baked map from Project Shelf").clicked() {
+                                                        open_shelf_picker = Some(ShelfPickerTarget::FillHeight);
+                                                    }
+                                                    if ui.button("Import...").on_hover_text("Import height texture into Project Shelf and assign").clicked() {
+                                                        if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "tga", "bmp", "exr", "hdr"]).pick_file() {
+                                                            import_to_shelf_and_assign = Some((path, ShelfPickerTarget::FillHeight));
+                                                        }
+                                                    }
+                                                }
+                                            });
+                                        }
+
+                                        if layer.channel_flags.emission {
+                                            ui.horizontal(|ui| {
+                                                ui.label("Emission:");
+                                                if crate::color_picker::color_picker_button_vec4(
+                                                    ui,
+                                                    egui::Id::new(format!("layer_emissive_col_{}", layer.id)),
+                                                    &mut layer.fill_emissive,
+                                                ) {
+                                                    prop_changed = true;
+                                                }
+                                                ui.label(crate::color_picker::rgb_to_hex(layer.fill_emissive.x, layer.fill_emissive.y, layer.fill_emissive.z));
+                                            });
+                                            ui.horizontal(|ui| {
+                                                ui.label("Emission Intensity:");
+                                                if ui.add(egui::Slider::new(&mut layer.fill_emissive.w, 0.0..=10.0)).changed() {
+                                                    prop_changed = true;
+                                                }
+                                            });
+                                            ui.horizontal(|ui| {
+                                                if layer.fill_emissive_tex.is_some() {
+                                                    ui.colored_label(Color32::from_rgb(80, 220, 120), "Emissive Map Active");
+                                                    if ui.button("Shelf...").on_hover_text("Select or replace emissive texture from Shelf").clicked() {
+                                                        open_shelf_picker = Some(ShelfPickerTarget::FillEmissive);
+                                                    }
+                                                    if ui.button("Import...").on_hover_text("Import emissive texture into Project Shelf and assign").clicked() {
+                                                        if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "tga", "bmp", "exr", "hdr"]).pick_file() {
+                                                            import_to_shelf_and_assign = Some((path, ShelfPickerTarget::FillEmissive));
+                                                        }
+                                                    }
+                                                    if ui.button("Remove").clicked() { layer.fill_emissive_tex = None; prop_changed = true; }
+                                                } else {
+                                                    if ui.button("Pick from Shelf...").on_hover_text("Pick emissive texture from Project Shelf").clicked() {
+                                                        open_shelf_picker = Some(ShelfPickerTarget::FillEmissive);
+                                                    }
+                                                    if ui.button("Import...").on_hover_text("Import emissive texture into Project Shelf and assign").clicked() {
+                                                        if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "tga", "bmp", "exr", "hdr"]).pick_file() {
+                                                            import_to_shelf_and_assign = Some((path, ShelfPickerTarget::FillEmissive));
+                                                        }
+                                                    }
+                                                }
+                                            });
+                                        }
+
+                                        if layer.channel_flags.opacity {
+                                            ui.horizontal(|ui| {
+                                                ui.label("Opacity / Alpha:");
+                                                if ui.add(egui::Slider::new(&mut layer.fill_opacity, 0.0..=1.0)).changed() {
+                                                    prop_changed = true;
+                                                }
+                                                if ui.small_button("Hole (0%)").clicked() {
+                                                    layer.fill_opacity = 0.0;
+                                                    prop_changed = true;
+                                                }
+                                                if ui.small_button("Glass (50%)").clicked() {
+                                                    layer.fill_opacity = 0.5;
+                                                    prop_changed = true;
+                                                }
+                                                if ui.small_button("Solid (100%)").clicked() {
+                                                    layer.fill_opacity = 1.0;
+                                                    prop_changed = true;
+                                                }
+                                            });
+                                            ui.horizontal(|ui| {
+                                                if layer.fill_opacity_tex.is_some() {
+                                                    ui.colored_label(Color32::from_rgb(80, 220, 120), "Opacity Map Active");
+                                                    if ui.button("Shelf...").on_hover_text("Select or replace opacity map from Shelf").clicked() {
+                                                        open_shelf_picker = Some(ShelfPickerTarget::FillOpacity);
+                                                    }
+                                                    if ui.button("Import...").on_hover_text("Import opacity map into Project Shelf and assign").clicked() {
+                                                        if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "tga", "bmp", "exr", "hdr"]).pick_file() {
+                                                            import_to_shelf_and_assign = Some((path, ShelfPickerTarget::FillOpacity));
+                                                        }
+                                                    }
+                                                    if ui.button("Remove").clicked() { layer.fill_opacity_tex = None; prop_changed = true; }
+                                                } else {
+                                                    if ui.button("Pick from Shelf...").on_hover_text("Pick opacity map from Project Shelf").clicked() {
+                                                        open_shelf_picker = Some(ShelfPickerTarget::FillOpacity);
+                                                    }
+                                                    if ui.button("Import...").on_hover_text("Import opacity map into Project Shelf and assign").clicked() {
+                                                        if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "tga", "bmp", "exr", "hdr"]).pick_file() {
+                                                            import_to_shelf_and_assign = Some((path, ShelfPickerTarget::FillOpacity));
+                                                        }
+                                                    }
+                                                }
+                                            });
+                                        }
+
+                                        if layer.channel_flags.clearcoat {
+                                            ui.horizontal(|ui| {
+                                                ui.label("Clearcoat:");
+                                                let mut cc = layer.fill_clearcoat;
+                                                if ui.add(egui::Slider::new(&mut cc, 0.0..=1.0)).changed() {
+                                                    layer.set_fill_clearcoat(cc);
+                                                    prop_changed = true;
+                                                }
+                                            });
+                                        }
+
+                                        if layer.channel_flags.anisotropy {
+                                            ui.horizontal(|ui| {
+                                                ui.label("Anisotropy Strength:");
+                                                if ui.add(egui::Slider::new(&mut layer.fill_anisotropy, -1.0..=1.0)).changed() {
+                                                    prop_changed = true;
+                                                }
+                                            });
+                                            ui.horizontal(|ui| {
+                                                ui.label("Anisotropy Angle:");
+                                                if ui.add(egui::Slider::new(&mut layer.fill_anisotropy_angle, 0.0..=1.0)).changed() {
+                                                    prop_changed = true;
+                                                }
+                                            });
+                                        }
+                                    });
+    
+                                    // 4. Procedural Generator / Texture Pattern
+                                    ui.group(|ui| {
+                                        ui.label("Procedural Generator / Pattern:");
+                                        ui.horizontal(|ui| {
+                                            egui::ComboBox::from_id_source(format!("prop_gen_{}", layer.id))
+                                                .selected_text(layer.fill_generator.name())
+                                                .show_ui(ui, |ui| {
+                                                    if ui.selectable_value(&mut layer.fill_generator, ProceduralGenerator::None, ProceduralGenerator::None.name()).clicked() {
+                                                        prop_changed = true;
+                                                    }
+                                                    for g in ProceduralGenerator::all() {
+                                                        if ui.selectable_value(&mut layer.fill_generator, *g, g.name()).clicked() {
+                                                            prop_changed = true;
+                                                        }
+                                                    }
+                                                });
+                                        });
+
+                                        if ui.checkbox(&mut layer.triplanar, "Triplanar Projection (Seamless)").on_hover_text("Projects noise across 3D object space to eliminate UV seams").changed() {
+                                            prop_changed = true;
+                                        }
+    
+                                        if layer.fill_generator != ProceduralGenerator::None {
+                                            ui.horizontal(|ui| {
+                                                ui.label("Pattern Scale:");
+                                                if ui.add(egui::Slider::new(&mut layer.generator_scale, 1.0..=64.0).clamp_to_range(false)).changed() {
+                                                    prop_changed = true;
+                                                }
+                                            });
+                                            ui.horizontal(|ui| {
+                                                ui.label("Contrast:");
+                                                if ui.add(egui::Slider::new(&mut layer.generator_contrast, 0.1..=4.0)).changed() {
+                                                    prop_changed = true;
+                                                }
+                                            });
+                                            if ui.checkbox(&mut layer.generator_invert, "Invert Pattern").changed() {
+                                                prop_changed = true;
+                                            }
+                                        }
+                                    });
+                                } else if layer.layer_type == LayerType::Folder {
+                                    // --- PROPERTIES: FOLDER / GROUP ---
+                                    ui.group(|ui| {
+                                        ui.label(egui::RichText::new("Folder / Group Properties").strong().color(Color32::from_rgb(243, 94, 24)));
+                                        ui.horizontal(|ui| {
+                                            ui.label("Folder Opacity:");
+                                            if ui.add(egui::Slider::new(&mut layer.opacity, 0.0..=1.0)).changed() {
+                                                prop_changed = true;
+                                            }
+                                        });
+                                        ui.horizontal(|ui| {
+                                            ui.label("Collapsed:");
+                                            if ui.checkbox(&mut layer.folder_collapsed, "Collapse contents in stack").changed() {
+                                                prop_changed = true;
+                                            }
+                                        });
+                                        ui.separator();
+                                        ui.label("Folder Masking (Affects all contained layers):");
+                                        if layer.has_mask {
+                                            ui.horizontal(|ui| {
+                                                if ui.button("Invert Mask").clicked() {
+                                                    layer.invert_mask();
+                                                    prop_changed = true;
+                                                }
+                                                if ui.button("Clear White").clicked() {
+                                                    layer.clear_mask(1.0);
+                                                    prop_changed = true;
+                                                }
+                                                if ui.button("Clear Black").clicked() {
+                                                    layer.clear_mask(0.0);
+                                                    prop_changed = true;
+                                                }
+                                                if ui.button("Remove Mask").clicked() {
+                                                    layer.remove_mask();
+                                                    prop_changed = true;
+                                                }
+                                            });
+                                        } else {
+                                            ui.horizontal(|ui| {
+                                                if ui.button("+ White Mask").clicked() {
+                                                    layer.add_white_mask();
+                                                    prop_changed = true;
+                                                }
+                                                if ui.button("+ Black Mask").clicked() {
+                                                    layer.add_black_mask();
+                                                    prop_changed = true;
+                                                }
+                                            });
+                                        }
+                                    });
+                                } else {
+                                    // --- PROPERTIES: PAINT ---
+                                    ui.group(|ui| {
+                                        ui.label("Brush Parameters:");
+                                        ui.add(egui::Slider::new(&mut self.brush_engine.settings.radius, 1.0..=160.0).text("Size [ / ]"));
+                                        ui.add(egui::Slider::new(&mut self.brush_engine.settings.hardness, 0.0..=1.0).text("Hardness"));
+                                        ui.add(egui::Slider::new(&mut self.brush_engine.settings.opacity, 0.0..=1.0).text("Opacity"));
+                                        ui.add(egui::Slider::new(&mut self.brush_engine.settings.flow, 0.0..=1.0).text("Flow"));
+    
+                                        ui.horizontal(|ui| {
+                                            ui.label("Alpha:");
+                                            egui::ComboBox::from_id_source("brush_alpha_select")
+                                                .selected_text(self.brush_engine.settings.alpha.name())
+                                                .show_ui(ui, |ui| {
+                                                    let alphas = [
+                                                        AlphaType::SoftRound,
+                                                        AlphaType::HardRound,
+                                                        AlphaType::NoiseSplatter,
+                                                        AlphaType::Chisel,
+                                                        AlphaType::Stipple,
+                                                        AlphaType::Scratches,
+                                                    ];
+                                                    for a in alphas {
+                                                        ui.selectable_value(&mut self.brush_engine.settings.alpha, a, a.name());
+                                                    }
+                                                });
+                                            if ui.small_button("Shelf...").on_hover_text("Choose Alpha from the Shelf").clicked() {
+                                                self.shelf_picker = Some(ShelfPickerState::new(ShelfPickerTarget::BrushAlpha));
+                                            }
+                                        });
+    
+                                        ui.collapsing("Jitter Dynamics", |ui| {
+                                            ui.add(egui::Slider::new(&mut self.brush_engine.settings.size_jitter, 0.0..=1.0).text("Size Jitter"));
+                                            ui.add(egui::Slider::new(&mut self.brush_engine.settings.position_jitter, 0.0..=1.0).text("Scatter"));
+                                        });
+                                    });
+    
+                                    ui.group(|ui| {
+                                        ui.label("Material Stamp Channels:");
+                                        ui.horizontal(|ui| {
+                                            if channel_pill_button(ui, "color", self.brush_engine.settings.channels.base_color).clicked() {
+                                                self.brush_engine.settings.channels.base_color = !self.brush_engine.settings.channels.base_color;
+                                            }
+                                            if channel_pill_button(ui, "metal", self.brush_engine.settings.channels.metallic).clicked() {
+                                                self.brush_engine.settings.channels.metallic = !self.brush_engine.settings.channels.metallic;
+                                            }
+                                            if channel_pill_button(ui, "rough", self.brush_engine.settings.channels.roughness).clicked() {
+                                                self.brush_engine.settings.channels.roughness = !self.brush_engine.settings.channels.roughness;
+                                            }
+                                            if channel_pill_button(ui, "height", self.brush_engine.settings.channels.height).clicked() {
+                                                self.brush_engine.settings.channels.height = !self.brush_engine.settings.channels.height;
+                                            }
+                                            if channel_pill_button(ui, "emis", self.brush_engine.settings.channels.emission).clicked() {
+                                                self.brush_engine.settings.channels.emission = !self.brush_engine.settings.channels.emission;
+                                            }
+                                            if channel_pill_button(ui, "opac", self.brush_engine.settings.channels.opacity).clicked() {
+                                                self.brush_engine.settings.channels.opacity = !self.brush_engine.settings.channels.opacity;
+                                            }
+                                            if channel_pill_button(ui, "coat", self.brush_engine.settings.channels.clearcoat).clicked() {
+                                                self.brush_engine.settings.channels.clearcoat = !self.brush_engine.settings.channels.clearcoat;
+                                            }
+                                            if channel_pill_button(ui, "aniso", self.brush_engine.settings.channels.anisotropy).clicked() {
+                                                self.brush_engine.settings.channels.anisotropy = !self.brush_engine.settings.channels.anisotropy;
+                                            }
+                                        });
+    
+                                        if self.brush_engine.settings.channels.base_color {
+                                            ui.horizontal(|ui| {
+                                                ui.label("Base Color:");
+                                                crate::color_picker::color_picker_button_vec4(
+                                                    ui,
+                                                    egui::Id::new("brush_paint_base_color"),
+                                                    &mut self.brush_engine.settings.paint_color,
+                                                );
+                                                ui.label(crate::color_picker::rgb_to_hex(
+                                                    self.brush_engine.settings.paint_color.x,
+                                                    self.brush_engine.settings.paint_color.y,
+                                                    self.brush_engine.settings.paint_color.z,
+                                                ));
+                                            });
+                                        }
+    
+                                        if self.brush_engine.settings.channels.roughness {
+                                            ui.add(egui::Slider::new(&mut self.brush_engine.settings.paint_roughness, 0.0..=1.0).text("Roughness"));
+                                        }
+                                        if self.brush_engine.settings.channels.metallic {
+                                            ui.add(egui::Slider::new(&mut self.brush_engine.settings.paint_metallic, 0.0..=1.0).text("Metallic"));
+                                        }
+                                        if self.brush_engine.settings.channels.height {
+                                            ui.add(egui::Slider::new(&mut self.brush_engine.settings.paint_height, 0.0..=1.0).text("Height"));
+                                        }
+                                        if self.brush_engine.settings.channels.emission {
+                                            ui.horizontal(|ui| {
+                                                ui.label("Emission:");
+                                                crate::color_picker::color_picker_button_vec4(
+                                                    ui,
+                                                    egui::Id::new("brush_paint_emissive_color"),
+                                                    &mut self.brush_engine.settings.paint_emissive,
+                                                );
+                                                ui.label(crate::color_picker::rgb_to_hex(
+                                                    self.brush_engine.settings.paint_emissive.x,
+                                                    self.brush_engine.settings.paint_emissive.y,
+                                                    self.brush_engine.settings.paint_emissive.z,
+                                                ));
+                                            });
+                                            ui.add(egui::Slider::new(&mut self.brush_engine.settings.paint_emissive.w, 0.0..=10.0).text("Emission Intensity"));
+                                        }
+                                        if self.brush_engine.settings.channels.opacity {
+                                            ui.horizontal(|ui| {
+                                                ui.add(egui::Slider::new(&mut self.brush_engine.settings.paint_opacity, 0.0..=1.0).text("Opacity"));
+                                                if ui.small_button("Hole (0%)").clicked() {
+                                                    self.brush_engine.settings.paint_opacity = 0.0;
+                                                }
+                                                if ui.small_button("Glass (50%)").clicked() {
+                                                    self.brush_engine.settings.paint_opacity = 0.5;
+                                                }
+                                                if ui.small_button("Solid (100%)").clicked() {
+                                                    self.brush_engine.settings.paint_opacity = 1.0;
+                                                }
+                                            });
+                                        }
+                                        if self.brush_engine.settings.channels.clearcoat {
+                                            ui.add(egui::Slider::new(&mut self.brush_engine.settings.paint_clearcoat, 0.0..=1.0).text("Clearcoat"));
+                                        }
+                                        if self.brush_engine.settings.channels.anisotropy {
+                                            ui.add(egui::Slider::new(&mut self.brush_engine.settings.paint_anisotropy, -1.0..=1.0).text("Anisotropy"));
+                                            ui.add(egui::Slider::new(&mut self.brush_engine.settings.paint_anisotropy_angle, 0.0..=1.0).text("Aniso Angle"));
+                                        }
+                                    });
+                                }
+    
+                                ui.add_space(8.0);
+                                ui.separator();
+                                if ui.button("Export Textures... (Ctrl+E)").clicked() {
+                                    self.show_export_modal = true;
+                                }
+                            });
+    
+                        if prop_changed || mask_changed {
+                            let proj = &mut self.project;
+                            let curv = proj.curvature_map.as_ref();
+                            let pos = proj.position_map.as_ref();
+                            let wn = proj.world_space_normal_map.as_ref();
+                            let ao = proj.ao_map.as_ref();
+                            let id_ref = proj.id_map.as_ref();
+                            let (lower, higher) = proj.layers.split_at_mut(act_idx);
+                            let anchor_refs: Vec<crate::layer::AnchorLayerRef<'_>> = lower
+                                .iter()
+                                .filter_map(|l| l.as_anchor_ref())
+                                .collect();
+                            let layer = &mut higher[0];
+                            if prop_changed && layer.layer_type == LayerType::Fill {
+                                layer.evaluate_fill_advanced(curv, pos, wn, ao);
+                            }
+                            if mask_changed && layer.has_mask {
+                                layer.evaluate_mask_full(curv, ao, pos, wn, id_ref, &anchor_refs);
+                            }
+                            let is_extended_change = layer.channel_flags.clearcoat
+                                || layer.channel_flags.emission
+                                || layer.channel_flags.opacity
+                                || layer.channel_flags.anisotropy;
+                            if self.wgpu_viewport.is_some() && ui.input(|i| i.pointer.any_down()) && !is_extended_change {
+                                self.project.gpu_sync_needed = true;
+                                self.need_cpu_composite_sync = true;
+                            } else {
+                                self.project.rebuild_composite();
+                                self.project.gpu_sync_needed = true;
+                            }
+                        }
+
+                        if let Some(target) = open_shelf_picker {
+                            self.shelf_picker = Some(ShelfPickerState::new(target));
+                        }
+                        if let Some((path, target)) = import_to_shelf_and_assign {
+                            if let Ok(id) = self.project.import_texture_resource(&path, crate::project::ProjectResourceType::Texture) {
+                                if let Some(res) = self.project.get_resource(&id).cloned() {
+                                    self.assign_resource_to_target(&res, target);
+                                    self.refresh_shelf_thumbnails(ui.ctx());
+                                }
+                            }
+                        }
+                    }
+    }
+
+    /// Render Texture Set Settings and Mesh Maps slots
+    pub fn render_mesh_maps_content(&mut self, ui: &mut egui::Ui) {
+                        ui.heading("Texture Set Settings");
+                        ui.add_space(4.0);
+
+                        ui.group(|ui| {
+                            ui.label(format!("Mesh: {}", self.project.mesh.name));
+                            ui.label(format!("Triangles: {}", self.project.mesh.indices.len() / 3));
+                            ui.label(format!("Working Resolution: {} x {}", self.project.texture_width, self.project.texture_height));
+
+                            ui.horizontal(|ui| {
+                                ui.label("Change Resolution:");
+                                let res_options = [512, 1024, 2048, 4096];
+                                egui::ComboBox::from_id_source("texture_set_res_select")
+                                    .selected_text(format!("{}x{}", self.new_project_width, self.new_project_height))
+                                    .show_ui(ui, |ui| {
+                                        for &r in &res_options {
+                                            if ui.selectable_label(self.new_project_width == r, format!("{}x{}", r, r)).clicked() {
+                                                self.new_project_width = r;
+                                                self.new_project_height = r;
+                                            }
+                                        }
+                                    });
+                            });
+                            if self.new_project_width != self.project.texture_width || self.new_project_height != self.project.texture_height {
+                                if ui.button(format!("Resample Textures to {}x{}", self.new_project_width, self.new_project_height)).clicked() {
+                                    self.project.resize_textures(self.new_project_width, self.new_project_height);
+                                    self.project.rebuild_composite();
+                                    self.project.gpu_sync_needed = true;
+                                    self.status_message = format!("Resized textures to {}x{}", self.new_project_width, self.new_project_height);
+                                }
+                            }
+                        });
+
+                        ui.add_space(6.0);
+                        let bake_btn = if let Some(icons) = self.icons.as_ref() {
+                            egui::Button::image_and_text((icons.bake.id(), egui::vec2(15.0, 15.0)), "Bake Mesh Maps...")
+                        } else {
+                            egui::Button::new("Bake Mesh Maps...")
+                        };
+                        if ui.add(bake_btn).on_hover_text("Open Baking dialog to bake Normals, AO, and Curvature from geometry").clicked() {
+                            self.show_bake_modal = true;
+                        }
+
+                        ui.add_space(6.0);
+                        ui.separator();
+                        ui.heading("Baked Mesh Maps (Geometry)");
+                        ui.label(egui::RichText::new("Persistent underlying maps that blend with your layer stack:").small());
+                        ui.add_space(4.0);
+
+                        egui::ScrollArea::vertical()
+                            .id_source("mesh_maps_scroll")
+                            .show(ui, |ui| {
+                                // 1. Normal Map (Tangent Space)
+                                ui.group(|ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.strong("Normal (Tangent Space):");
+                                        if self.project.world_normal_map.is_some() {
+                                            ui.colored_label(egui::Color32::from_rgb(80, 220, 120), "Active");
+                                        } else {
+                                            ui.colored_label(egui::Color32::from_rgb(160, 160, 160), "Not Baked");
+                                        }
+                                    });
+                                    ui.horizontal(|ui| {
+                                        if ui.button("Shelf...").on_hover_text("Select Normal map from Project Shelf").clicked() {
+                                            self.shelf_picker = Some(ShelfPickerState::new(ShelfPickerTarget::MeshMapTangentNormal));
+                                        }
+                                        if ui.button("Import File...").on_hover_text("Import normal map file into Project Shelf and assign").clicked() {
+                                            if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "tga", "exr", "hdr"]).pick_file() {
+                                                if let Ok(id) = self.project.import_texture_resource(&path, crate::project::ProjectResourceType::Texture) {
+                                                    if let Some(res) = self.project.get_resource(&id).cloned() {
+                                                        self.assign_resource_to_target(&res, ShelfPickerTarget::MeshMapTangentNormal);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        if self.project.world_normal_map.is_some() {
+                                            if ui.button("Remove").clicked() {
+                                                self.project.world_normal_map = None;
+                                                self.project.gpu_mesh_maps_sync_needed = true;
+                                                self.project.gpu_sync_needed = true;
+                                                self.project.sync_baked_maps_to_resources();
+                                            }
+                                            if ui.button("View").clicked() {
+                                                self.view_mode = ViewportChannelMode::Normal;
+                                            }
+                                        }
+                                    });
+                                });
+
+                                // 2. Ambient Occlusion (AO)
+                                ui.group(|ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.strong("Ambient Occlusion (AO):");
+                                        if self.project.ao_map.is_some() {
+                                            ui.colored_label(egui::Color32::from_rgb(80, 220, 120), "Active");
+                                        } else {
+                                            ui.colored_label(egui::Color32::from_rgb(160, 160, 160), "Not Baked");
+                                        }
+                                    });
+                                    ui.horizontal(|ui| {
+                                        if ui.button("Shelf...").on_hover_text("Select AO map from Project Shelf").clicked() {
+                                            self.shelf_picker = Some(ShelfPickerState::new(ShelfPickerTarget::MeshMapAo));
+                                        }
+                                        if ui.button("Import File...").on_hover_text("Import AO map file into Project Shelf and assign").clicked() {
+                                            if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "tga", "exr", "hdr"]).pick_file() {
+                                                if let Ok(id) = self.project.import_texture_resource(&path, crate::project::ProjectResourceType::Texture) {
+                                                    if let Some(res) = self.project.get_resource(&id).cloned() {
+                                                        self.assign_resource_to_target(&res, ShelfPickerTarget::MeshMapAo);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        if self.project.ao_map.is_some() {
+                                            if ui.button("Remove").clicked() {
+                                                self.project.ao_map = None;
+                                                self.project.gpu_mesh_maps_sync_needed = true;
+                                                self.project.gpu_sync_needed = true;
+                                                self.project.sync_baked_maps_to_resources();
+                                            }
+                                            if ui.button("View").clicked() {
+                                                self.view_mode = ViewportChannelMode::AmbientOcclusion;
+                                            }
+                                        }
+                                    });
+                                });
+
+                                // 3. Curvature Map
+                                ui.group(|ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.strong("Curvature:");
+                                        if self.project.curvature_map.is_some() {
+                                            ui.colored_label(egui::Color32::from_rgb(80, 220, 120), "Active");
+                                        } else {
+                                            ui.colored_label(egui::Color32::from_rgb(160, 160, 160), "Not Baked");
+                                        }
+                                    });
+                                    ui.horizontal(|ui| {
+                                        if ui.button("Shelf...").on_hover_text("Select Curvature map from Project Shelf").clicked() {
+                                            self.shelf_picker = Some(ShelfPickerState::new(ShelfPickerTarget::MeshMapCurvature));
+                                        }
+                                        if ui.button("Import File...").on_hover_text("Import Curvature map file into Project Shelf and assign").clicked() {
+                                            if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "tga", "exr", "hdr"]).pick_file() {
+                                                if let Ok(id) = self.project.import_texture_resource(&path, crate::project::ProjectResourceType::Texture) {
+                                                    if let Some(res) = self.project.get_resource(&id).cloned() {
+                                                        self.assign_resource_to_target(&res, ShelfPickerTarget::MeshMapCurvature);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        if self.project.curvature_map.is_some() {
+                                            if ui.button("Remove").clicked() {
+                                                self.project.curvature_map = None;
+                                                self.project.gpu_mesh_maps_sync_needed = true;
+                                                self.project.gpu_sync_needed = true;
+                                                self.project.sync_baked_maps_to_resources();
+                                            }
+                                            if ui.button("View").clicked() {
+                                                self.view_mode = ViewportChannelMode::Curvature;
+                                            }
+                                        }
+                                    });
+                                });
+
+                                // 4. World Space Normal Map
+                                ui.group(|ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.strong("World Space Normal:");
+                                        if self.project.world_space_normal_map.is_some() {
+                                            ui.colored_label(egui::Color32::from_rgb(80, 220, 120), "Active");
+                                        } else {
+                                            ui.colored_label(egui::Color32::from_rgb(160, 160, 160), "Not Baked");
+                                        }
+                                    });
+                                    ui.horizontal(|ui| {
+                                        if ui.button("Shelf...").on_hover_text("Select World Space Normal map from Project Shelf").clicked() {
+                                            self.shelf_picker = Some(ShelfPickerState::new(ShelfPickerTarget::MeshMapWorldSpaceNormal));
+                                        }
+                                        if ui.button("Import File...").on_hover_text("Import World Space Normal map file into Project Shelf and assign").clicked() {
+                                            if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "tga", "exr", "hdr"]).pick_file() {
+                                                if let Ok(id) = self.project.import_texture_resource(&path, crate::project::ProjectResourceType::Texture) {
+                                                    if let Some(res) = self.project.get_resource(&id).cloned() {
+                                                        self.assign_resource_to_target(&res, ShelfPickerTarget::MeshMapWorldSpaceNormal);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        if self.project.world_space_normal_map.is_some() {
+                                            if ui.button("Remove").clicked() {
+                                                self.project.world_space_normal_map = None;
+                                                self.project.gpu_mesh_maps_sync_needed = true;
+                                                self.project.gpu_sync_needed = true;
+                                                self.project.sync_baked_maps_to_resources();
+                                            }
+                                            if ui.button("View").clicked() {
+                                                self.view_mode = ViewportChannelMode::WorldNormal;
+                                            }
+                                        }
+                                    });
+                                });
+
+                                // 5. Position Map (WPO)
+                                ui.group(|ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.strong("Position (WPO):");
+                                        if self.project.position_map.is_some() {
+                                            ui.colored_label(egui::Color32::from_rgb(80, 220, 120), "Active");
+                                        } else {
+                                            ui.colored_label(egui::Color32::from_rgb(160, 160, 160), "Not Baked");
+                                        }
+                                    });
+                                    ui.horizontal(|ui| {
+                                        if ui.button("Shelf...").on_hover_text("Select Position map from Project Shelf").clicked() {
+                                            self.shelf_picker = Some(ShelfPickerState::new(ShelfPickerTarget::MeshMapPosition));
+                                        }
+                                        if ui.button("Import File...").on_hover_text("Import Position map file into Project Shelf and assign").clicked() {
+                                            if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "tga", "exr", "hdr"]).pick_file() {
+                                                if let Ok(id) = self.project.import_texture_resource(&path, crate::project::ProjectResourceType::Texture) {
+                                                    if let Some(res) = self.project.get_resource(&id).cloned() {
+                                                        self.assign_resource_to_target(&res, ShelfPickerTarget::MeshMapPosition);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        if self.project.position_map.is_some() {
+                                            if ui.button("Remove").clicked() {
+                                                self.project.position_map = None;
+                                                self.project.gpu_mesh_maps_sync_needed = true;
+                                                self.project.gpu_sync_needed = true;
+                                                self.project.sync_baked_maps_to_resources();
+                                            }
+                                            if ui.button("View").clicked() {
+                                                self.view_mode = ViewportChannelMode::Position;
+                                            }
+                                        }
+                                    });
+                                });
+
+                                // 6. Thickness Map
+                                ui.group(|ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.strong("Thickness:");
+                                        if self.project.thickness_map.is_some() {
+                                            ui.colored_label(egui::Color32::from_rgb(80, 220, 120), "Active");
+                                        } else {
+                                            ui.colored_label(egui::Color32::from_rgb(160, 160, 160), "Not Baked");
+                                        }
+                                    });
+                                    ui.horizontal(|ui| {
+                                        if ui.button("Shelf...").on_hover_text("Select Thickness map from Project Shelf").clicked() {
+                                            self.shelf_picker = Some(ShelfPickerState::new(ShelfPickerTarget::MeshMapThickness));
+                                        }
+                                        if ui.button("Import File...").on_hover_text("Import Thickness map file into Project Shelf and assign").clicked() {
+                                            if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "tga", "exr", "hdr"]).pick_file() {
+                                                if let Ok(id) = self.project.import_texture_resource(&path, crate::project::ProjectResourceType::Texture) {
+                                                    if let Some(res) = self.project.get_resource(&id).cloned() {
+                                                        self.assign_resource_to_target(&res, ShelfPickerTarget::MeshMapThickness);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        if self.project.thickness_map.is_some() {
+                                            if ui.button("Invert").on_hover_text("Invert thickness map (toggle between White=Thick and White=Thin)").clicked() {
+                                                if let Some(th) = &mut self.project.thickness_map {
+                                                    th.invert();
+                                                    self.project.gpu_mesh_maps_sync_needed = true;
+                                                    self.project.gpu_sync_needed = true;
+                                                    self.project.sync_baked_maps_to_resources();
+                                                    self.status_message = "Inverted thickness map".to_string();
+                                                }
+                                            }
+                                            if ui.button("Remove").clicked() {
+                                                self.project.thickness_map = None;
+                                                self.project.gpu_mesh_maps_sync_needed = true;
+                                                self.project.gpu_sync_needed = true;
+                                                self.project.sync_baked_maps_to_resources();
+                                            }
+                                            if ui.button("View").clicked() {
+                                                self.view_mode = ViewportChannelMode::Thickness;
+                                            }
+                                        }
+                                    });
+                                });
+
+                                // 7. ID Map
+                                ui.group(|ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.strong("ID (Color Mask):");
+                                        if self.project.id_map.is_some() {
+                                            ui.colored_label(egui::Color32::from_rgb(80, 220, 120), "Active");
+                                        } else {
+                                            ui.colored_label(egui::Color32::from_rgb(160, 160, 160), "Not Baked");
+                                        }
+                                    });
+                                    ui.horizontal(|ui| {
+                                        if ui.button("Shelf...").on_hover_text("Select ID map from Project Shelf").clicked() {
+                                            self.shelf_picker = Some(ShelfPickerState::new(ShelfPickerTarget::MeshMapId));
+                                        }
+                                        if ui.button("Import File...").on_hover_text("Import ID map file into Project Shelf and assign").clicked() {
+                                            if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "tga", "exr", "hdr"]).pick_file() {
+                                                if let Ok(id) = self.project.import_texture_resource(&path, crate::project::ProjectResourceType::Texture) {
+                                                    if let Some(res) = self.project.get_resource(&id).cloned() {
+                                                        self.assign_resource_to_target(&res, ShelfPickerTarget::MeshMapId);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        if self.project.id_map.is_some() {
+                                            if ui.button("Remove").clicked() {
+                                                self.project.id_map = None;
+                                                self.project.gpu_mesh_maps_sync_needed = true;
+                                                self.project.sync_baked_maps_to_resources();
+                                                self.status_message = "Removed ID map".to_string();
+                                            }
+                                        }
+                                    });
+                                });
+
+                                ui.add_space(8.0);
+                                ui.label(egui::RichText::new("Tip: Baked Normal and AO maps are permanently integrated into the PBR shader. Layers and paint strokes seamlessly blend on top of them. Curvature and AO maps also directly power the Smart Edge Wear and Crevice Dirt mask generators.").small().color(egui::Color32::from_rgb(170, 170, 170)));
+                            });
+    }
+}
