@@ -37,8 +37,9 @@ impl Default for BakeMatchConfig {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum BakeCageMode {
+    #[default]
     None,
     ParametricInflation,
     ExternalCage,
@@ -2262,6 +2263,77 @@ mod tests {
         assert_eq!(thick_map.width, 16);
         assert_eq!(thick_map.height, 16);
         assert!(thick_map.data.iter().all(|&v| (0.0..=1.0).contains(&v)));
+    }
+
+    #[test]
+    fn test_increased_rear_distance_reaches_deep_geometry() {
+        // Low-poly cube with faces at +-1.0 (gap of 0.5 to high-poly sphere at +-0.5)
+        let mut low_cube = Mesh::create_cube_mesh("LowCube", 1.0);
+        for v in &mut low_cube.vertices {
+            v.position *= 2.0;
+        }
+        low_cube.rebuild_bvh();
+
+        let high_sphere = Mesh::create_sphere(1.0, 32, 24);
+
+        // 1. With a small rear distance (0.1) and frontal (0.05), ray reaches max depth of 0.05 + 0.1 = 0.15 past face.
+        // It cannot bridge the 0.5 unit gap to the sphere, so all pixels remain default flat normal (0.5, 0.5, 1.0).
+        let normal_small_rear = Baker::bake_tangent_normals_with_match(
+            &low_cube,
+            Some(&high_sphere),
+            0.05,
+            0.1,
+            32,
+            32,
+            &BakeMatchConfig::default(),
+        );
+
+        // 2. With an increased rear distance (1.5, well beyond 0.5), ray reaches 0.05 + 1.5 = 1.55 past face.
+        // It easily bridges the 0.5 unit gap and hits the high-poly sphere!
+        let normal_large_rear = Baker::bake_tangent_normals_with_match(
+            &low_cube,
+            Some(&high_sphere),
+            0.05,
+            1.5,
+            32,
+            32,
+            &BakeMatchConfig::default(),
+        );
+
+        // 3. With a very large rear distance (25.0) for large-scale / meters assets
+        let normal_huge_rear = Baker::bake_tangent_normals_with_match(
+            &low_cube,
+            Some(&high_sphere),
+            0.05,
+            25.0,
+            32,
+            32,
+            &BakeMatchConfig::default(),
+        );
+
+        let mut small_rear_non_flat_count = 0;
+        let mut large_rear_non_flat_count = 0;
+        let mut huge_rear_non_flat_count = 0;
+
+        for ((p_small, p_large), p_huge) in normal_small_rear.data.iter().zip(normal_large_rear.data.iter()).zip(normal_huge_rear.data.iter()) {
+            let is_flat_small = (p_small.x - 0.5).abs() < 1e-3 && (p_small.y - 0.5).abs() < 1e-3 && (p_small.z - 1.0).abs() < 1e-3;
+            let is_flat_large = (p_large.x - 0.5).abs() < 1e-3 && (p_large.y - 0.5).abs() < 1e-3 && (p_large.z - 1.0).abs() < 1e-3;
+            let is_flat_huge = (p_huge.x - 0.5).abs() < 1e-3 && (p_huge.y - 0.5).abs() < 1e-3 && (p_huge.z - 1.0).abs() < 1e-3;
+
+            if !is_flat_small {
+                small_rear_non_flat_count += 1;
+            }
+            if !is_flat_large {
+                large_rear_non_flat_count += 1;
+            }
+            if !is_flat_huge {
+                huge_rear_non_flat_count += 1;
+            }
+        }
+
+        assert_eq!(small_rear_non_flat_count, 0, "Small rear distance (0.1) must not reach geometry 0.5 units behind surface");
+        assert!(large_rear_non_flat_count > 0, "Increased rear distance (1.5) must penetrate and capture recessed geometry");
+        assert!(huge_rear_non_flat_count > 0, "Huge rear distance (25.0) must penetrate and capture recessed geometry");
     }
 }
 

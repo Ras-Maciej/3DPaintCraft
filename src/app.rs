@@ -200,6 +200,20 @@ impl ShelfPickerState {
     }
 }
 
+#[derive(Clone, PartialEq, Eq, Default)]
+pub struct BakeCageCacheKey {
+    pub mode: crate::baker::BakeCageMode,
+    pub inflation_bits: u32,
+    pub frontal_bits: u32,
+    pub rear_bits: u32,
+    pub preview_rear: bool,
+    pub path: String,
+    pub show_hull: bool,
+    pub show_tethers: bool,
+    pub color_idx: usize,
+    pub vert_count: usize,
+}
+
 pub struct PaintcraftApp {
     pub project: Project,
     pub camera: Camera,
@@ -317,7 +331,8 @@ pub struct PaintcraftApp {
     pub bake_cage_show_tethers: bool,
     pub bake_cage_color_idx: usize,
     pub bake_cage_opacity: f32,
-    pub bake_cage_cache_key: (crate::baker::BakeCageMode, u32, u32, String, bool, bool, usize, usize),
+    pub bake_cage_preview_rear: bool,
+    pub bake_cage_cache_key: BakeCageCacheKey,
     pub bake_active_settings_tab: crate::baker::BakeSettingsTab,
     pub bake_ao_config: crate::baker::AoBakeConfig,
     pub bake_thickness_config: crate::baker::ThicknessBakeConfig,
@@ -674,7 +689,8 @@ impl PaintcraftApp {
             bake_cage_show_tethers: true,
             bake_cage_color_idx: 0,
             bake_cage_opacity: 0.85,
-            bake_cage_cache_key: (crate::baker::BakeCageMode::None, 0, 0, String::new(), false, false, 0, 0),
+            bake_cage_preview_rear: false,
+            bake_cage_cache_key: BakeCageCacheKey::default(),
             bake_active_settings_tab: crate::baker::BakeSettingsTab::Common,
             bake_ao_config: crate::baker::AoBakeConfig::default(),
             bake_thickness_config: crate::baker::ThicknessBakeConfig::default(),
@@ -5752,23 +5768,30 @@ impl PaintcraftApp {
 
         // --- SYNCHRONIZE VIEWPORT BAKING CAGE PREVIEW ---
         if self.show_bake_modal && self.bake_preview_cage {
-            let current_key = (
-                self.bake_cage_mode,
-                self.bake_cage_inflation.to_bits(),
-                self.bake_frontal.to_bits(),
-                self.bake_cage_path.clone(),
-                self.bake_cage_show_hull,
-                self.bake_cage_show_tethers,
-                self.bake_cage_color_idx,
-                self.project.mesh.vertices.len(),
-            );
+            let current_key = BakeCageCacheKey {
+                mode: self.bake_cage_mode,
+                inflation_bits: self.bake_cage_inflation.to_bits(),
+                frontal_bits: self.bake_frontal.to_bits(),
+                rear_bits: self.bake_rear.to_bits(),
+                preview_rear: self.bake_cage_preview_rear,
+                path: self.bake_cage_path.clone(),
+                show_hull: self.bake_cage_show_hull,
+                show_tethers: self.bake_cage_show_tethers,
+                color_idx: self.bake_cage_color_idx,
+                vert_count: self.project.mesh.vertices.len(),
+            };
             if self.bake_cage_cache_key != current_key {
                 self.bake_cage_cache_key = current_key;
                 let cage_verts = match self.bake_cage_mode {
                     crate::baker::BakeCageMode::None => {
+                        let offset = if self.bake_cage_preview_rear {
+                            -self.bake_rear
+                        } else {
+                            self.bake_frontal
+                        };
                         let cfg = crate::baker::BakeCageConfig {
                             mode: crate::baker::BakeCageMode::ParametricInflation,
-                            inflation_offset: self.bake_frontal,
+                            inflation_offset: offset,
                             external_cage_path: None,
                         };
                         crate::baker::Baker::compute_cage_vertices(&self.project.mesh, &cfg).ok().flatten()
@@ -5809,8 +5832,8 @@ impl PaintcraftApp {
                 }
             }
         } else if !self.show_bake_modal || !self.bake_preview_cage {
-            if self.bake_cage_cache_key.7 != 0 {
-                self.bake_cage_cache_key.7 = 0;
+            if self.bake_cage_cache_key.vert_count != 0 {
+                self.bake_cage_cache_key.vert_count = 0;
                 if let Some(wgpu) = &mut self.wgpu_viewport {
                     wgpu.clear_cage();
                 }
@@ -6019,7 +6042,13 @@ impl PaintcraftApp {
 
         if self.show_bake_modal && self.bake_preview_cage {
             let cage_mode_desc = match self.bake_cage_mode {
-                crate::baker::BakeCageMode::None => format!("Frontal Ray Envelope: {:.3}", self.bake_frontal),
+                crate::baker::BakeCageMode::None => {
+                    if self.bake_cage_preview_rear {
+                        format!("Rear Ray Penetration Depth: {:.3}", self.bake_rear)
+                    } else {
+                        format!("Frontal Ray Envelope: {:.3}", self.bake_frontal)
+                    }
+                }
                 crate::baker::BakeCageMode::ParametricInflation => format!("Parametric Inflation Offset: {:.3}", self.bake_cage_inflation),
                 crate::baker::BakeCageMode::ExternalCage => format!("External Cage: {}", if self.bake_cage_path.is_empty() { "None selected" } else { &self.bake_cage_path }),
             };
@@ -9589,12 +9618,40 @@ impl PaintcraftApp {
                                             ui.strong("Ray Distances:");
                                             ui.horizontal(|ui| {
                                                 ui.label("Max Frontal Distance:");
-                                                ui.add(egui::Slider::new(&mut self.bake_frontal, 0.001..=0.5).logarithmic(true));
+                                                ui.add(
+                                                    egui::Slider::new(&mut self.bake_frontal, 0.0001..=50.0)
+                                                        .logarithmic(true)
+                                                        .clamp_to_range(false)
+                                                        .custom_formatter(|n, _| format!("{:.4}", n))
+                                                );
                                             });
                                             ui.horizontal(|ui| {
                                                 ui.label("Max Rear Distance:");
-                                                ui.add(egui::Slider::new(&mut self.bake_rear, 0.001..=0.5).logarithmic(true));
+                                                ui.add(
+                                                    egui::Slider::new(&mut self.bake_rear, 0.0001..=50.0)
+                                                        .logarithmic(true)
+                                                        .clamp_to_range(false)
+                                                        .custom_formatter(|n, _| format!("{:.4}", n))
+                                                );
                                             });
+                                            ui.horizontal(|ui| {
+                                                ui.label(egui::RichText::new("Rear Presets:").small().color(Color32::from_rgb(160, 165, 175)));
+                                                for preset in [0.01_f32, 0.05, 0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 25.0] {
+                                                    let is_selected = (self.bake_rear - preset).abs() < 1e-4;
+                                                    let text = if preset >= 1.0 {
+                                                        format!("{:.0}", preset)
+                                                    } else {
+                                                        format!("{}", preset)
+                                                    };
+                                                    if ui.selectable_label(is_selected, text).clicked() {
+                                                        self.bake_rear = preset;
+                                                    }
+                                                }
+                                            });
+                                            self.bake_rear = self.bake_rear.max(0.0001);
+                                            self.bake_frontal = self.bake_frontal.max(0.0001);
+                                            self.bake_normal_config.frontal_distance = self.bake_frontal;
+                                            self.bake_normal_config.rear_distance = self.bake_rear;
 
                                             ui.add_space(6.0);
                                             ui.separator();
@@ -9617,15 +9674,21 @@ impl PaintcraftApp {
                                                 crate::baker::BakeCageMode::ParametricInflation => {
                                                     ui.horizontal(|ui| {
                                                         ui.label("Cage Inflation Offset:");
-                                                        ui.add(egui::Slider::new(&mut self.bake_cage_inflation, 0.001..=0.5).logarithmic(true));
+                                                        ui.add(
+                                                            egui::Slider::new(&mut self.bake_cage_inflation, 0.0001..=50.0)
+                                                                .logarithmic(true)
+                                                                .clamp_to_range(false)
+                                                                .custom_formatter(|n, _| format!("{:.4}", n))
+                                                        );
                                                     });
+                                                    self.bake_cage_inflation = self.bake_cage_inflation.max(0.0);
                                                     ui.label(egui::RichText::new("Generates a seamless averaged normal envelope to eliminate ray-crossing on bevels and corners.").small().color(Color32::from_rgb(150, 155, 165)));
                                                 }
                                                 crate::baker::BakeCageMode::ExternalCage => {
                                                     ui.horizontal(|ui| {
                                                         ui.text_edit_singleline(&mut self.bake_cage_path);
                                                         if ui.button("Browse...").clicked() {
-                                                            if let Some(path) = rfd::FileDialog::new().add_filter("OBJ Mesh (*.obj)", &["obj"]).pick_file() {
+                                                             if let Some(path) = rfd::FileDialog::new().add_filter("OBJ Mesh (*.obj)", &["obj"]).pick_file() {
                                                                 self.bake_cage_path = path.to_string_lossy().to_string();
                                                             }
                                                         }
@@ -9641,6 +9704,13 @@ impl PaintcraftApp {
                                             ui.checkbox(&mut self.bake_preview_cage, egui::RichText::new("Preview Cage in 3D Viewport").strong().color(Color32::from_rgb(0, 225, 255)));
                                             if self.bake_preview_cage {
                                                 ui.indent("bake_cage_preview_indent", |ui| {
+                                                    if self.bake_cage_mode == crate::baker::BakeCageMode::None {
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Envelope Preview:");
+                                                            ui.selectable_value(&mut self.bake_cage_preview_rear, false, "Frontal (Outer)");
+                                                            ui.selectable_value(&mut self.bake_cage_preview_rear, true, "Rear (Inward Penetration)");
+                                                        });
+                                                    }
                                                     ui.horizontal(|ui| {
                                                         ui.checkbox(&mut self.bake_cage_show_hull, "Translucent Shell");
                                                         ui.checkbox(&mut self.bake_cage_show_tethers, "Displacement Vectors");
@@ -9659,7 +9729,13 @@ impl PaintcraftApp {
                                                         ui.add(egui::Slider::new(&mut self.bake_cage_opacity, 0.1..=1.0));
                                                     });
                                                     let status_text = match self.bake_cage_mode {
-                                                        crate::baker::BakeCageMode::None => format!("Previewing frontal ray envelope at distance {:.3}", self.bake_frontal),
+                                                        crate::baker::BakeCageMode::None => {
+                                                            if self.bake_cage_preview_rear {
+                                                                format!("Previewing rear ray penetration at depth {:.3}", self.bake_rear)
+                                                            } else {
+                                                                format!("Previewing frontal ray envelope at distance {:.3}", self.bake_frontal)
+                                                            }
+                                                        }
                                                         crate::baker::BakeCageMode::ParametricInflation => format!("Previewing parametric smoothed cage at offset {:.3}", self.bake_cage_inflation),
                                                         crate::baker::BakeCageMode::ExternalCage => {
                                                             if self.bake_cage_path.is_empty() {
@@ -9843,12 +9919,40 @@ impl PaintcraftApp {
 
                                             ui.horizontal(|ui| {
                                                 ui.label("Max Frontal Distance:");
-                                                ui.add(egui::Slider::new(&mut self.bake_frontal, 0.001..=0.5).logarithmic(true));
+                                                ui.add(
+                                                    egui::Slider::new(&mut self.bake_frontal, 0.0001..=50.0)
+                                                        .logarithmic(true)
+                                                        .clamp_to_range(false)
+                                                        .custom_formatter(|n, _| format!("{:.4}", n))
+                                                );
                                             });
                                             ui.horizontal(|ui| {
                                                 ui.label("Max Rear Distance:");
-                                                ui.add(egui::Slider::new(&mut self.bake_rear, 0.001..=0.5).logarithmic(true));
+                                                ui.add(
+                                                    egui::Slider::new(&mut self.bake_rear, 0.0001..=50.0)
+                                                        .logarithmic(true)
+                                                        .clamp_to_range(false)
+                                                        .custom_formatter(|n, _| format!("{:.4}", n))
+                                                );
                                             });
+                                            ui.horizontal(|ui| {
+                                                ui.label(egui::RichText::new("Rear Presets:").small().color(Color32::from_rgb(160, 165, 175)));
+                                                for preset in [0.01_f32, 0.05, 0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 25.0] {
+                                                    let is_selected = (self.bake_rear - preset).abs() < 1e-4;
+                                                    let text = if preset >= 1.0 {
+                                                        format!("{:.0}", preset)
+                                                    } else {
+                                                        format!("{}", preset)
+                                                    };
+                                                    if ui.selectable_label(is_selected, text).clicked() {
+                                                        self.bake_rear = preset;
+                                                    }
+                                                }
+                                            });
+                                            self.bake_rear = self.bake_rear.max(0.0001);
+                                            self.bake_frontal = self.bake_frontal.max(0.0001);
+                                            self.bake_normal_config.frontal_distance = self.bake_frontal;
+                                            self.bake_normal_config.rear_distance = self.bake_rear;
 
                                             ui.add_space(6.0);
                                             ui.horizontal(|ui| {
@@ -10016,7 +10120,7 @@ impl PaintcraftApp {
 
         if close_modal {
             self.show_bake_modal = false;
-            self.bake_cage_cache_key = (crate::baker::BakeCageMode::None, 0, 0, String::new(), false, false, 0, 0);
+            self.bake_cage_cache_key = BakeCageCacheKey::default();
             if let Some(wgpu) = &mut self.wgpu_viewport {
                 wgpu.clear_cage();
             }
