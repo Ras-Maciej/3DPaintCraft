@@ -11135,10 +11135,18 @@ impl PaintcraftApp {
                                                 layer.add_mask_paint_effect(curv_ref);
                                                 prop_changed = true;
                                             }
+                                            if ui.button("+ Flood Fill").on_hover_text("Substance Flood Fill: segment connected components to random grayscale, gradients, or centroid domes").clicked() {
+                                                layer.add_mask_flood_fill(crate::flood_fill::FloodFillMode::RandomGrayscale, 0.5, 0.0, false, false, curv_ref, ao_ref, pos_ref, wn_ref);
+                                                prop_changed = true;
+                                            }
                                             egui::ComboBox::from_id_source("add_generator_quick_menu")
                                                 .selected_text("+ Add Generator...")
                                                 .show_ui(ui, |ui| {
-                                                    if ui.selectable_label(false, "Curvature Edge Wear").on_hover_text("Substance convex edge wear & paint chipping").clicked() {
+                                                    if ui.selectable_label(false, "Peeling Paint (Hyperrealistic)").on_hover_text("Authentic mechanical peeling with curled perimeter lips and micro-fractures (No Voronoi cells)").clicked() {
+                                                        layer.add_mask_generator_peeling_paint(curv_ref, ao_ref, pos_ref, wn_ref);
+                                                        prop_changed = true;
+                                                    }
+                                                    if ui.selectable_label(false, "Curvature Edge Wear").on_hover_text("Substance convex edge wear & authentic contact chipping").clicked() {
                                                         layer.add_mask_generator_curvature_wear(curv_ref, ao_ref, pos_ref, wn_ref);
                                                         prop_changed = true;
                                                     }
@@ -11146,12 +11154,16 @@ impl PaintcraftApp {
                                                         layer.add_mask_generator_cavity_dirt(curv_ref, ao_ref, pos_ref, wn_ref);
                                                         prop_changed = true;
                                                     }
+                                                    if ui.selectable_label(false, "Gravity Leaks (-Y)").on_hover_text("Fluid gravity dripping and rust runoffs with capillary meandering").clicked() {
+                                                        layer.add_mask_generator_gravity_leaks(curv_ref, ao_ref, pos_ref, wn_ref);
+                                                        prop_changed = true;
+                                                    }
                                                     if ui.selectable_label(false, "Directional Dust (+Y)").on_hover_text("Sky-facing dust settling into upward concave pockets").clicked() {
                                                         layer.add_mask_generator_directional_dust(curv_ref, ao_ref, pos_ref, wn_ref);
                                                         prop_changed = true;
                                                     }
-                                                    if ui.selectable_label(false, "Ground Mud & Splash").on_hover_text("Height-based ground mud accumulation with organic splatter").clicked() {
-                                                        layer.add_mask_generator_ground_dirt(curv_ref, ao_ref, pos_ref, wn_ref);
+                                                    if ui.selectable_label(false, "Ground Mud & Splash").on_hover_text("Height-based ground mud accumulation with organic impact splatter").clicked() {
+                                                        layer.add_mask_generator_ground_mud(curv_ref, ao_ref, pos_ref, wn_ref);
                                                         prop_changed = true;
                                                     }
                                                     if ui.selectable_label(false, "Mask Editor (Compound)").on_hover_text("Compound mask editor fusing all baked mesh maps").clicked() {
@@ -11727,18 +11739,168 @@ impl PaintcraftApp {
                                                         });
                                                         if ui.checkbox(invert, "Global Invert").changed() { prop_changed = true; }
                                                     }
+                                                    crate::layer::MaskEffectType::GeneratorPeelingPaint {
+                                                        ref mut peeling_amount,
+                                                        ref mut flake_scale,
+                                                        ref mut edge_curl_lip,
+                                                        ref mut micro_fracture,
+                                                        ref mut substrate_exposure,
+                                                        ref mut invert,
+                                                    } => {
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Peeling Level:");
+                                                            if ui.add(egui::Slider::new(peeling_amount, 0.01..=0.99)).changed() { prop_changed = true; }
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Flake Scale:");
+                                                            if ui.add(egui::Slider::new(flake_scale, 1.0..=32.0)).changed() { prop_changed = true; }
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Edge Curl Lip:");
+                                                            if ui.add(egui::Slider::new(edge_curl_lip, 0.0..=1.0)).changed() { prop_changed = true; }
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Micro-Fracture Detail:");
+                                                            if ui.add(egui::Slider::new(micro_fracture, 0.0..=1.0)).changed() { prop_changed = true; }
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Substrate Exposure:");
+                                                            if ui.add(egui::Slider::new(substrate_exposure, 0.0..=1.0)).changed() { prop_changed = true; }
+                                                        });
+                                                        if ui.checkbox(invert, "Invert Peeling").changed() { prop_changed = true; }
+                                                        ui.label(egui::RichText::new("Physically authentic adhesive detachment with curled perimeter lips and micro-fractures (No Voronoi cells).").small().color(Color32::from_rgb(160, 165, 175)));
+                                                    }
+                                                    crate::layer::MaskEffectType::GeneratorGravityLeaks {
+                                                        ref mut drip_intensity,
+                                                        ref mut drip_scale,
+                                                        ref mut streak_length,
+                                                        ref mut meander_amount,
+                                                        ref mut ao_source_boost,
+                                                        gravity_dir: _,
+                                                    } => {
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Drip Intensity:");
+                                                            if ui.add(egui::Slider::new(drip_intensity, 0.0..=1.0)).changed() { prop_changed = true; }
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Drip Scale:");
+                                                            if ui.add(egui::Slider::new(drip_scale, 1.0..=32.0)).changed() { prop_changed = true; }
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Streak Length:");
+                                                            if ui.add(egui::Slider::new(streak_length, 0.1..=3.0)).changed() { prop_changed = true; }
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Meander (Capillary):");
+                                                            if ui.add(egui::Slider::new(meander_amount, 0.0..=1.0)).changed() { prop_changed = true; }
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("AO Crevice Boost:");
+                                                            if ui.add(egui::Slider::new(ao_source_boost, 0.0..=2.0)).changed() { prop_changed = true; }
+                                                        });
+                                                        ui.label(egui::RichText::new("Fluid gravity runoffs originating from concave crevices with lateral wandering.").small().color(Color32::from_rgb(160, 165, 175)));
+                                                    }
+                                                    crate::layer::MaskEffectType::GeneratorGroundMud {
+                                                        ref mut mud_height,
+                                                        ref mut height_falloff,
+                                                        ref mut splash_intensity,
+                                                        ref mut splash_scale,
+                                                        ref mut splash_reach,
+                                                    } => {
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Mud Height:");
+                                                            if ui.add(egui::Slider::new(mud_height, 0.0..=1.0)).changed() { prop_changed = true; }
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Height Falloff:");
+                                                            if ui.add(egui::Slider::new(height_falloff, 0.05..=1.0)).changed() { prop_changed = true; }
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Splash Intensity:");
+                                                            if ui.add(egui::Slider::new(splash_intensity, 0.0..=1.0)).changed() { prop_changed = true; }
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Splash Scale:");
+                                                            if ui.add(egui::Slider::new(splash_scale, 1.0..=32.0)).changed() { prop_changed = true; }
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Splash Reach:");
+                                                            if ui.add(egui::Slider::new(splash_reach, 0.05..=1.0)).changed() { prop_changed = true; }
+                                                        });
+                                                    }
+                                                    crate::layer::MaskEffectType::FloodFill {
+                                                        ref mut mode,
+                                                        ref mut threshold,
+                                                        ref mut invert_input,
+                                                        ref mut gradient_angle,
+                                                        ref mut random_angle,
+                                                        ref mut seed,
+                                                        ref mut use_uv_islands,
+                                                    } => {
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Output Mode:");
+                                                            egui::ComboBox::from_id_source(format!("flood_fill_mode_{}", eff_id))
+                                                                .selected_text(mode.name())
+                                                                .show_ui(ui, |ui| {
+                                                                    for m in crate::flood_fill::FloodFillMode::all() {
+                                                                        if ui.selectable_value(mode, *m, m.name()).clicked() {
+                                                                            prop_changed = true;
+                                                                        }
+                                                                    }
+                                                                });
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Island Source:");
+                                                            let source_name = if *use_uv_islands { "3D Mesh UV Shells" } else { "Mask Threshold" };
+                                                            egui::ComboBox::from_id_source(format!("flood_fill_source_{}", eff_id))
+                                                                .selected_text(source_name)
+                                                                .show_ui(ui, |ui| {
+                                                                    if ui.selectable_label(!*use_uv_islands, "Mask Threshold (Input Mask)").clicked() {
+                                                                        *use_uv_islands = false;
+                                                                        prop_changed = true;
+                                                                    }
+                                                                    if ui.selectable_label(*use_uv_islands, "3D Mesh UV Shells").clicked() {
+                                                                        *use_uv_islands = true;
+                                                                        prop_changed = true;
+                                                                    }
+                                                                });
+                                                        });
+                                                        if !*use_uv_islands {
+                                                            ui.horizontal(|ui| {
+                                                                ui.label("Island Threshold:");
+                                                                if ui.add(egui::Slider::new(threshold, 0.01..=0.99)).changed() { prop_changed = true; }
+                                                            });
+                                                            if ui.checkbox(invert_input, "Invert Threshold Input").changed() {
+                                                                prop_changed = true;
+                                                            }
+                                                        }
+                                                        if *mode == crate::flood_fill::FloodFillMode::AngleGradient {
+                                                            ui.horizontal(|ui| {
+                                                                ui.label("Gradient Angle:");
+                                                                if ui.add(egui::Slider::new(gradient_angle, 0.0..=360.0).suffix(" deg")).changed() { prop_changed = true; }
+                                                            });
+                                                            if ui.checkbox(random_angle, "Random Island Angle").changed() {
+                                                                prop_changed = true;
+                                                            }
+                                                        }
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Random Seed:");
+                                                            if ui.add(egui::DragValue::new(seed).range(0..=9999)).changed() { prop_changed = true; }
+                                                        });
+                                                        ui.label(egui::RichText::new("Substance Flood Fill: segments islands into unique random values, gradients, or centroid domes.").small().color(Color32::from_rgb(160, 165, 175)));
+                                                    }
                                                 }
                                             });
                                         }
 
                                         if let Some(id) = remove_eff_id {
                                             layer.remove_mask_effect(id, curv_ref);
-                                            layer.evaluate_mask_full(curv_ref, ao_ref, pos_ref, wn_ref, id_ref, &anchor_refs);
+                                            layer.evaluate_mask_full_with_mesh(curv_ref, ao_ref, pos_ref, wn_ref, id_ref, &anchor_refs, Some(&self.project.mesh));
                                             prop_changed = true;
                                         }
                                         if let Some((id, up)) = reorder_eff {
                                             layer.reorder_mask_effect(id, up, curv_ref);
-                                            layer.evaluate_mask_full(curv_ref, ao_ref, pos_ref, wn_ref, id_ref, &anchor_refs);
+                                            layer.evaluate_mask_full_with_mesh(curv_ref, ao_ref, pos_ref, wn_ref, id_ref, &anchor_refs, Some(&self.project.mesh));
                                             prop_changed = true;
                                         }
                                     }
@@ -12375,7 +12537,7 @@ impl PaintcraftApp {
                                 layer.evaluate_fill_advanced(curv, pos, wn, ao);
                             }
                             if mask_changed && layer.has_mask {
-                                layer.evaluate_mask_full(curv, ao, pos, wn, id_ref, &anchor_refs);
+                                layer.evaluate_mask_full_with_mesh(curv, ao, pos, wn, id_ref, &anchor_refs, Some(&proj.mesh));
                             }
                             let is_extended_change = layer.channel_flags.clearcoat
                                 || layer.channel_flags.emission

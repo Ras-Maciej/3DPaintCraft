@@ -317,19 +317,134 @@ impl NoiseGenerator {
         0.0
     }
 
-    /// Organic peeling and flaking paint blisters with jagged perimeter lines
+    /// Hyperrealistic adhesive paint peeling and flaking (free from Voronoi cellular artifacts)
     pub fn peeling_paint_2d(x: f32, y: f32) -> f32 {
-        let (d1, d2) = Self::voronoi_2d(x * 2.5, y * 2.5);
-        let cell_border = (d2 - d1).clamp(0.0, 1.0);
-        let noise = Self::fbm_perlin_2d(x * 4.0, y * 4.0, 3, 2.0, 0.5);
-        let ridge = Self::ridged_fbm_2d(x * 6.0, y * 6.0, 3, 2.0, 0.5);
-        
-        let curl = if cell_border < 0.25 {
-            (1.0 - cell_border / 0.25).powf(1.8)
+        Self::hyperrealistic_peeling_paint(x, y, 0.48, 1.0, 0.65, 0.70, 0.85)
+    }
+
+    /// Physically authentic paint peeling: multi-octave domain-warped fractional Brownian fractures,
+    /// jagged mechanical tear boundaries, curled perimeter lips, and exposed substrate.
+    /// Does not use Voronoi cell boundaries.
+    pub fn hyperrealistic_peeling_paint(
+        x: f32,
+        y: f32,
+        peel_amount: f32,
+        flake_scale: f32,
+        edge_curl_lip: f32,
+        micro_fracture: f32,
+        substrate_exposure: f32,
+    ) -> f32 {
+        let sc = flake_scale.max(0.1);
+        let px = x * sc;
+        let py = y * sc;
+
+        // 1. Turbulent domain warping for irregular, non-cellular flaking patches
+        let warp_x = Self::fbm_2d(px * 0.8, py * 0.8, 3, 2.0, 0.5) - 0.5;
+        let warp_y = Self::fbm_2d(px * 0.8 + 4.3, py * 0.8 + 2.7, 3, 2.0, 0.5) - 0.5;
+        let wx = px + warp_x * 1.2;
+        let wy = py + warp_y * 1.2;
+
+        // 2. Multi-octave fracture tear network
+        let macro_fbm = Self::fbm_perlin_2d(wx * 1.5, wy * 1.5, 4, 2.0, 0.5);
+        let micro_fissures = Self::ridged_fbm_2d(wx * 5.0, wy * 5.0, 4, 2.2, 0.45);
+        let combined_fracture = macro_fbm * 0.70 + micro_fissures * 0.30;
+
+        // Threshold governed by peel_amount
+        let threshold = 1.0 - peel_amount.clamp(0.01, 0.99);
+        let dist = combined_fracture - threshold;
+
+        // 3. Exposed substrate in detachment zones
+        let detached = if dist > 0.0 {
+            (dist * 3.5).clamp(0.0, 1.0).powf(0.7)
         } else {
             0.0
         };
-        (curl * (0.6 + 0.4 * noise) + ridge * 0.15).clamp(0.0, 1.0)
+
+        // 4. Curled perimeter lip: elevated ridge right along the tear boundary
+        let lip_width = 0.09;
+        let lip = if dist.abs() < lip_width {
+            let t = 1.0 - (dist.abs() / lip_width);
+            t * t * (1.0 + 0.4 * micro_fissures)
+        } else {
+            0.0
+        };
+
+        // 5. High-frequency micro-splintering along tear perimeter
+        let micro_chatter = if dist > -0.05 {
+            let fine = Self::fbm_2d(px * 16.0, py * 16.0, 2, 2.0, 0.5);
+            fine * micro_fracture * 0.35
+        } else {
+            0.0
+        };
+
+        let result = detached * substrate_exposure + lip * edge_curl_lip + micro_chatter;
+        result.clamp(0.0, 1.0)
+    }
+
+    /// Physically authentic mechanical contact chipping and micro-fractures for edge wear
+    pub fn hyperrealistic_edge_fracture(x: f32, y: f32, scale: f32) -> f32 {
+        let sc = scale.max(0.1);
+        let wx = x * sc + Self::domain_warp_2d(x * sc * 0.4, y * sc * 0.4) * 0.25;
+        let wy = y * sc + Self::domain_warp_2d(x * sc * 0.4 + 3.7, y * sc * 0.4 + 5.1) * 0.25;
+
+        let contact_fbm = Self::fbm_perlin_2d(wx, wy, 4, 2.0, 0.5);
+        let micro_ridges = Self::ridged_fbm_2d(wx * 2.5, wy * 2.5, 4, 2.0, 0.5);
+        let fine_abrasion = Self::scratches_2d(wx * 1.8, wy * 1.8);
+
+        (contact_fbm * 0.45 + micro_ridges * 0.40 + fine_abrasion * 0.15).clamp(0.0, 1.0)
+    }
+
+    /// Physically authentic gravity fluid drips with lateral meandering and surface adhesion
+    pub fn hyperrealistic_gravity_drips(
+        x: f32,
+        y: f32,
+        scale: f32,
+        streak_len: f32,
+        meander: f32,
+    ) -> f32 {
+        let sc = scale.max(0.1);
+        let len = streak_len.max(0.1);
+
+        // Lateral meandering driven by surface capillary action
+        let wander = (Self::fbm_2d(x * sc * 0.5, y * sc * 0.15, 3, 2.0, 0.5) - 0.5) * meander * 0.25;
+        let wx = (x * sc + wander) * 6.0;
+        let wy = y * sc * (1.0 / len);
+
+        let cell_x = wx.floor();
+        let fx = wx - cell_x - 0.5;
+
+        let streak_h = Self::hash_2d(cell_x as i32, 239);
+        if streak_h > 0.35 {
+            let width = 0.14 * (streak_h - 0.35) * 1.8;
+            if fx.abs() < width {
+                let falloff = 1.0 - (fx.abs() / width);
+                let streak_noise = Self::fbm_2d(cell_x * 5.3, wy * 0.7, 3, 2.0, 0.5);
+                let bead_taper = (wy * 0.6 + streak_h * 5.0).fract();
+                let drip = falloff * (0.4 + 0.6 * bead_taper) * streak_noise;
+                return drip.clamp(0.0, 1.0);
+            }
+        }
+        0.0
+    }
+
+    /// Physically authentic ground mud splash: impact droplets with projectile velocity tails
+    pub fn hyperrealistic_mud_splash(
+        x: f32,
+        y: f32,
+        height_norm: f32,
+        splash_reach: f32,
+        turbidity: f32,
+    ) -> f32 {
+        let reach = splash_reach.max(0.05);
+        let base_gradient = (1.0 - (height_norm / reach)).clamp(0.0, 1.0).powf(1.6);
+
+        let splatter = Self::splatter_spots_2d(x * 3.5, y * 3.5);
+        let fine_droplets = Self::splatter_spots_2d(x * 8.0 + 1.7, y * 8.0 + 3.1);
+        let warp = Self::domain_warp_2d(x * 0.8, y * 0.8);
+
+        let impact = splatter * 0.60 + fine_droplets * 0.25 + warp * 0.15;
+        let combined = base_gradient * (1.0 + turbidity * impact * 2.0);
+        combined.clamp(0.0, 1.0)
     }
 
     /// Clustered pitted oxidation craters for heavy rust and corrosion
@@ -546,6 +661,21 @@ mod tests {
 
                 let moisture = NoiseGenerator::moisture_noise_2d(x, y);
                 assert!((0.0..=1.0).contains(&moisture));
+
+                let peel = NoiseGenerator::peeling_paint_2d(x, y);
+                assert!((0.0..=1.0).contains(&peel));
+
+                let hyper_peel = NoiseGenerator::hyperrealistic_peeling_paint(x, y, 0.5, 2.0, 0.7, 0.5, 0.8);
+                assert!((0.0..=1.0).contains(&hyper_peel));
+
+                let edge = NoiseGenerator::hyperrealistic_edge_fracture(x, y, 2.0);
+                assert!((0.0..=1.0).contains(&edge));
+
+                let drip = NoiseGenerator::hyperrealistic_gravity_drips(x, y, 2.0, 1.0, 0.5);
+                assert!((0.0..=1.0).contains(&drip));
+
+                let splash = NoiseGenerator::hyperrealistic_mud_splash(x, y, 0.2, 0.5, 0.8);
+                assert!((0.0..=1.0).contains(&splash));
             }
         }
     }

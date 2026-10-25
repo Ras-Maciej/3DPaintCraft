@@ -2,7 +2,7 @@
 // Pure safe Rust
 
 use crate::channel::{RgbaBuffer, ScalarBuffer};
-use crate::layer::{BlendMode, Layer, MaskEffect, MaskEffectType, ProceduralGenerator};
+use crate::layer::{BlendMode, Layer, MaskEffectType, ProceduralGenerator};
 use glam::Vec4;
 use serde::{Deserialize, Serialize};
 
@@ -92,8 +92,23 @@ impl SmartMaterialLibrary {
             },
             SmartMaskPreset {
                 id: "peeling_paint",
-                name: "Peeling & Flaking Paint",
-                description: "Organic cellular blisters with sharp jagged chipped paint perimeter lines",
+                name: "Peeling & Flaking Paint (Hyperrealistic)",
+                description: "Physically authentic mechanical peeling with curled perimeter lips, micro-fractures, and exposed substrate (no Voronoi cells)",
+            },
+            SmartMaskPreset {
+                id: "flood_fill_random_grayscale",
+                name: "Substance Flood Fill: Random Grayscale",
+                description: "Connected component segmentation assigning deterministic uniform random luminance per island or UV shell",
+            },
+            SmartMaskPreset {
+                id: "flood_fill_slanted_gradients",
+                name: "Substance Flood Fill: Slanted Gradients",
+                description: "Directional linear gradient bevels with randomized slant angle per island or panel",
+            },
+            SmartMaskPreset {
+                id: "flood_fill_centroid_domes",
+                name: "Substance Flood Fill: Centroid Domes",
+                description: "Radial dome falloffs from the geometrical centroid of each segmented island or UV shell",
             },
             SmartMaskPreset {
                 id: "rust_crater_pits",
@@ -228,37 +243,46 @@ impl SmartMaterialLibrary {
                 }
             }
             "peeling_paint" | "mask_peeling_paint" => {
-                let id1 = layer.add_mask_fill_effect_advanced(ProceduralGenerator::PeelingPaint, curvature_map, ao_map, position_map, world_normal_map);
-                if let Some(eff) = layer.mask_effects.iter_mut().find(|e| e.id == id1) {
-                    if let MaskEffectType::Fill { ref mut scale, ref mut contrast, ref mut balance, .. } = eff.effect_type {
-                        *scale = 12.0;
-                        *contrast = 1.8;
-                        *balance = 0.50;
-                    }
-                }
-                let id2 = layer.add_mask_fill_effect_advanced(ProceduralGenerator::RidgedMultifractal, curvature_map, ao_map, position_map, world_normal_map);
-                if let Some(eff) = layer.mask_effects.iter_mut().find(|e| e.id == id2) {
-                    eff.blend_mode = BlendMode::Screen;
-                    eff.opacity = 0.45;
-                    if let MaskEffectType::Fill { ref mut scale, .. } = eff.effect_type {
-                        *scale = 14.0;
-                    }
-                }
-                layer.next_mask_effect_id += 1;
-                layer.mask_effects.push(MaskEffect {
-                    id: layer.next_mask_effect_id,
-                    name: "Peeling Edge Levels".to_string(),
-                    effect_type: MaskEffectType::FilterLevels {
-                        in_black: 0.15,
-                        in_white: 0.75,
-                        gamma: 1.1,
-                        out_black: 0.0,
-                        out_white: 1.0,
-                    },
-                    visible: true,
-                    opacity: 1.0,
-                    blend_mode: BlendMode::Normal,
-                });
+                layer.add_mask_generator_peeling_paint(curvature_map, ao_map, position_map, world_normal_map);
+            }
+            "flood_fill_random_grayscale" | "mask_flood_fill_random" => {
+                layer.add_mask_flood_fill(
+                    crate::flood_fill::FloodFillMode::RandomGrayscale,
+                    0.5,
+                    0.0,
+                    false,
+                    false,
+                    curvature_map,
+                    ao_map,
+                    position_map,
+                    world_normal_map,
+                );
+            }
+            "flood_fill_slanted_gradients" | "mask_flood_fill_slanted" => {
+                layer.add_mask_flood_fill(
+                    crate::flood_fill::FloodFillMode::AngleGradient,
+                    0.5,
+                    45.0,
+                    true,
+                    false,
+                    curvature_map,
+                    ao_map,
+                    position_map,
+                    world_normal_map,
+                );
+            }
+            "flood_fill_centroid_domes" | "mask_flood_fill_domes" => {
+                layer.add_mask_flood_fill(
+                    crate::flood_fill::FloodFillMode::CentroidDistance,
+                    0.5,
+                    0.0,
+                    false,
+                    false,
+                    curvature_map,
+                    ao_map,
+                    position_map,
+                    world_normal_map,
+                );
             }
             "rust_crater_pits" | "mask_rust_pits" => {
                 let id1 = layer.add_mask_fill_effect_advanced(ProceduralGenerator::RustPits, curvature_map, ao_map, position_map, world_normal_map);

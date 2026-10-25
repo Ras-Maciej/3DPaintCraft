@@ -6,6 +6,7 @@ mod baker;
 mod brush;
 mod channel;
 mod export;
+pub mod flood_fill;
 pub mod packing;
 mod file_dialog;
 mod hdri;

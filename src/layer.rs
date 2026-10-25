@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 // Pure safe Rust
 
 use crate::channel::{ChannelFlags, ChannelType, RgbaBuffer, ScalarBuffer};
+use crate::flood_fill::{FloodFillEngine, FloodFillMode};
 use crate::utils::NoiseGenerator;
 use glam::{Vec3, Vec4};
 use serde::{Deserialize, Serialize};
@@ -383,6 +384,38 @@ pub enum MaskEffectType {
         global_balance: f32,
         global_contrast: f32,
         invert: bool,
+    },
+    GeneratorPeelingPaint {
+        peeling_amount: f32,
+        flake_scale: f32,
+        edge_curl_lip: f32,
+        micro_fracture: f32,
+        substrate_exposure: f32,
+        invert: bool,
+    },
+    GeneratorGravityLeaks {
+        drip_intensity: f32,
+        drip_scale: f32,
+        streak_length: f32,
+        meander_amount: f32,
+        ao_source_boost: f32,
+        gravity_dir: [f32; 3],
+    },
+    GeneratorGroundMud {
+        mud_height: f32,
+        height_falloff: f32,
+        splash_intensity: f32,
+        splash_scale: f32,
+        splash_reach: f32,
+    },
+    FloodFill {
+        mode: FloodFillMode,
+        threshold: f32,
+        invert_input: bool,
+        gradient_angle: f32,
+        random_angle: bool,
+        seed: u32,
+        use_uv_islands: bool,
     },
 }
 
@@ -1738,12 +1771,8 @@ impl Layer {
                     // Sample curvature map using normalized UV coordinates for resolution independence
                     let c = curv.sample_bilinear(glam::Vec2::new(u, v));
                     
-                    // High-frequency grunge noise
-                    let (n1, n2) = NoiseGenerator::voronoi_2d(u * 24.0, v * 24.0);
-                    let fbm = NoiseGenerator::fbm_2d(u * 16.0, v * 16.0, 4, 2.0, 0.5);
-                    
-                    // Organic wear pattern
-                    let noise = ((n2 - n1) * 0.5 + fbm * 0.5).clamp(0.0, 1.0);
+                    // High-frequency fracture chipping noise
+                    let noise = NoiseGenerator::hyperrealistic_edge_fracture(u, v, 24.0);
                     
                     // Curvature drives the wear, noise breaks it up
                     // c > 0.5 is convex (edges)
@@ -1773,12 +1802,11 @@ impl Layer {
                 let u = x as f32 / w as f32;
                 let v = y as f32 / h as f32;
                 
-                let (d1, d2) = NoiseGenerator::voronoi_2d(u * 8.0, v * 8.0);
-                let scratches = (d2 - d1).clamp(0.0, 1.0);
+                let scratches = NoiseGenerator::scratches_2d(u * 8.0, v * 8.0);
                 let fbm = NoiseGenerator::fbm_2d(u * 12.0, v * 12.0, 5, 2.0, 0.5);
                 
                 // Mix scratches with dirt patches
-                let mask = (scratches * 0.4 + fbm * 0.8).clamp(0.0, 1.0);
+                let mask = (scratches * 0.45 + fbm * 0.75).clamp(0.0, 1.0);
                 let contrast = mask * mask * (3.0 - 2.0 * mask); // smoothstep
                 
                 self.mask_buf.set_pixel(x, y, contrast);
@@ -1894,8 +1922,7 @@ impl Layer {
                     }
                     ProceduralGenerator::CurvatureWear => {
                         let noise = NoiseGenerator::fbm_perlin_2d(u * sc, v * sc, 4, 2.0, 0.5);
-                        let (w1, w2) = NoiseGenerator::voronoi_2d(u * sc * 2.5, v * sc * 2.5);
-                        let chip = (w2 - w1).clamp(0.0, 1.0);
+                        let chip = NoiseGenerator::hyperrealistic_edge_fracture(u * sc, v * sc, 2.5);
                         let ridge = NoiseGenerator::ridged_fbm_2d(u * sc * 3.5, v * sc * 3.5, 3, 2.0, 0.5);
 
                         let raw_edge = if let Some(cm) = curvature_map {
@@ -2107,11 +2134,7 @@ impl Layer {
                 let edge = ((expanded - 0.5) * edge_contrast + 0.5).clamp(0.0, 1.0);
 
                 // Flake & chipped perimeter noise
-                let (w1, w2) = NoiseGenerator::voronoi_2d(u * g_sc, v * g_sc);
-                let chip = (w2 - w1).clamp(0.0, 1.0);
-                let ridge = NoiseGenerator::ridged_fbm_2d(u * g_sc * 1.5, v * g_sc * 1.5, 3, 2.0, 0.5);
-                let perlin = NoiseGenerator::fbm_perlin_2d(u * g_sc * 0.5, v * g_sc * 0.5, 3, 2.0, 0.5);
-                let grunge = 0.45 * chip + 0.35 * ridge + 0.20 * perlin;
+                let grunge = NoiseGenerator::hyperrealistic_edge_fracture(u, v, g_sc);
 
                 // Modulate edge with grunge chipping
                 let mut wear_val = edge * (1.0 - grunge_amount * (1.0 - grunge));
@@ -2363,9 +2386,7 @@ impl Layer {
 
                 // 5. Grunge Noise Modulation
                 let grunge = if grunge_weight > 0.001 {
-                    let (w1, w2) = NoiseGenerator::voronoi_2d(u * g_sc, v * g_sc);
-                    let fbm = NoiseGenerator::fbm_perlin_2d(u * g_sc * 1.5, v * g_sc * 1.5, 3, 2.0, 0.5);
-                    0.5 * (w2 - w1).clamp(0.0, 1.0) + 0.5 * fbm
+                    NoiseGenerator::hyperrealistic_edge_fracture(u, v, g_sc)
                 } else {
                     1.0
                 };
@@ -2379,6 +2400,160 @@ impl Layer {
         });
 
         buf
+    }
+
+    /// High-performance Rayon parallelized Hyperrealistic Peeling & Flaking Paint Generator
+    pub fn generate_mask_peeling_paint(
+        peeling_amount: f32,
+        flake_scale: f32,
+        edge_curl_lip: f32,
+        micro_fracture: f32,
+        substrate_exposure: f32,
+        invert: bool,
+        width: u32,
+        height: u32,
+    ) -> ScalarBuffer {
+        let mut buf = ScalarBuffer::new(width, height, 0.0);
+        buf.data.par_chunks_mut(width as usize).enumerate().for_each(|(y, row)| {
+            let v = y as f32 / height as f32;
+            for (x, pixel) in row.iter_mut().enumerate() {
+                let u = x as f32 / width as f32;
+                let mut val = NoiseGenerator::hyperrealistic_peeling_paint(
+                    u,
+                    v,
+                    peeling_amount,
+                    flake_scale,
+                    edge_curl_lip,
+                    micro_fracture,
+                    substrate_exposure,
+                );
+                if invert {
+                    val = 1.0 - val;
+                }
+                *pixel = val;
+            }
+        });
+        buf
+    }
+
+    /// High-performance Rayon parallelized Gravity Dripping & Liquid Runoffs Generator
+    pub fn generate_mask_gravity_leaks(
+        drip_intensity: f32,
+        drip_scale: f32,
+        streak_length: f32,
+        meander_amount: f32,
+        ao_source_boost: f32,
+        gravity_dir: [f32; 3],
+        width: u32,
+        height: u32,
+        world_normal_map: Option<&RgbaBuffer>,
+        ao_map: Option<&ScalarBuffer>,
+    ) -> ScalarBuffer {
+        let mut buf = ScalarBuffer::new(width, height, 0.0);
+        let g_dir = glam::Vec3::new(gravity_dir[0], gravity_dir[1], gravity_dir[2]).normalize_or_zero();
+
+        buf.data.par_chunks_mut(width as usize).enumerate().for_each(|(y, row)| {
+            let v = y as f32 / height as f32;
+            for (x, pixel) in row.iter_mut().enumerate() {
+                let u = x as f32 / width as f32;
+                let uv = glam::Vec2::new(u, v);
+
+                let raw_drip = NoiseGenerator::hyperrealistic_gravity_drips(
+                    u,
+                    v,
+                    drip_scale,
+                    streak_length,
+                    meander_amount,
+                );
+
+                let slope_align = if let Some(wn) = world_normal_map {
+                    let col = wn.sample_bilinear(uv);
+                    let norm = glam::Vec3::new(col.x * 2.0 - 1.0, col.y * 2.0 - 1.0, col.z * 2.0 - 1.0).normalize_or_zero();
+                    let dot_g = norm.dot(g_dir).abs();
+                    (1.0 - dot_g).clamp(0.2, 1.0)
+                } else {
+                    1.0
+                };
+
+                let cavity_boost = if let Some(am) = ao_map {
+                    let ao = am.sample_bilinear(uv);
+                    1.0 + (1.0 - ao) * ao_source_boost * 1.5
+                } else {
+                    1.0
+                };
+
+                let val = (raw_drip * drip_intensity * 1.5 * slope_align * cavity_boost).clamp(0.0, 1.0);
+                *pixel = val;
+            }
+        });
+        buf
+    }
+
+    /// High-performance Rayon parallelized Ground Mud & Splatter Generator
+    pub fn generate_mask_ground_mud(
+        mud_height: f32,
+        _height_falloff: f32,
+        splash_intensity: f32,
+        splash_scale: f32,
+        splash_reach: f32,
+        width: u32,
+        height: u32,
+        position_map: Option<&RgbaBuffer>,
+    ) -> ScalarBuffer {
+        let mut buf = ScalarBuffer::new(width, height, 0.0);
+        let sc = splash_scale.max(0.5);
+        let reach = splash_reach.max(0.05);
+
+        buf.data.par_chunks_mut(width as usize).enumerate().for_each(|(y, row)| {
+            let v = y as f32 / height as f32;
+            for (x, pixel) in row.iter_mut().enumerate() {
+                let u = x as f32 / width as f32;
+                let uv = glam::Vec2::new(u, v);
+
+                let h_pos = if let Some(pm) = position_map {
+                    pm.sample_bilinear(uv).y.clamp(0.0, 1.0)
+                } else {
+                    1.0 - v
+                };
+
+                let val = NoiseGenerator::hyperrealistic_mud_splash(
+                    u * sc,
+                    v * sc,
+                    (h_pos - mud_height).max(0.0),
+                    reach,
+                    splash_intensity,
+                );
+                *pixel = val;
+            }
+        });
+        buf
+    }
+
+    /// High-performance Substance-style Flood Fill Evaluator
+    pub fn generate_mask_flood_fill(
+        input_mask: &ScalarBuffer,
+        mode: FloodFillMode,
+        threshold: f32,
+        invert_input: bool,
+        gradient_angle: f32,
+        random_angle: bool,
+        seed: u32,
+        use_uv_islands: bool,
+        mesh: Option<&crate::mesh::Mesh>,
+        width: u32,
+        height: u32,
+    ) -> ScalarBuffer {
+        let res = if use_uv_islands {
+            if let Some(m) = mesh {
+                FloodFillEngine::flood_fill_from_mesh_uvs(m, width, height, seed)
+            } else {
+                FloodFillEngine::flood_fill_from_mask(input_mask, threshold, invert_input, 2, seed)
+            }
+        } else {
+            FloodFillEngine::flood_fill_from_mask(input_mask, threshold, invert_input, 2, seed)
+        };
+
+        res.to_scalar_buffer(mode, gradient_angle, random_angle, 0.0)
     }
 
     /// Preserves existing hand-painted mask strokes by moving them into a base Paint effect
@@ -2444,6 +2619,28 @@ impl Layer {
         world_normal_map: Option<&RgbaBuffer>,
         id_map: Option<&RgbaBuffer>,
         anchor_refs: &[AnchorLayerRef<'_>],
+    ) {
+        self.evaluate_mask_full_with_mesh(
+            curvature_map,
+            ao_map,
+            position_map,
+            world_normal_map,
+            id_map,
+            anchor_refs,
+            None,
+        );
+    }
+
+    /// Full multi-map, ID map, mesh UV island, and cross-layer anchor point evaluation of mask stack
+    pub fn evaluate_mask_full_with_mesh(
+        &mut self,
+        curvature_map: Option<&ScalarBuffer>,
+        ao_map: Option<&ScalarBuffer>,
+        position_map: Option<&RgbaBuffer>,
+        world_normal_map: Option<&RgbaBuffer>,
+        id_map: Option<&RgbaBuffer>,
+        anchor_refs: &[AnchorLayerRef<'_>],
+        mesh: Option<&crate::mesh::Mesh>,
     ) {
         if !self.has_mask {
             return;
@@ -2775,6 +2972,123 @@ impl Layer {
                         }
                     }
                 }
+                MaskEffectType::GeneratorPeelingPaint {
+                    peeling_amount,
+                    flake_scale,
+                    edge_curl_lip,
+                    micro_fracture,
+                    substrate_exposure,
+                    invert,
+                } => {
+                    let gen_buf = Self::generate_mask_peeling_paint(
+                        *peeling_amount,
+                        *flake_scale,
+                        *edge_curl_lip,
+                        *micro_fracture,
+                        *substrate_exposure,
+                        *invert,
+                        w,
+                        h,
+                    );
+                    if first && effect.blend_mode == BlendMode::Normal {
+                        accum = gen_buf;
+                        first = false;
+                    } else {
+                        first = false;
+                        for i in 0..(w * h) as usize {
+                            accum.data[i] = effect.blend_mode.blend_scalar(accum.data[i], gen_buf.data[i], effect.opacity);
+                        }
+                    }
+                }
+                MaskEffectType::GeneratorGravityLeaks {
+                    drip_intensity,
+                    drip_scale,
+                    streak_length,
+                    meander_amount,
+                    ao_source_boost,
+                    gravity_dir,
+                } => {
+                    let gen_buf = Self::generate_mask_gravity_leaks(
+                        *drip_intensity,
+                        *drip_scale,
+                        *streak_length,
+                        *meander_amount,
+                        *ao_source_boost,
+                        *gravity_dir,
+                        w,
+                        h,
+                        world_normal_map,
+                        ao_map,
+                    );
+                    if first && effect.blend_mode == BlendMode::Normal {
+                        accum = gen_buf;
+                        first = false;
+                    } else {
+                        first = false;
+                        for i in 0..(w * h) as usize {
+                            accum.data[i] = effect.blend_mode.blend_scalar(accum.data[i], gen_buf.data[i], effect.opacity);
+                        }
+                    }
+                }
+                MaskEffectType::GeneratorGroundMud {
+                    mud_height,
+                    height_falloff,
+                    splash_intensity,
+                    splash_scale,
+                    splash_reach,
+                } => {
+                    let gen_buf = Self::generate_mask_ground_mud(
+                        *mud_height,
+                        *height_falloff,
+                        *splash_intensity,
+                        *splash_scale,
+                        *splash_reach,
+                        w,
+                        h,
+                        position_map,
+                    );
+                    if first && effect.blend_mode == BlendMode::Normal {
+                        accum = gen_buf;
+                        first = false;
+                    } else {
+                        first = false;
+                        for i in 0..(w * h) as usize {
+                            accum.data[i] = effect.blend_mode.blend_scalar(accum.data[i], gen_buf.data[i], effect.opacity);
+                        }
+                    }
+                }
+                MaskEffectType::FloodFill {
+                    mode,
+                    threshold,
+                    invert_input,
+                    gradient_angle,
+                    random_angle,
+                    seed,
+                    use_uv_islands,
+                } => {
+                    let gen_buf = Self::generate_mask_flood_fill(
+                        &accum,
+                        *mode,
+                        *threshold,
+                        *invert_input,
+                        *gradient_angle,
+                        *random_angle,
+                        *seed,
+                        *use_uv_islands,
+                        mesh,
+                        w,
+                        h,
+                    );
+                    if first && effect.blend_mode == BlendMode::Normal {
+                        accum = gen_buf;
+                        first = false;
+                    } else {
+                        first = false;
+                        for i in 0..(w * h) as usize {
+                            accum.data[i] = effect.blend_mode.blend_scalar(accum.data[i], gen_buf.data[i], effect.opacity);
+                        }
+                    }
+                }
             }
         }
 
@@ -2978,6 +3292,139 @@ impl Layer {
                 global_balance: 0.50,
                 global_contrast: 1.0,
                 invert: false,
+            },
+            visible: true,
+            opacity: 1.0,
+            blend_mode,
+        });
+        self.has_mask = true;
+        self.active_mask_effect_id = Some(id);
+        self.evaluate_mask_advanced(curvature_map, ao_map, position_map, world_normal_map);
+        id
+    }
+
+    pub fn add_mask_generator_peeling_paint(
+        &mut self,
+        curvature_map: Option<&ScalarBuffer>,
+        ao_map: Option<&ScalarBuffer>,
+        position_map: Option<&RgbaBuffer>,
+        world_normal_map: Option<&RgbaBuffer>,
+    ) -> u64 {
+        self.preserve_base_paint_if_needed();
+        self.next_mask_effect_id += 1;
+        let id = self.next_mask_effect_id;
+        let blend_mode = if self.mask_effects.is_empty() { BlendMode::Normal } else { BlendMode::Add };
+        self.mask_effects.push(MaskEffect {
+            id,
+            name: "Generator - Peeling Paint".to_string(),
+            effect_type: MaskEffectType::GeneratorPeelingPaint {
+                peeling_amount: 0.50,
+                flake_scale: 10.0,
+                edge_curl_lip: 0.70,
+                micro_fracture: 0.65,
+                substrate_exposure: 0.85,
+                invert: false,
+            },
+            visible: true,
+            opacity: 1.0,
+            blend_mode,
+        });
+        self.has_mask = true;
+        self.active_mask_effect_id = Some(id);
+        self.evaluate_mask_advanced(curvature_map, ao_map, position_map, world_normal_map);
+        id
+    }
+
+    pub fn add_mask_generator_gravity_leaks(
+        &mut self,
+        curvature_map: Option<&ScalarBuffer>,
+        ao_map: Option<&ScalarBuffer>,
+        position_map: Option<&RgbaBuffer>,
+        world_normal_map: Option<&RgbaBuffer>,
+    ) -> u64 {
+        self.preserve_base_paint_if_needed();
+        self.next_mask_effect_id += 1;
+        let id = self.next_mask_effect_id;
+        let blend_mode = if self.mask_effects.is_empty() { BlendMode::Normal } else { BlendMode::Add };
+        self.mask_effects.push(MaskEffect {
+            id,
+            name: "Generator - Gravity Leaks".to_string(),
+            effect_type: MaskEffectType::GeneratorGravityLeaks {
+                drip_intensity: 0.75,
+                drip_scale: 8.0,
+                streak_length: 1.2,
+                meander_amount: 0.40,
+                ao_source_boost: 0.80,
+                gravity_dir: [0.0, -1.0, 0.0],
+            },
+            visible: true,
+            opacity: 1.0,
+            blend_mode,
+        });
+        self.has_mask = true;
+        self.active_mask_effect_id = Some(id);
+        self.evaluate_mask_advanced(curvature_map, ao_map, position_map, world_normal_map);
+        id
+    }
+
+    pub fn add_mask_generator_ground_mud(
+        &mut self,
+        curvature_map: Option<&ScalarBuffer>,
+        ao_map: Option<&ScalarBuffer>,
+        position_map: Option<&RgbaBuffer>,
+        world_normal_map: Option<&RgbaBuffer>,
+    ) -> u64 {
+        self.preserve_base_paint_if_needed();
+        self.next_mask_effect_id += 1;
+        let id = self.next_mask_effect_id;
+        let blend_mode = if self.mask_effects.is_empty() { BlendMode::Normal } else { BlendMode::Add };
+        self.mask_effects.push(MaskEffect {
+            id,
+            name: "Generator - Ground Mud & Splash".to_string(),
+            effect_type: MaskEffectType::GeneratorGroundMud {
+                mud_height: 0.20,
+                height_falloff: 0.25,
+                splash_intensity: 0.80,
+                splash_scale: 6.0,
+                splash_reach: 0.35,
+            },
+            visible: true,
+            opacity: 1.0,
+            blend_mode,
+        });
+        self.has_mask = true;
+        self.active_mask_effect_id = Some(id);
+        self.evaluate_mask_advanced(curvature_map, ao_map, position_map, world_normal_map);
+        id
+    }
+
+    pub fn add_mask_flood_fill(
+        &mut self,
+        mode: FloodFillMode,
+        threshold: f32,
+        gradient_angle: f32,
+        random_angle: bool,
+        use_uv_islands: bool,
+        curvature_map: Option<&ScalarBuffer>,
+        ao_map: Option<&ScalarBuffer>,
+        position_map: Option<&RgbaBuffer>,
+        world_normal_map: Option<&RgbaBuffer>,
+    ) -> u64 {
+        self.preserve_base_paint_if_needed();
+        self.next_mask_effect_id += 1;
+        let id = self.next_mask_effect_id;
+        let blend_mode = if self.mask_effects.is_empty() { BlendMode::Normal } else { BlendMode::Multiply };
+        self.mask_effects.push(MaskEffect {
+            id,
+            name: format!("Flood Fill ({})", mode.name()),
+            effect_type: MaskEffectType::FloodFill {
+                mode,
+                threshold,
+                invert_input: false,
+                gradient_angle,
+                random_angle,
+                seed: 42,
+                use_uv_islands,
             },
             visible: true,
             opacity: 1.0,
@@ -3466,8 +3913,7 @@ impl Layer {
                             }
                             ProceduralGenerator::CurvatureWear => {
                                 let noise = NoiseGenerator::fbm_perlin_2d(ru * generator_scale, rv * generator_scale, 4, 2.0, 0.5);
-                                let (w1, w2) = NoiseGenerator::voronoi_2d(ru * generator_scale * 2.5, rv * generator_scale * 2.5);
-                                let chip = (w2 - w1).clamp(0.0, 1.0);
+                                let chip = NoiseGenerator::hyperrealistic_edge_fracture(ru * generator_scale, rv * generator_scale, 2.5);
                                 let ridge = NoiseGenerator::ridged_fbm_2d(ru * generator_scale * 3.5, rv * generator_scale * 3.5, 3, 2.0, 0.5);
 
                                 let raw_edge = if let Some(cm) = curvature_map {
@@ -5036,6 +5482,41 @@ mod tests {
         layer5.add_black_mask();
         layer5.add_mask_generator_mask_editor(Some(&curv_map), Some(&ao_map), Some(&pos_map), Some(&wn_map));
         assert!(layer5.mask_buf.data.iter().all(|&v| v >= 0.0 && v <= 1.0), "All mask editor values must be clamped within [0, 1]");
+
+        // 6. Hyperrealistic Peeling Paint Generator
+        let mut layer6 = Layer::new_fill_layer(6, "TestPeel".to_string(), w, h, Vec4::ONE, 0.5, 0.0);
+        layer6.add_black_mask();
+        layer6.add_mask_generator_peeling_paint(Some(&curv_map), Some(&ao_map), Some(&pos_map), Some(&wn_map));
+        assert!(layer6.mask_buf.data.iter().all(|&v| v >= 0.0 && v <= 1.0));
+        assert!(layer6.mask_buf.data.iter().any(|&v| v > 0.05), "Peeling paint should produce visible detachment patches");
+
+        // 7. Gravity Leaks Generator
+        let mut layer7 = Layer::new_fill_layer(7, "TestLeaks".to_string(), w, h, Vec4::ONE, 0.5, 0.0);
+        layer7.add_black_mask();
+        layer7.add_mask_generator_gravity_leaks(Some(&curv_map), Some(&ao_map), Some(&pos_map), Some(&wn_map));
+        assert!(layer7.mask_buf.data.iter().all(|&v| v >= 0.0 && v <= 1.0));
+
+        // 8. Ground Mud & Splash Generator
+        let mut layer8 = Layer::new_fill_layer(8, "TestMud".to_string(), w, h, Vec4::ONE, 0.5, 0.0);
+        layer8.add_black_mask();
+        layer8.add_mask_generator_ground_mud(Some(&curv_map), Some(&ao_map), Some(&pos_map), Some(&wn_map));
+        assert!(layer8.mask_buf.data.iter().all(|&v| v >= 0.0 && v <= 1.0));
+
+        // 9. Flood Fill Modifier
+        let mut layer9 = Layer::new_fill_layer(9, "TestFloodFill".to_string(), w, h, Vec4::ONE, 0.5, 0.0);
+        layer9.add_white_mask();
+        layer9.add_mask_flood_fill(
+            crate::flood_fill::FloodFillMode::RandomGrayscale,
+            0.5,
+            0.0,
+            false,
+            false,
+            Some(&curv_map),
+            Some(&ao_map),
+            Some(&pos_map),
+            Some(&wn_map),
+        );
+        assert!(layer9.mask_buf.data.iter().all(|&v| v >= 0.0 && v <= 1.0));
     }
 
     #[test]
