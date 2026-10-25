@@ -417,6 +417,31 @@ pub enum MaskEffectType {
         seed: u32,
         use_uv_islands: bool,
     },
+    GeneratorLight3D {
+        light_direction: [f32; 3],
+        angular_wrap: f32,
+        contrast: f32,
+        grunge_breakup: f32,
+        grunge_scale: f32,
+        invert: bool,
+    },
+    GeneratorPosition3D {
+        axis: u32,
+        offset: f32,
+        spread: f32,
+        contrast: f32,
+        grunge_breakup: f32,
+        grunge_scale: f32,
+        invert: bool,
+    },
+    GeneratorSubsurfaceThickness {
+        thickness_reach: f32,
+        contrast: f32,
+        rim_accent: f32,
+        grunge_breakup: f32,
+        grunge_scale: f32,
+        invert: bool,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -2572,6 +2597,154 @@ impl Layer {
         res.to_scalar_buffer(mode, gradient_angle, random_angle, 0.0)
     }
 
+    /// Virtual 3D Directional Light Mask Generator driven by baked world normal
+    pub fn generate_mask_light_3d(
+        light_direction: [f32; 3],
+        angular_wrap: f32,
+        contrast: f32,
+        grunge_breakup: f32,
+        grunge_scale: f32,
+        invert: bool,
+        width: u32,
+        height: u32,
+        world_normal_map: Option<&RgbaBuffer>,
+    ) -> ScalarBuffer {
+        let mut buf = ScalarBuffer::new(width, height, 0.0);
+        let l_dir = glam::Vec3::from(light_direction).normalize_or_zero();
+        let wrap = angular_wrap.clamp(0.0, 1.0);
+        let c_exp = contrast.clamp(0.1, 8.0);
+        let g_amt = grunge_breakup.clamp(0.0, 1.0);
+        let g_sc = grunge_scale.clamp(0.5, 64.0);
+
+        buf.data.par_chunks_mut(width as usize).enumerate().for_each(|(y, row)| {
+            let v = y as f32 / height as f32;
+            for (x, pixel) in row.iter_mut().enumerate() {
+                let u = x as f32 / width as f32;
+                let normal = if let Some(wn) = world_normal_map {
+                    let s = wn.get_pixel(x as u32, y as u32);
+                    glam::Vec3::new(s.x * 2.0 - 1.0, s.y * 2.0 - 1.0, s.z * 2.0 - 1.0).normalize_or_zero()
+                } else {
+                    glam::Vec3::Y
+                };
+
+                let n_dot_l = normal.dot(l_dir);
+                let wrapped = ((n_dot_l + wrap) / (1.0 + wrap)).clamp(0.0, 1.0);
+                let curved = wrapped.powf(c_exp);
+
+                let val = if g_amt > 0.001 {
+                    let noise = crate::utils::NoiseGenerator::grunge_map_2d(u * g_sc, v * g_sc);
+                    (curved * (1.0 - g_amt) + curved * noise * g_amt).clamp(0.0, 1.0)
+                } else {
+                    curved
+                };
+
+                *pixel = if invert { 1.0 - val } else { val };
+            }
+        });
+        buf
+    }
+
+    /// 3D Position Gradient / Radial Distance Mask Generator driven by baked position map
+    pub fn generate_mask_position_3d(
+        axis: u32,
+        offset: f32,
+        spread: f32,
+        contrast: f32,
+        grunge_breakup: f32,
+        grunge_scale: f32,
+        invert: bool,
+        width: u32,
+        height: u32,
+        position_map: Option<&RgbaBuffer>,
+    ) -> ScalarBuffer {
+        let mut buf = ScalarBuffer::new(width, height, 0.0);
+        let off = offset.clamp(-1.0, 2.0);
+        let sp = spread.clamp(0.01, 4.0);
+        let c_exp = contrast.clamp(0.1, 8.0);
+        let g_amt = grunge_breakup.clamp(0.0, 1.0);
+        let g_sc = grunge_scale.clamp(0.5, 64.0);
+
+        buf.data.par_chunks_mut(width as usize).enumerate().for_each(|(y, row)| {
+            let v = y as f32 / height as f32;
+            for (x, pixel) in row.iter_mut().enumerate() {
+                let u = x as f32 / width as f32;
+                let pos = if let Some(pm) = position_map {
+                    pm.get_pixel(x as u32, y as u32).truncate()
+                } else {
+                    glam::Vec3::new(u, v, 0.0)
+                };
+
+                let coord = match axis {
+                    0 => pos.x,
+                    1 => pos.y,
+                    2 => pos.z,
+                    _ => (pos - glam::Vec3::splat(0.5)).length() * 2.0,
+                };
+
+                let ramp = ((coord - off) / sp).clamp(0.0, 1.0);
+                let curved = ramp.powf(c_exp);
+
+                let val = if g_amt > 0.001 {
+                    let noise = crate::utils::NoiseGenerator::grunge_map_2d(u * g_sc, v * g_sc);
+                    (curved * (1.0 - g_amt) + curved * noise * g_amt).clamp(0.0, 1.0)
+                } else {
+                    curved
+                };
+
+                *pixel = if invert { 1.0 - val } else { val };
+            }
+        });
+        buf
+    }
+
+    /// Subsurface Thickness Mask Generator driven by baked thickness map
+    pub fn generate_mask_subsurface_thickness(
+        thickness_reach: f32,
+        contrast: f32,
+        rim_accent: f32,
+        grunge_breakup: f32,
+        grunge_scale: f32,
+        invert: bool,
+        width: u32,
+        height: u32,
+        thickness_map: Option<&ScalarBuffer>,
+        curvature_map: Option<&ScalarBuffer>,
+    ) -> ScalarBuffer {
+        let mut buf = ScalarBuffer::new(width, height, 0.0);
+        let reach = thickness_reach.clamp(0.01, 1.0);
+        let c_exp = contrast.clamp(0.1, 8.0);
+        let rim_amt = rim_accent.clamp(0.0, 1.0);
+        let g_amt = grunge_breakup.clamp(0.0, 1.0);
+        let g_sc = grunge_scale.clamp(0.5, 64.0);
+
+        buf.data.par_chunks_mut(width as usize).enumerate().for_each(|(y, row)| {
+            let v = y as f32 / height as f32;
+            for (x, pixel) in row.iter_mut().enumerate() {
+                let u = x as f32 / width as f32;
+                let th = thickness_map.map(|m| m.get_pixel(x as u32, y as u32)).unwrap_or(0.5);
+                let thin_factor = (1.0 - (th / reach)).clamp(0.0, 1.0);
+                let curved = thin_factor.powf(c_exp);
+
+                let rim_factor = if let Some(cm) = curvature_map {
+                    (cm.get_pixel(x as u32, y as u32) - 0.5).max(0.0) * 2.0
+                } else {
+                    0.0
+                };
+                let blended_rim = (curved + rim_factor * rim_amt).clamp(0.0, 1.0);
+
+                let val = if g_amt > 0.001 {
+                    let noise = crate::utils::NoiseGenerator::bnw_spots_1_2d(u * g_sc, v * g_sc);
+                    (blended_rim * (1.0 - g_amt) + blended_rim * noise * g_amt).clamp(0.0, 1.0)
+                } else {
+                    blended_rim
+                };
+
+                *pixel = if invert { 1.0 - val } else { val };
+            }
+        });
+        buf
+    }
+
     /// Preserves existing hand-painted mask strokes by moving them into a base Paint effect
     pub fn preserve_base_paint_if_needed(&mut self) {
         if self.mask_effects.is_empty() && self.has_mask {
@@ -3105,6 +3278,96 @@ impl Layer {
                         }
                     }
                 }
+                MaskEffectType::GeneratorLight3D {
+                    light_direction,
+                    angular_wrap,
+                    contrast,
+                    grunge_breakup,
+                    grunge_scale,
+                    invert,
+                } => {
+                    let gen_buf = Self::generate_mask_light_3d(
+                        *light_direction,
+                        *angular_wrap,
+                        *contrast,
+                        *grunge_breakup,
+                        *grunge_scale,
+                        *invert,
+                        w,
+                        h,
+                        world_normal_map,
+                    );
+                    if first && effect.blend_mode == BlendMode::Normal {
+                        accum = gen_buf;
+                        first = false;
+                    } else {
+                        first = false;
+                        for i in 0..(w * h) as usize {
+                            accum.data[i] = effect.blend_mode.blend_scalar(accum.data[i], gen_buf.data[i], effect.opacity);
+                        }
+                    }
+                }
+                MaskEffectType::GeneratorPosition3D {
+                    axis,
+                    offset,
+                    spread,
+                    contrast,
+                    grunge_breakup,
+                    grunge_scale,
+                    invert,
+                } => {
+                    let gen_buf = Self::generate_mask_position_3d(
+                        *axis,
+                        *offset,
+                        *spread,
+                        *contrast,
+                        *grunge_breakup,
+                        *grunge_scale,
+                        *invert,
+                        w,
+                        h,
+                        position_map,
+                    );
+                    if first && effect.blend_mode == BlendMode::Normal {
+                        accum = gen_buf;
+                        first = false;
+                    } else {
+                        first = false;
+                        for i in 0..(w * h) as usize {
+                            accum.data[i] = effect.blend_mode.blend_scalar(accum.data[i], gen_buf.data[i], effect.opacity);
+                        }
+                    }
+                }
+                MaskEffectType::GeneratorSubsurfaceThickness {
+                    thickness_reach,
+                    contrast,
+                    rim_accent,
+                    grunge_breakup,
+                    grunge_scale,
+                    invert,
+                } => {
+                    let gen_buf = Self::generate_mask_subsurface_thickness(
+                        *thickness_reach,
+                        *contrast,
+                        *rim_accent,
+                        *grunge_breakup,
+                        *grunge_scale,
+                        *invert,
+                        w,
+                        h,
+                        None,
+                        curvature_map,
+                    );
+                    if first && effect.blend_mode == BlendMode::Normal {
+                        accum = gen_buf;
+                        first = false;
+                    } else {
+                        first = false;
+                        for i in 0..(w * h) as usize {
+                            accum.data[i] = effect.blend_mode.blend_scalar(accum.data[i], gen_buf.data[i], effect.opacity);
+                        }
+                    }
+                }
             }
         }
 
@@ -3441,6 +3704,103 @@ impl Layer {
                 random_angle,
                 seed: 42,
                 use_uv_islands,
+            },
+            visible: true,
+            opacity: 1.0,
+            blend_mode,
+        });
+        self.has_mask = true;
+        self.active_mask_effect_id = Some(id);
+        self.evaluate_mask_advanced(curvature_map, ao_map, position_map, world_normal_map);
+        id
+    }
+
+    pub fn add_mask_generator_light_3d(
+        &mut self,
+        curvature_map: Option<&ScalarBuffer>,
+        ao_map: Option<&ScalarBuffer>,
+        position_map: Option<&RgbaBuffer>,
+        world_normal_map: Option<&RgbaBuffer>,
+    ) -> u64 {
+        self.preserve_base_paint_if_needed();
+        self.next_mask_effect_id += 1;
+        let id = self.next_mask_effect_id;
+        let blend_mode = if self.mask_effects.is_empty() { BlendMode::Normal } else { BlendMode::Add };
+        self.mask_effects.push(MaskEffect {
+            id,
+            name: "Generator - Directional Light 3D".to_string(),
+            effect_type: MaskEffectType::GeneratorLight3D {
+                light_direction: [0.577, 0.577, 0.577],
+                angular_wrap: 0.35,
+                contrast: 1.5,
+                grunge_breakup: 0.40,
+                grunge_scale: 12.0,
+                invert: false,
+            },
+            visible: true,
+            opacity: 1.0,
+            blend_mode,
+        });
+        self.has_mask = true;
+        self.active_mask_effect_id = Some(id);
+        self.evaluate_mask_advanced(curvature_map, ao_map, position_map, world_normal_map);
+        id
+    }
+
+    pub fn add_mask_generator_position_3d(
+        &mut self,
+        curvature_map: Option<&ScalarBuffer>,
+        ao_map: Option<&ScalarBuffer>,
+        position_map: Option<&RgbaBuffer>,
+        world_normal_map: Option<&RgbaBuffer>,
+    ) -> u64 {
+        self.preserve_base_paint_if_needed();
+        self.next_mask_effect_id += 1;
+        let id = self.next_mask_effect_id;
+        let blend_mode = if self.mask_effects.is_empty() { BlendMode::Normal } else { BlendMode::Add };
+        self.mask_effects.push(MaskEffect {
+            id,
+            name: "Generator - Position 3D Gradient".to_string(),
+            effect_type: MaskEffectType::GeneratorPosition3D {
+                axis: 1,
+                offset: 0.0,
+                spread: 1.0,
+                contrast: 1.2,
+                grunge_breakup: 0.35,
+                grunge_scale: 10.0,
+                invert: false,
+            },
+            visible: true,
+            opacity: 1.0,
+            blend_mode,
+        });
+        self.has_mask = true;
+        self.active_mask_effect_id = Some(id);
+        self.evaluate_mask_advanced(curvature_map, ao_map, position_map, world_normal_map);
+        id
+    }
+
+    pub fn add_mask_generator_subsurface_thickness(
+        &mut self,
+        curvature_map: Option<&ScalarBuffer>,
+        ao_map: Option<&ScalarBuffer>,
+        position_map: Option<&RgbaBuffer>,
+        world_normal_map: Option<&RgbaBuffer>,
+    ) -> u64 {
+        self.preserve_base_paint_if_needed();
+        self.next_mask_effect_id += 1;
+        let id = self.next_mask_effect_id;
+        let blend_mode = if self.mask_effects.is_empty() { BlendMode::Normal } else { BlendMode::Add };
+        self.mask_effects.push(MaskEffect {
+            id,
+            name: "Generator - Subsurface Thickness".to_string(),
+            effect_type: MaskEffectType::GeneratorSubsurfaceThickness {
+                thickness_reach: 0.50,
+                contrast: 1.8,
+                rim_accent: 0.60,
+                grunge_breakup: 0.30,
+                grunge_scale: 14.0,
+                invert: false,
             },
             visible: true,
             opacity: 1.0,

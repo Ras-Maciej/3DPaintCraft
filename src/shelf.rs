@@ -48,7 +48,51 @@ pub static SHELF_ASSETS: &[ShelfAsset] = &[
         // Built-in materials removed to allow pure user-defined materials
 
         // --- 2. SMART MATERIALS ---
-        // Built-in smart materials removed to allow pure user-defined smart materials
+        ShelfAsset {
+            id: "worn_military_steel",
+            name: "Worn Military Steel",
+            category: ShelfCategory::SmartMaterials,
+            preview_color: [55, 58, 62],
+            preview_metallic: 0.95,
+            preview_roughness: 0.35,
+            description: "Gunmetal military alloy with polished convex edge wear, micro scratches, and crevice grime",
+        },
+        ShelfAsset {
+            id: "weathered_bronze",
+            name: "Weathered Antique Bronze",
+            category: ShelfCategory::SmartMaterials,
+            preview_color: [165, 108, 56],
+            preview_metallic: 0.90,
+            preview_roughness: 0.40,
+            description: "Antique warm bronze cast with organic verdigris patina oxidation in cavities and burnished contact edges",
+        },
+        ShelfAsset {
+            id: "chipped_car_paint",
+            name: "Chipped Gloss Car Paint",
+            category: ShelfCategory::SmartMaterials,
+            preview_color: [200, 20, 20],
+            preview_metallic: 0.0,
+            preview_roughness: 0.10,
+            description: "Automotive high-gloss clearcoat lacquer over peeled primer with authentic flaking detachment",
+        },
+        ShelfAsset {
+            id: "tactical_fabric",
+            name: "Tactical Combat Fabric",
+            category: ShelfCategory::SmartMaterials,
+            preview_color: [72, 82, 56],
+            preview_metallic: 0.0,
+            preview_roughness: 0.85,
+            description: "Heavy-duty ballistic nylon weave with contact abrasion fraying and seam dust",
+        },
+        ShelfAsset {
+            id: "rusted_cast_iron",
+            name: "Rusted Cast Iron",
+            category: ShelfCategory::SmartMaterials,
+            preview_color: [115, 52, 28],
+            preview_metallic: 0.20,
+            preview_roughness: 0.88,
+            description: "Industrial cast iron pitting with heavy chemical oxidation bloom and vertical dripping rust runoffs",
+        },
 
         // --- 3. SMART MASKS ---
         ShelfAsset {
@@ -557,11 +601,13 @@ mod tests {
         assert!(!assets.is_empty(), "Shelf asset library should not be empty");
 
         let has_materials = assets.iter().any(|a| a.category == ShelfCategory::Materials);
+        let has_smart_materials = assets.iter().any(|a| a.category == ShelfCategory::SmartMaterials);
         let has_smart_masks = assets.iter().any(|a| a.category == ShelfCategory::SmartMasks);
         let has_generators = assets.iter().any(|a| a.category == ShelfCategory::Generators);
         let has_alphas = assets.iter().any(|a| a.category == ShelfCategory::Alphas);
 
         assert!(!has_materials, "Built-in static materials should be cleared for user-created materials");
+        assert!(has_smart_materials, "Should have smart material assets");
         assert!(has_smart_masks, "Should have smart mask assets");
         assert!(has_generators, "Should have procedural generator noise assets");
         assert!(has_alphas, "Should have brush alpha assets");

@@ -581,6 +581,16 @@ impl Baker {
         cage_config: &BakeCageConfig,
         ao_config: &AoBakeConfig,
     ) -> Result<Vec<f32>, String> {
+        Self::compute_vertex_ao_with_high_poly(mesh, None, cage_config, ao_config)
+    }
+
+    /// Calculate Ambient Occlusion per vertex using Monte Carlo hemisphere raycasting against optional high-poly mesh or self BVH
+    pub fn compute_vertex_ao_with_high_poly(
+        mesh: &Mesh,
+        high_poly: Option<&Mesh>,
+        cage_config: &BakeCageConfig,
+        ao_config: &AoBakeConfig,
+    ) -> Result<Vec<f32>, String> {
         let tri_count = mesh.indices.len() / 3;
         let vert_count = mesh.vertices.len();
         if tri_count == 0 || vert_count == 0 {
@@ -633,7 +643,12 @@ impl Baker {
                     origin,
                     direction: world_dir,
                 };
-                if let Some(hit) = mesh.raycast_dist(&ray, max_dist) {
+                let hit_opt = if let Some(hp) = high_poly {
+                    hp.raycast_dist(&ray, max_dist)
+                } else {
+                    mesh.raycast_dist(&ray, max_dist)
+                };
+                if let Some(hit) = hit_opt {
                     // Only count valid occlusions:
                     // 1. Must be a front-facing hit surface: hit.normal must oppose ray direction
                     // 2. Reject self-intersections on convex curved facets:
@@ -673,13 +688,25 @@ impl Baker {
         cage_config: &BakeCageConfig,
         ao_config: &AoBakeConfig,
     ) -> Result<ScalarBuffer, String> {
+        Self::bake_ao_with_options_and_high_poly(mesh, None, width, height, cage_config, ao_config)
+    }
+
+    /// Bake Ambient Occlusion map against optional high-poly mesh with customizable samples, distances, bias, spread and contrast
+    pub fn bake_ao_with_options_and_high_poly(
+        mesh: &Mesh,
+        high_poly: Option<&Mesh>,
+        width: u32,
+        height: u32,
+        cage_config: &BakeCageConfig,
+        ao_config: &AoBakeConfig,
+    ) -> Result<ScalarBuffer, String> {
         let mut buffer = ScalarBuffer::new(width, height, 1.0);
         let tri_count = mesh.indices.len() / 3;
         if tri_count == 0 || mesh.vertices.is_empty() {
             return Ok(buffer);
         }
 
-        let vert_ao = Self::compute_vertex_ao(mesh, cage_config, ao_config)?;
+        let vert_ao = Self::compute_vertex_ao_with_high_poly(mesh, high_poly, cage_config, ao_config)?;
 
         let mut written_mask = vec![false; (width * height) as usize];
         for t in 0..tri_count {
@@ -1182,6 +1209,16 @@ impl Baker {
         cage_config: &BakeCageConfig,
         config: &ThicknessBakeConfig,
     ) -> Result<Vec<f32>, String> {
+        Self::compute_vertex_thickness_with_high_poly(mesh, None, cage_config, config)
+    }
+
+    /// Calculate Surface Thickness per vertex using inward hemisphere raycasting against optional high-poly mesh or self BVH
+    pub fn compute_vertex_thickness_with_high_poly(
+        mesh: &Mesh,
+        high_poly: Option<&Mesh>,
+        cage_config: &BakeCageConfig,
+        config: &ThicknessBakeConfig,
+    ) -> Result<Vec<f32>, String> {
         let tri_count = mesh.indices.len() / 3;
         let vert_count = mesh.vertices.len();
         if tri_count == 0 || vert_count == 0 {
@@ -1241,7 +1278,13 @@ impl Baker {
                     direction: inward_dir,
                 };
 
-                if let Some(hit) = mesh.raycast_dist(&ray, max_dist) {
+                let hit_opt = if let Some(hp) = high_poly {
+                    hp.raycast_dist(&ray, max_dist)
+                } else {
+                    mesh.raycast_dist(&ray, max_dist)
+                };
+
+                if let Some(hit) = hit_opt {
                     if hit.t > min_self_dist && hit.t < max_dist {
                         accum_dist += hit.t;
                     } else if hit.t >= max_dist {
@@ -1276,6 +1319,18 @@ impl Baker {
         cage_config: &BakeCageConfig,
         config: &ThicknessBakeConfig,
     ) -> Result<ScalarBuffer, String> {
+        Self::bake_thickness_with_options_and_high_poly(mesh, None, width, height, cage_config, config)
+    }
+
+    /// Bake Surface Thickness map against optional high-poly mesh with customizable sample count, ray reach, bias, and invert option
+    pub fn bake_thickness_with_options_and_high_poly(
+        mesh: &Mesh,
+        high_poly: Option<&Mesh>,
+        width: u32,
+        height: u32,
+        cage_config: &BakeCageConfig,
+        config: &ThicknessBakeConfig,
+    ) -> Result<ScalarBuffer, String> {
         let default_val = if config.invert { 0.0 } else { 1.0 };
         let mut buffer = ScalarBuffer::new(width, height, default_val);
         let tri_count = mesh.indices.len() / 3;
@@ -1283,7 +1338,7 @@ impl Baker {
             return Ok(buffer);
         }
 
-        let vert_thickness = Self::compute_vertex_thickness(mesh, cage_config, config)?;
+        let vert_thickness = Self::compute_vertex_thickness_with_high_poly(mesh, high_poly, cage_config, config)?;
 
         let mut written_mask = vec![false; (width * height) as usize];
         for t in 0..tri_count {
@@ -2162,6 +2217,51 @@ mod tests {
 
         // The operation must complete in well under 3 seconds, proving no volumetric O(D^3) hang
         assert!(duration.as_secs_f32() < 3.0, "Large ray distance bake took {:?}, must complete rapidly!", duration);
+    }
+
+    #[test]
+    fn test_high_poly_to_low_poly_ao_and_thickness_baking() {
+        let low_cube = Mesh::create_cube_mesh("LowCube", 1.0);
+        let high_sphere = Mesh::create_sphere(0.6, 24, 16);
+
+        // Bake AO of low-poly cube raycasting against high-poly sphere
+        let ao_map = Baker::bake_ao_with_options_and_high_poly(
+            &low_cube,
+            Some(&high_sphere),
+            16,
+            16,
+            &BakeCageConfig::default(),
+            &AoBakeConfig {
+                samples: 8,
+                max_distance: 1.0,
+                ray_bias: 0.01,
+                spread: 1.0,
+                contrast: 1.0,
+            },
+        ).expect("High-poly AO bake must succeed");
+
+        assert_eq!(ao_map.width, 16);
+        assert_eq!(ao_map.height, 16);
+        assert!(ao_map.data.iter().all(|&v| (0.0..=1.0).contains(&v)));
+
+        // Bake Thickness of low-poly cube raycasting against high-poly sphere
+        let thick_map = Baker::bake_thickness_with_options_and_high_poly(
+            &low_cube,
+            Some(&high_sphere),
+            16,
+            16,
+            &BakeCageConfig::default(),
+            &ThicknessBakeConfig {
+                samples: 8,
+                max_distance: 1.0,
+                ray_bias: 0.01,
+                invert: false,
+            },
+        ).expect("High-poly thickness bake must succeed");
+
+        assert_eq!(thick_map.width, 16);
+        assert_eq!(thick_map.height, 16);
+        assert!(thick_map.data.iter().all(|&v| (0.0..=1.0).contains(&v)));
     }
 }
 

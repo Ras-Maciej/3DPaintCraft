@@ -240,6 +240,7 @@ pub struct PaintcraftApp {
     pub export_last_exported_files: Vec<PathBuf>,
     pub export_resolution_override: u32,
     pub export_padding_px: u32,
+    pub export_udim_naming: bool,
     pub project_file_path: String,
 
     pub show_about_modal: bool,
@@ -602,6 +603,7 @@ impl PaintcraftApp {
             export_last_exported_files: Vec::new(),
             export_resolution_override: 0,
             export_padding_px: 16,
+            export_udim_naming: false,
             project_file_path: {
                 let mut p = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
                 p.push("project.paintcraft");
@@ -2233,6 +2235,11 @@ impl PaintcraftApp {
                                         ui.checkbox(&mut self.export_flip_v, "Flip Y / V-Axis (DirectX / OBJ UV origin)")
                                             .on_hover_text("Inverts vertical texture coordinates to conform to DirectX and standard DCC UV orientations.");
                                         ui.end_row();
+
+                                        ui.label(egui::RichText::new("UDIM Tiles:").strong());
+                                        ui.checkbox(&mut self.export_udim_naming, "UDIM Tile Naming (<UDIM>)")
+                                            .on_hover_text("Append standard .<UDIM> tile numbering (e.g. .1001, .1002) before file extension for VFX/Film DCC pipelines");
+                                        ui.end_row();
                                     });
                             });
 
@@ -2286,10 +2293,11 @@ impl PaintcraftApp {
                                                 if !map.enabled {
                                                     continue;
                                                 }
+                                                let udim_suffix = if self.export_udim_naming { ".1001" } else { "" };
                                                 let file_name = if self.project.texture_sets.len() > 1 {
-                                                    format!("{}_{}{}.{}", mesh_clean, ts_clean, map.name_suffix, ext)
+                                                    format!("{}_{}{}{}.{}", mesh_clean, ts_clean, map.name_suffix, udim_suffix, ext)
                                                 } else {
-                                                    format!("{}{}.{}", mesh_clean, map.name_suffix, ext)
+                                                    format!("{}{}{}.{}", mesh_clean, map.name_suffix, udim_suffix, ext)
                                                 };
 
                                                 ui.horizontal(|ui| {
@@ -2349,17 +2357,11 @@ impl PaintcraftApp {
                                         let _ = std::fs::create_dir_all(&out_path);
                                         let mut all_exported = Vec::new();
 
-                                        let mut active_preset = self
-                                            .custom_packing_presets
-                                            .get(self.active_custom_packing_idx)
-                                            .cloned()
-                                            .unwrap_or_else(crate::packing::CustomPackingPreset::unreal_orm);
-
-                                        // Apply global padding and format override if configured
-                                        for m in &mut active_preset.maps {
-                                            m.dilation_iterations = self.export_padding_px;
-                                            m.format = self.export_image_format;
-                                        }
+                                        let udim_tiles = if self.export_udim_naming {
+                                            self.project.mesh.get_udim_tiles()
+                                        } else {
+                                            vec![1001]
+                                        };
 
                                         // Step 0: Fully rebuild composite for active canvas and synchronize active texture set
                                         self.project.rebuild_composite();
@@ -2386,50 +2388,67 @@ impl PaintcraftApp {
                                         let baked = self.project.baked_map_context();
                                         let mesh_name = self.project.mesh.name.clone();
 
-                                        if !self.project.texture_sets.is_empty() {
-                                            for (ts_idx, ts) in self.project.texture_sets.iter().enumerate() {
-                                                if ts.visible {
-                                                    let prefix = if ts_count > 1 {
-                                                        format!("{}_{}", mesh_name, ts.name)
-                                                    } else {
-                                                        mesh_name.clone()
-                                                    };
+                                        for (tile_idx, &tile_id) in udim_tiles.iter().enumerate() {
+                                            let mut active_preset = self
+                                                .custom_packing_presets
+                                                .get(self.active_custom_packing_idx)
+                                                .cloned()
+                                                .unwrap_or_else(crate::packing::CustomPackingPreset::unreal_orm);
 
-                                                    let textures_to_export = if ts_idx == self.project.active_texture_set_idx {
-                                                        &self.project.composite_textures
-                                                    } else {
-                                                        &ts.composite_textures
-                                                    };
+                                            // Apply global padding, format override, and UDIM tile suffix if configured
+                                            for m in &mut active_preset.maps {
+                                                m.dilation_iterations = self.export_padding_px;
+                                                m.format = self.export_image_format;
+                                                if self.export_udim_naming {
+                                                    m.name_suffix = format!("{}.{}", m.name_suffix, tile_id);
+                                                }
+                                            }
 
-                                                    match crate::packing::CustomTexturePacker::pack_and_export(
-                                                        &active_preset,
-                                                        textures_to_export,
-                                                        &prefix,
-                                                        &out_path,
-                                                        self.export_flip_v,
-                                                        if self.export_mesh && ts_idx == 0 { Some(&self.project.mesh) } else { None },
-                                                        &baked,
-                                                    ) {
-                                                        Ok(mut files) => all_exported.append(&mut files),
-                                                        Err(e) => {
-                                                            status_update = Some(format!("Export error on {}: {}", ts.name, e));
+                                            if !self.project.texture_sets.is_empty() {
+                                                for (ts_idx, ts) in self.project.texture_sets.iter().enumerate() {
+                                                    if ts.visible {
+                                                        let prefix = if ts_count > 1 {
+                                                            format!("{}_{}", mesh_name, ts.name)
+                                                        } else {
+                                                            mesh_name.clone()
+                                                        };
+
+                                                        let textures_to_export = if ts_idx == self.project.active_texture_set_idx {
+                                                            &self.project.composite_textures
+                                                        } else {
+                                                            &ts.composite_textures
+                                                        };
+
+                                                        match crate::packing::CustomTexturePacker::pack_and_export(
+                                                            &active_preset,
+                                                            textures_to_export,
+                                                            &prefix,
+                                                            &out_path,
+                                                            self.export_flip_v,
+                                                            if self.export_mesh && ts_idx == 0 && tile_idx == 0 { Some(&self.project.mesh) } else { None },
+                                                            &baked,
+                                                        ) {
+                                                            Ok(mut files) => all_exported.append(&mut files),
+                                                            Err(e) => {
+                                                                status_update = Some(format!("Export error on {}: {}", ts.name, e));
+                                                            }
                                                         }
                                                     }
                                                 }
-                                            }
-                                        } else {
-                                            match crate::packing::CustomTexturePacker::pack_and_export(
-                                                &active_preset,
-                                                &self.project.composite_textures,
-                                                &mesh_name,
-                                                &out_path,
-                                                self.export_flip_v,
-                                                if self.export_mesh { Some(&self.project.mesh) } else { None },
-                                                &baked,
-                                            ) {
-                                                Ok(mut files) => all_exported.append(&mut files),
-                                                Err(e) => {
-                                                    status_update = Some(format!("Export error: {}", e));
+                                            } else {
+                                                match crate::packing::CustomTexturePacker::pack_and_export(
+                                                    &active_preset,
+                                                    &self.project.composite_textures,
+                                                    &mesh_name,
+                                                    &out_path,
+                                                    self.export_flip_v,
+                                                    if self.export_mesh && tile_idx == 0 { Some(&self.project.mesh) } else { None },
+                                                    &baked,
+                                                ) {
+                                                    Ok(mut files) => all_exported.append(&mut files),
+                                                    Err(e) => {
+                                                        status_update = Some(format!("Export error: {}", e));
+                                                    }
                                                 }
                                             }
                                         }
@@ -3427,7 +3446,21 @@ impl eframe::App for PaintcraftApp {
                 }
                 if input.key_pressed(egui::Key::Num3) {
                     self.brush_engine.settings.mode = ToolMode::Projection;
-                    self.status_message = "Tool: Projection Painting [3]".to_string();
+                    self.brush_engine.settings.stencil.enabled = true;
+                    if self.brush_engine.stencil_buffer.is_none() {
+                        let mut buf = crate::channel::RgbaBuffer::new(512, 512, glam::Vec4::new(1.0, 1.0, 1.0, 1.0));
+                        for y in 0..512 {
+                            for x in 0..512 {
+                                let u = x as f32 / 512.0;
+                                let v = y as f32 / 512.0;
+                                let val = crate::utils::NoiseGenerator::grunge_map_2d(u * 6.0, v * 6.0);
+                                buf.set_pixel(x, y, glam::Vec4::new(val, val, val, 1.0));
+                            }
+                        }
+                        self.brush_engine.stencil_buffer = Some(buf);
+                        self.stencil_overlay_texture = None;
+                    }
+                    self.status_message = "Tool: Projection Painting [3] (Hold S: LMB=Rotate, RMB=Scale, MMB=Pan, S+Z=Reset)".to_string();
                 }
                 if input.key_pressed(egui::Key::Num4) || input.key_pressed(egui::Key::G) {
                     self.brush_engine.settings.mode = ToolMode::FillBucket;
@@ -3910,6 +3943,11 @@ impl eframe::App for PaintcraftApp {
                                     ui.add(egui::Slider::new(&mut self.brush_engine.settings.stencil.angle, -3.1415..=3.1415).text("Angle"));
                                     ui.add(egui::Slider::new(&mut self.brush_engine.settings.stencil.opacity, 0.05..=1.0).text("Opacity"));
                                     ui.checkbox(&mut self.brush_engine.settings.stencil.mask_only, "Mask Only");
+                                    if ui.small_button("Reset (S+Z)").on_hover_text("Reset stencil position, scale, and rotation to default").clicked() {
+                                        self.brush_engine.settings.stencil.pos = glam::Vec2::ZERO;
+                                        self.brush_engine.settings.stencil.scale = 1.0;
+                                        self.brush_engine.settings.stencil.angle = 0.0;
+                                    }
 
                                     ui.horizontal(|ui| {
                                         if ui.button("Pick from Shelf...").on_hover_text("Pick stencil texture from Project Shelf").clicked() {
@@ -3920,6 +3958,7 @@ impl eframe::App for PaintcraftApp {
                                                 if let Ok(id) = self.project.import_texture_resource(&path, crate::project::ProjectResourceType::Texture) {
                                                     if let Some(res) = self.project.get_resource(&id).cloned() {
                                                         self.assign_resource_to_target(&res, ShelfPickerTarget::Stencil);
+                                                        self.stencil_overlay_texture = None;
                                                     }
                                                 }
                                             }
@@ -3940,6 +3979,7 @@ impl eframe::App for PaintcraftApp {
                                                     }
                                                 }
                                                 self.brush_engine.stencil_buffer = Some(buf);
+                                                self.stencil_overlay_texture = None;
                                                 self.status_message = "Loaded Grunge Stencil preset".to_string();
                                             }
                                             if ui.selectable_label(false, "Scratches").clicked() {
@@ -3953,6 +3993,7 @@ impl eframe::App for PaintcraftApp {
                                                     }
                                                 }
                                                 self.brush_engine.stencil_buffer = Some(buf);
+                                                self.stencil_overlay_texture = None;
                                                 self.status_message = "Loaded Scratches Stencil preset".to_string();
                                             }
                                             if ui.selectable_label(false, "Spots & Splatter").clicked() {
@@ -3966,6 +4007,7 @@ impl eframe::App for PaintcraftApp {
                                                     }
                                                 }
                                                 self.brush_engine.stencil_buffer = Some(buf);
+                                                self.stencil_overlay_texture = None;
                                                 self.status_message = "Loaded Spots & Splatter Stencil preset".to_string();
                                             }
                                             if ui.selectable_label(false, "Checkerboard").clicked() {
@@ -3979,6 +4021,7 @@ impl eframe::App for PaintcraftApp {
                                                     }
                                                 }
                                                 self.brush_engine.stencil_buffer = Some(buf);
+                                                self.stencil_overlay_texture = None;
                                                 self.status_message = "Loaded Checkerboard Stencil preset".to_string();
                                             }
                                         });
@@ -6222,21 +6265,51 @@ impl PaintcraftApp {
             self.camera.zoom(zoom_delta);
         }
         // 5. Alt + MMB or MMB: Substance Camera Pan
-        else if response.dragged_by(eframe::egui::PointerButton::Middle) {
+        else if response.dragged_by(eframe::egui::PointerButton::Middle) && !input.key_down(egui::Key::S) {
             let delta = input.pointer.delta();
             self.camera.pan(delta.x * self.camera_pan_speed, delta.y * self.camera_pan_speed);
         }
-        // 6. Alt + LMB (or RMB without modifiers): Substance Camera Orbit (or Left-drag when Bake modal is open)
-        else if (response.dragged_by(eframe::egui::PointerButton::Primary) && input.modifiers.alt)
+        // 6. Stencil Interactive Transform: Hold S (LMB = Rotate, RMB = Scale, MMB = Pan, Z = Reset)
+        else if (self.brush_engine.settings.mode == ToolMode::Projection || self.brush_engine.settings.stencil.enabled)
+            && input.key_down(egui::Key::S)
+        {
+            if input.key_pressed(egui::Key::Z) {
+                self.brush_engine.settings.stencil.pos = glam::Vec2::ZERO;
+                self.brush_engine.settings.stencil.scale = 1.0;
+                self.brush_engine.settings.stencil.angle = 0.0;
+                self.status_message = "Stencil transform reset to default".to_string();
+                ctx.request_repaint();
+            } else if response.dragged_by(eframe::egui::PointerButton::Primary) {
+                let delta = input.pointer.delta();
+                self.brush_engine.settings.stencil.angle += delta.x * 0.015;
+                self.status_message = format!("Stencil Rotation: {:.1} deg", self.brush_engine.settings.stencil.angle.to_degrees());
+                ctx.request_repaint();
+            } else if response.dragged_by(eframe::egui::PointerButton::Secondary) {
+                let delta = input.pointer.delta();
+                let factor = 1.0 + (delta.x - delta.y) * 0.01;
+                self.brush_engine.settings.stencil.scale = (self.brush_engine.settings.stencil.scale * factor).clamp(0.05, 10.0);
+                self.status_message = format!("Stencil Scale: {:.2}x", self.brush_engine.settings.stencil.scale);
+                ctx.request_repaint();
+            } else if response.dragged_by(eframe::egui::PointerButton::Middle) {
+                let delta = input.pointer.delta();
+                self.brush_engine.settings.stencil.pos.x += delta.x / rect.width();
+                self.brush_engine.settings.stencil.pos.y += delta.y / rect.height();
+                self.status_message = format!("Stencil Position: ({:.2}, {:.2})", self.brush_engine.settings.stencil.pos.x, self.brush_engine.settings.stencil.pos.y);
+                ctx.request_repaint();
+            }
+        }
+        // 7. Alt + LMB (or RMB without modifiers): Substance Camera Orbit (or Left-drag when Bake modal is open)
+        else if ((response.dragged_by(eframe::egui::PointerButton::Primary) && input.modifiers.alt)
             || (response.dragged_by(eframe::egui::PointerButton::Secondary) && !input.modifiers.command && !input.modifiers.shift && !input.modifiers.alt)
-            || (self.show_bake_modal && response.dragged_by(eframe::egui::PointerButton::Primary))
+            || (self.show_bake_modal && response.dragged_by(eframe::egui::PointerButton::Primary)))
+            && !input.key_down(egui::Key::S)
         {
             let delta = input.pointer.delta();
             self.camera.orbit(delta.x * self.camera_orbit_speed, delta.y * self.camera_orbit_speed);
         }
-        // 7. Left-drag WITHOUT Alt and WITHOUT Ctrl: 3D PROJECTION PAINTING! (Disabled when Bake modal is open)
+        // 8. Left-drag WITHOUT Alt and WITHOUT Ctrl: 3D PROJECTION PAINTING! (Disabled when Bake modal is open)
         else if (response.dragged_by(egui::PointerButton::Primary) || response.clicked())
-            && !input.modifiers.alt && !input.modifiers.command && !self.show_bake_modal
+            && !input.modifiers.alt && !input.modifiers.command && !self.show_bake_modal && !input.key_down(egui::Key::S)
         {
                 if !self.is_stroke_active {
                     self.flush_pending_gpu_readbacks(ctx);
@@ -6720,6 +6793,27 @@ impl PaintcraftApp {
 
         // --- STENCIL PROJECTION OVERLAY ---
         if self.brush_engine.settings.stencil.enabled {
+            if self.stencil_overlay_texture.is_none() {
+                if let Some(ref buf) = self.brush_engine.stencil_buffer {
+                    let mut pixels = Vec::with_capacity((buf.width * buf.height) as usize);
+                    for y in 0..buf.height {
+                        for x in 0..buf.width {
+                            let p = buf.get_pixel(x, y);
+                            let r = (p.x.clamp(0.0, 1.0) * 255.0) as u8;
+                            let g = (p.y.clamp(0.0, 1.0) * 255.0) as u8;
+                            let b = (p.z.clamp(0.0, 1.0) * 255.0) as u8;
+                            let a = (p.w.clamp(0.0, 1.0) * 255.0) as u8;
+                            pixels.push(egui::Color32::from_rgba_unmultiplied(r, g, b, a));
+                        }
+                    }
+                    let img = egui::ColorImage {
+                        size: [buf.width as usize, buf.height as usize],
+                        pixels,
+                    };
+                    self.stencil_overlay_texture = Some(ctx.load_texture("stencil_preview_tex", img, egui::TextureOptions::LINEAR));
+                }
+            }
+
             let st = &self.brush_engine.settings.stencil;
             let center = rect.center() + egui::vec2(st.pos.x * rect.width(), st.pos.y * rect.height());
             let half_w = (rect.width() * 0.4 * st.scale) * 0.5;
@@ -6739,19 +6833,59 @@ impl PaintcraftApp {
                     center + egui::vec2(rx, ry)
                 })
                 .collect();
-            let stencil_alpha = (st.opacity * 220.0) as u8;
-            ui.painter().add(egui::Shape::convex_polygon(
+            let stencil_alpha = (st.opacity * 255.0).clamp(10.0, 255.0) as u8;
+
+            // 1. Draw textured stencil image
+            if let Some(ref tex) = self.stencil_overlay_texture {
+                let mut mesh = egui::Mesh::with_texture(tex.id());
+                let tint = egui::Color32::from_white_alpha(stencil_alpha);
+                mesh.vertices.push(egui::epaint::Vertex { pos: rotated_corners[0], uv: egui::pos2(0.0, 0.0), color: tint });
+                mesh.vertices.push(egui::epaint::Vertex { pos: rotated_corners[1], uv: egui::pos2(1.0, 0.0), color: tint });
+                mesh.vertices.push(egui::epaint::Vertex { pos: rotated_corners[2], uv: egui::pos2(1.0, 1.0), color: tint });
+                mesh.vertices.push(egui::epaint::Vertex { pos: rotated_corners[3], uv: egui::pos2(0.0, 1.0), color: tint });
+                mesh.add_triangle(0, 1, 2);
+                mesh.add_triangle(0, 2, 3);
+                ui.painter().add(egui::Shape::mesh(mesh));
+            } else {
+                ui.painter().add(egui::Shape::convex_polygon(
+                    rotated_corners.clone(),
+                    egui::Color32::from_rgba_unmultiplied(243, 94, 24, (stencil_alpha / 6).max(12)),
+                    egui::Stroke::NONE,
+                ));
+            }
+
+            // 2. Draw border and corner grips
+            let border_col = if input.key_down(egui::Key::S) {
+                egui::Color32::from_rgb(255, 180, 50)
+            } else {
+                egui::Color32::from_rgba_unmultiplied(243, 94, 24, stencil_alpha.max(90))
+            };
+            ui.painter().add(egui::Shape::closed_line(
                 rotated_corners.clone(),
-                egui::Color32::from_rgba_unmultiplied(243, 94, 24, (stencil_alpha / 6).max(12)),
-                egui::Stroke::new(1.8_f32, egui::Color32::from_rgba_unmultiplied(243, 94, 24, stencil_alpha.max(70))),
+                egui::Stroke::new(if input.key_down(egui::Key::S) { 2.4_f32 } else { 1.6_f32 }, border_col),
             ));
-            ui.painter().text(
-                rotated_corners[0] + egui::vec2(6.0, 6.0),
-                egui::Align2::LEFT_TOP,
-                format!("Stencil ({:.0}% opac)", st.opacity * 100.0),
-                egui::FontId::proportional(11.0),
-                egui::Color32::from_rgba_unmultiplied(243, 94, 24, stencil_alpha.max(120)),
-            );
+            for &pt in &rotated_corners {
+                ui.painter().circle_filled(pt, 4.0, border_col);
+            }
+
+            // 3. Stencil HUD label or interactive shortcut guide
+            if input.key_down(egui::Key::S) {
+                ui.painter().text(
+                    center,
+                    egui::Align2::CENTER_CENTER,
+                    "[Hold S: LMB=Rotate | RMB=Scale | MMB=Pan | Z=Reset]",
+                    egui::FontId::proportional(13.0),
+                    egui::Color32::from_rgb(255, 230, 100),
+                );
+            } else {
+                ui.painter().text(
+                    rotated_corners[0] + egui::vec2(6.0, 6.0),
+                    egui::Align2::LEFT_TOP,
+                    format!("Stencil ({:.0}% opac, {:.0} deg) - Hold S to transform", st.opacity * 100.0, st.angle.to_degrees()),
+                    egui::FontId::proportional(11.0),
+                    egui::Color32::from_rgba_unmultiplied(243, 94, 24, stencil_alpha.max(140)),
+                );
+            }
         }
 
         // --- 3D POLYGON FILL HOVER PREVIEW HIGHLIGHT ---
@@ -7083,16 +7217,41 @@ impl PaintcraftApp {
                 egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
                 Color32::WHITE,
             );
-            ui.painter().rect_stroke(canvas_rect, 0.0, egui::Stroke::new(1.0_f32, Color32::from_rgb(70, 75, 88)));
+
+            // UDIM Multi-Tile Grid & Label Badges
+            let udim_tiles = self.project.mesh.get_udim_tiles();
+            let cw = canvas_rect.width();
+            let ch = canvas_rect.height();
+            let cmin = canvas_rect.min;
+
+            for &tile_id in &udim_tiles {
+                let u_idx = (tile_id - 1001) % 10;
+                let v_idx = (tile_id - 1001) / 10;
+                let tile_min = cmin + egui::vec2(u_idx as f32 * cw, v_idx as f32 * ch);
+                let tile_rect = egui::Rect::from_min_size(tile_min, egui::vec2(cw, ch));
+
+                let border_col = if tile_id == 1001 {
+                    Color32::from_rgb(70, 75, 88)
+                } else {
+                    Color32::from_rgb(55, 60, 72)
+                };
+                ui.painter().rect_stroke(tile_rect, 0.0, egui::Stroke::new(1.0_f32, border_col));
+
+                let badge_rect = egui::Rect::from_min_size(tile_min + egui::vec2(6.0, 6.0), egui::vec2(78.0, 18.0));
+                ui.painter().rect_filled(badge_rect, egui::Rounding::same(3.0), Color32::from_rgba_unmultiplied(20, 22, 26, 200));
+                ui.painter().text(
+                    badge_rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    format!("UDIM {}", tile_id),
+                    egui::FontId::monospace(11.0),
+                    if tile_id == 1001 { Color32::from_rgb(240, 140, 40) } else { Color32::from_rgb(160, 175, 195) },
+                );
+            }
 
             // UV Wireframe Overlay
             if self.show_uv_wireframe {
                 let wire_stroke = egui::Stroke::new(0.8_f32, egui::Color32::from_rgba_unmultiplied(220, 225, 235, 75));
-                let cw = canvas_rect.width();
-                let ch = canvas_rect.height();
-                let cmin = canvas_rect.min;
-
-                let clip = rect.intersect(canvas_rect);
+                let clip = rect;
                 let painter = ui.painter().with_clip_rect(clip);
 
                 let verts = &self.project.mesh.vertices;
@@ -9124,7 +9283,7 @@ impl PaintcraftApp {
                     st.step_name = format!("[{}/{}] Baking Ambient Occlusion (Raycasting)...", completed_tasks + 1, total_tasks);
                     st.progress = (completed_tasks as f32) / (total_tasks as f32).max(1.0);
                 }
-                let mut ao = crate::baker::Baker::bake_ao_with_options(&mesh, res, res, &cage_config, &ao_config)
+                let mut ao = crate::baker::Baker::bake_ao_with_options_and_high_poly(&mesh, high_poly.as_ref(), res, res, &cage_config, &ao_config)
                     .unwrap_or_else(|_| crate::baker::Baker::bake_ao(&mesh, res, res));
                 if denoise {
                     {
@@ -9174,7 +9333,7 @@ impl PaintcraftApp {
                     st.step_name = format!("[{}/{}] Baking Thickness Map...", completed_tasks + 1, total_tasks);
                     st.progress = (completed_tasks as f32) / (total_tasks as f32).max(1.0);
                 }
-                let mut th = crate::baker::Baker::bake_thickness_with_options(&mesh, res, res, &cage_config, &thickness_config)
+                let mut th = crate::baker::Baker::bake_thickness_with_options_and_high_poly(&mesh, high_poly.as_ref(), res, res, &cage_config, &thickness_config)
                     .unwrap_or_else(|_| crate::baker::Baker::bake_thickness(&mesh, res, res));
                 if denoise {
                     crate::baker::Baker::denoise_scalar_buffer(&mut th, result.world_space_normal.as_ref(), 1, 2, 1.2, 24.0);
@@ -11439,6 +11598,18 @@ impl PaintcraftApp {
                                                         layer.add_mask_generator_mask_editor(curv_ref, ao_ref, pos_ref, wn_ref);
                                                         prop_changed = true;
                                                     }
+                                                    if ui.selectable_label(false, "Directional Light 3D").on_hover_text("3D surface lighting mask calculated from baked World Normal map").clicked() {
+                                                        layer.add_mask_generator_light_3d(curv_ref, ao_ref, pos_ref, wn_ref);
+                                                        prop_changed = true;
+                                                    }
+                                                    if ui.selectable_label(false, "Position 3D Gradient").on_hover_text("Linear or radial 3D coordinates mask calculated from baked World Position map").clicked() {
+                                                        layer.add_mask_generator_position_3d(curv_ref, ao_ref, pos_ref, wn_ref);
+                                                        prop_changed = true;
+                                                    }
+                                                    if ui.selectable_label(false, "Subsurface Thickness").on_hover_text("Subsurface transmission and thin geometry penetration mask with curvature rim").clicked() {
+                                                        layer.add_mask_generator_subsurface_thickness(curv_ref, ao_ref, pos_ref, wn_ref);
+                                                        prop_changed = true;
+                                                    }
                                                 });
                                             if ui.button("+ Color Select").on_hover_text("Isolate submesh or UV island using baked ID Map").clicked() {
                                                 layer.add_mask_color_selection_effect([1.0, 0.0, 0.0], 0.1, 0.05);
@@ -12157,6 +12328,125 @@ impl PaintcraftApp {
                                                             if ui.add(egui::DragValue::new(seed).range(0..=9999)).changed() { prop_changed = true; }
                                                         });
                                                         ui.label(egui::RichText::new("Substance Flood Fill: segments islands into unique random values, gradients, or centroid domes.").small().color(Color32::from_rgb(160, 165, 175)));
+                                                    }
+                                                    crate::layer::MaskEffectType::GeneratorLight3D {
+                                                        ref mut light_direction,
+                                                        ref mut angular_wrap,
+                                                        ref mut contrast,
+                                                        ref mut grunge_breakup,
+                                                        ref mut grunge_scale,
+                                                        ref mut invert,
+                                                    } => {
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Light Dir X:");
+                                                            if ui.add(egui::Slider::new(&mut light_direction[0], -1.0..=1.0)).changed() { prop_changed = true; }
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Light Dir Y:");
+                                                            if ui.add(egui::Slider::new(&mut light_direction[1], -1.0..=1.0)).changed() { prop_changed = true; }
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Light Dir Z:");
+                                                            if ui.add(egui::Slider::new(&mut light_direction[2], -1.0..=1.0)).changed() { prop_changed = true; }
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Angular Wrap:");
+                                                            if ui.add(egui::Slider::new(angular_wrap, 0.0..=1.0)).changed() { prop_changed = true; }
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Contrast:");
+                                                            if ui.add(egui::Slider::new(contrast, 0.1..=4.0)).changed() { prop_changed = true; }
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Grunge Breakup:");
+                                                            if ui.add(egui::Slider::new(grunge_breakup, 0.0..=1.0)).changed() { prop_changed = true; }
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Grunge Scale:");
+                                                            if ui.add(egui::Slider::new(grunge_scale, 1.0..=32.0)).changed() { prop_changed = true; }
+                                                        });
+                                                        if ui.checkbox(invert, "Invert Light Mask").changed() { prop_changed = true; }
+                                                        ui.label(egui::RichText::new("3D directional light projection using baked world normals with wrap falloff.").small().color(Color32::from_rgb(160, 165, 175)));
+                                                    }
+                                                    crate::layer::MaskEffectType::GeneratorPosition3D {
+                                                        ref mut axis,
+                                                        ref mut offset,
+                                                        ref mut spread,
+                                                        ref mut contrast,
+                                                        ref mut grunge_breakup,
+                                                        ref mut grunge_scale,
+                                                        ref mut invert,
+                                                    } => {
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Axis:");
+                                                            let axis_name = match *axis {
+                                                                0 => "X (Lateral)",
+                                                                1 => "Y (Vertical)",
+                                                                2 => "Z (Depth)",
+                                                                _ => "Radial (Center-Out)",
+                                                            };
+                                                            egui::ComboBox::from_id_source(format!("pos3d_axis_{}", eff_id))
+                                                                .selected_text(axis_name)
+                                                                .show_ui(ui, |ui| {
+                                                                    if ui.selectable_value(axis, 0, "X (Lateral)").clicked() { prop_changed = true; }
+                                                                    if ui.selectable_value(axis, 1, "Y (Vertical)").clicked() { prop_changed = true; }
+                                                                    if ui.selectable_value(axis, 2, "Z (Depth)").clicked() { prop_changed = true; }
+                                                                    if ui.selectable_value(axis, 3, "Radial (Center-Out)").clicked() { prop_changed = true; }
+                                                                });
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Offset:");
+                                                            if ui.add(egui::Slider::new(offset, -1.0..=1.0)).changed() { prop_changed = true; }
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Spread:");
+                                                            if ui.add(egui::Slider::new(spread, 0.05..=2.0)).changed() { prop_changed = true; }
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Contrast:");
+                                                            if ui.add(egui::Slider::new(contrast, 0.1..=4.0)).changed() { prop_changed = true; }
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Grunge Breakup:");
+                                                            if ui.add(egui::Slider::new(grunge_breakup, 0.0..=1.0)).changed() { prop_changed = true; }
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Grunge Scale:");
+                                                            if ui.add(egui::Slider::new(grunge_scale, 1.0..=32.0)).changed() { prop_changed = true; }
+                                                        });
+                                                        if ui.checkbox(invert, "Invert Position Gradient").changed() { prop_changed = true; }
+                                                        ui.label(egui::RichText::new("3D coordinate gradient mask along world axes or radial distance.").small().color(Color32::from_rgb(160, 165, 175)));
+                                                    }
+                                                    crate::layer::MaskEffectType::GeneratorSubsurfaceThickness {
+                                                        ref mut thickness_reach,
+                                                        ref mut contrast,
+                                                        ref mut rim_accent,
+                                                        ref mut grunge_breakup,
+                                                        ref mut grunge_scale,
+                                                        ref mut invert,
+                                                    } => {
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Thickness Reach:");
+                                                            if ui.add(egui::Slider::new(thickness_reach, 0.05..=1.0)).changed() { prop_changed = true; }
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Contrast:");
+                                                            if ui.add(egui::Slider::new(contrast, 0.1..=4.0)).changed() { prop_changed = true; }
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Rim Accent:");
+                                                            if ui.add(egui::Slider::new(rim_accent, 0.0..=2.0)).changed() { prop_changed = true; }
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Grunge Breakup:");
+                                                            if ui.add(egui::Slider::new(grunge_breakup, 0.0..=1.0)).changed() { prop_changed = true; }
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Grunge Scale:");
+                                                            if ui.add(egui::Slider::new(grunge_scale, 1.0..=32.0)).changed() { prop_changed = true; }
+                                                        });
+                                                        if ui.checkbox(invert, "Invert Thickness").changed() { prop_changed = true; }
+                                                        ui.label(egui::RichText::new("Subsurface light diffusion through thin geometric sections and rim highlights.").small().color(Color32::from_rgb(160, 165, 175)));
                                                     }
                                                 }
                                             });

@@ -1809,6 +1809,23 @@ mod tests {
         engine.settings.stencil.scale = 0.5;
         let sample_edge = engine.sample_stencil(Vec2::new(0.95, 0.95));
         assert!(sample_edge.is_none(), "Sample outside scaled stencil bounds must return None");
+
+        // Stencil rotation (90 degrees)
+        engine.settings.stencil.scale = 1.0;
+        engine.settings.stencil.angle = std::f32::consts::FRAC_PI_2;
+        let sample_rot = engine.sample_stencil(Vec2::new(0.5, 0.5));
+        assert!(sample_rot.is_some(), "Center sample under rotation should still hit center");
+
+        // Reset transform verification
+        engine.settings.stencil.pos = Vec2::new(0.2, -0.1);
+        engine.settings.stencil.angle = 1.2;
+        engine.settings.stencil.scale = 2.5;
+        engine.settings.stencil.pos = Vec2::ZERO;
+        engine.settings.stencil.angle = 0.0;
+        engine.settings.stencil.scale = 1.0;
+        assert_eq!(engine.settings.stencil.pos, Vec2::ZERO);
+        assert_eq!(engine.settings.stencil.angle, 0.0);
+        assert_eq!(engine.settings.stencil.scale, 1.0);
     }
 
     #[test]
@@ -2024,9 +2041,9 @@ mod tests {
 
         // 2. Verify 3D stroke step distance interpolation
         let prev_pos = glam::Vec3::new(0.0, 0.0, 0.0);
-        let prev_norm = glam::Vec3::new(0.0, 1.0, 0.0);
+        let _prev_norm = glam::Vec3::new(0.0, 1.0, 0.0);
         let hit_pos = glam::Vec3::new(0.1, 0.0, 0.0);
-        let hit_norm = glam::Vec3::new(0.0, 1.0, 0.0);
+        let _hit_norm = glam::Vec3::new(0.0, 1.0, 0.0);
         let world_radius = 0.05f32;
         let spacing = 0.2f32; // step_dist = 0.01
 

@@ -788,6 +788,38 @@ impl Mesh {
         result
     }
 
+    /// Calculate standard 1001-based UDIM tile ID from UV coordinate.
+    /// UDIM = 1001 + u_tile + 10 * v_tile, where u_tile in 0..10 and v_tile >= 0.
+    pub fn udim_for_uv(uv: Vec2) -> u32 {
+        let eps = 1e-5f32;
+        let u_val = if uv.x > 0.0 && (uv.x.fract().abs() < eps || (1.0 - uv.x.fract()).abs() < eps) {
+            uv.x - eps
+        } else {
+            uv.x
+        };
+        let v_val = if uv.y > 0.0 && (uv.y.fract().abs() < eps || (1.0 - uv.y.fract()).abs() < eps) {
+            uv.y - eps
+        } else {
+            uv.y
+        };
+        let u_tile = (u_val.floor() as i32).clamp(0, 9) as u32;
+        let v_tile = (v_val.floor() as i32).max(0) as u32;
+        1001 + u_tile + 10 * v_tile
+    }
+
+    /// Extract all unique UDIM tiles present in the mesh's UV coordinates.
+    /// Returns a sorted list of tile indices (e.g. [1001, 1002, 1003]).
+    pub fn get_udim_tiles(&self) -> Vec<u32> {
+        let mut tiles = std::collections::BTreeSet::new();
+        for v in &self.vertices {
+            tiles.insert(Self::udim_for_uv(v.uv));
+        }
+        if tiles.is_empty() {
+            tiles.insert(1001);
+        }
+        tiles.into_iter().collect()
+    }
+
     /// Returns the quad (both triangles) if `start_tri` is part of a coplanar quad
     pub fn get_polygon_quad(&self, start_tri: usize) -> Vec<usize> {
         let tri_count = self.indices.len() / 3;
@@ -3038,6 +3070,29 @@ endsolid TestStl
         assert_eq!(mesh_bin.indices.len(), 3);
         // Verify box projection UVs were automatically generated
         assert!(mesh_bin.vertices.iter().any(|v| v.uv.length_squared() > 0.0), "STL must have box UVs generated");
+    }
+
+    #[test]
+    fn test_udim_calculation_and_extraction() {
+        assert_eq!(Mesh::udim_for_uv(Vec2::new(0.5, 0.5)), 1001);
+        assert_eq!(Mesh::udim_for_uv(Vec2::new(1.2, 0.3)), 1002);
+        assert_eq!(Mesh::udim_for_uv(Vec2::new(2.8, 0.9)), 1003);
+        assert_eq!(Mesh::udim_for_uv(Vec2::new(0.1, 1.4)), 1011);
+        assert_eq!(Mesh::udim_for_uv(Vec2::new(3.2, 2.5)), 1024);
+
+        let mut cube = Mesh::create_cube_mesh("TestCube", 1.0);
+        let tiles = cube.get_udim_tiles();
+        assert_eq!(tiles, vec![1001]);
+
+        // Add a vertex in UDIM 1002 (u in [1.0, 2.0), v in [0.0, 1.0))
+        cube.vertices.push(Vertex {
+            position: Vec3::ZERO,
+            normal: Vec3::Y,
+            uv: Vec2::new(1.5, 0.5),
+            tangent: Vec4::X,
+        });
+        let multi_tiles = cube.get_udim_tiles();
+        assert_eq!(multi_tiles, vec![1001, 1002]);
     }
 }
 

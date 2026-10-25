@@ -25,8 +25,38 @@ pub struct SmartMaterialLibrary;
 
 impl SmartMaterialLibrary {
     pub fn presets() -> &'static [SmartMaterialPreset] {
-        // Built-in smart material presets cleared to allow user-created custom materials
-        &[]
+        &[
+            SmartMaterialPreset {
+                id: "worn_military_steel",
+                name: "Worn Military Steel",
+                category: "Metals",
+                description: "Substance-grade hardened gunmetal steel with convex edge highlights, micro scratches, and crevice grime",
+            },
+            SmartMaterialPreset {
+                id: "weathered_bronze",
+                name: "Weathered Antique Bronze",
+                category: "Metals",
+                description: "Antique bronze cast with verdigris patina oxidation in crevices and polished contact edges",
+            },
+            SmartMaterialPreset {
+                id: "chipped_car_paint",
+                name: "Chipped Gloss Car Paint",
+                category: "Coated",
+                description: "Automotive high-gloss clearcoat lacquer over peeled primer with authentic flaking detachment",
+            },
+            SmartMaterialPreset {
+                id: "tactical_fabric",
+                name: "Tactical Combat Fabric",
+                category: "Fabric",
+                description: "Heavy-duty ballistic nylon weave with contact abrasion fraying and seam dust",
+            },
+            SmartMaterialPreset {
+                id: "rusted_cast_iron",
+                name: "Rusted Cast Iron",
+                category: "Metals",
+                description: "Industrial porous cast iron with heavy chemical oxidation bloom and vertical gravity rust runoffs",
+            },
+        ]
     }
 
     /// Construct the full multi-layer stack for a smart material preset with curvature map only
@@ -41,26 +71,227 @@ impl SmartMaterialLibrary {
     }
 
     /// Construct full Substance 3D Painter-style multi-layer stacks using baked mesh maps and real masks
-    /// Construct full Substance 3D Painter-style multi-layer stacks
     pub fn build_layers_with_maps(
-        _preset_id: &str,
+        preset_id: &str,
         width: u32,
         height: u32,
-        _curvature_map: Option<&ScalarBuffer>,
-        _ao_map: Option<&ScalarBuffer>,
-        _world_normal_map: Option<&RgbaBuffer>,
-        _position_map: Option<&RgbaBuffer>,
+        curvature_map: Option<&ScalarBuffer>,
+        ao_map: Option<&ScalarBuffer>,
+        world_normal_map: Option<&RgbaBuffer>,
+        position_map: Option<&RgbaBuffer>,
     ) -> Vec<Layer> {
-        let default_layer = Layer::new_fill_layer(
-            1,
-            "Default Material".to_string(),
-            width,
-            height,
-            Vec4::new(0.6, 0.6, 0.6, 1.0),
-            0.5,
-            0.0,
-        );
-        vec![default_layer]
+        let mut layers = match preset_id {
+            "worn_military_steel" => {
+                let base = Layer::new_fill_layer(
+                    1,
+                    "Gunmetal Steel Base".to_string(),
+                    width,
+                    height,
+                    Vec4::new(0.18, 0.18, 0.19, 1.0),
+                    0.35,
+                    0.95,
+                );
+
+                let mut wear = Layer::new_fill_layer(
+                    2,
+                    "Polished Edge Wear".to_string(),
+                    width,
+                    height,
+                    Vec4::new(0.72, 0.72, 0.74, 1.0),
+                    0.22,
+                    0.98,
+                );
+                wear.add_mask_generator_curvature_wear(curvature_map, ao_map, position_map, world_normal_map);
+
+                let mut dirt = Layer::new_fill_layer(
+                    3,
+                    "Crevice Grime & Grease".to_string(),
+                    width,
+                    height,
+                    Vec4::new(0.04, 0.04, 0.03, 1.0),
+                    0.88,
+                    0.05,
+                );
+                dirt.add_mask_generator_cavity_dirt(curvature_map, ao_map, position_map, world_normal_map);
+
+                let mut scratches = Layer::new_fill_layer(
+                    4,
+                    "Micro Scratches".to_string(),
+                    width,
+                    height,
+                    Vec4::new(0.55, 0.55, 0.56, 1.0),
+                    0.28,
+                    0.92,
+                );
+                scratches.add_mask_fill_effect_advanced(ProceduralGenerator::Scratches, curvature_map, ao_map, position_map, world_normal_map);
+
+                vec![base, wear, dirt, scratches]
+            }
+            "weathered_bronze" => {
+                let base = Layer::new_fill_layer(
+                    1,
+                    "Bronze Cast Base".to_string(),
+                    width,
+                    height,
+                    Vec4::new(0.65, 0.42, 0.22, 1.0),
+                    0.40,
+                    0.90,
+                );
+
+                let mut patina = Layer::new_fill_layer(
+                    2,
+                    "Verdigris Patina".to_string(),
+                    width,
+                    height,
+                    Vec4::new(0.18, 0.65, 0.58, 1.0),
+                    0.85,
+                    0.02,
+                );
+                patina.add_mask_generator_cavity_dirt(curvature_map, ao_map, position_map, world_normal_map);
+
+                let mut edge = Layer::new_fill_layer(
+                    3,
+                    "Burnished Edges".to_string(),
+                    width,
+                    height,
+                    Vec4::new(0.85, 0.62, 0.35, 1.0),
+                    0.18,
+                    0.95,
+                );
+                edge.add_mask_generator_curvature_wear(curvature_map, ao_map, position_map, world_normal_map);
+
+                vec![base, patina, edge]
+            }
+            "chipped_car_paint" => {
+                let primer = Layer::new_fill_layer(
+                    1,
+                    "Oxidized Primer Substrate".to_string(),
+                    width,
+                    height,
+                    Vec4::new(0.22, 0.20, 0.19, 1.0),
+                    0.70,
+                    0.60,
+                );
+
+                let mut paint = Layer::new_fill_layer(
+                    2,
+                    "Gloss Red Lacquer".to_string(),
+                    width,
+                    height,
+                    Vec4::new(0.78, 0.06, 0.05, 1.0),
+                    0.08,
+                    0.0,
+                );
+                paint.fill_clearcoat = 1.0;
+                paint.channel_flags.clearcoat = true;
+                paint.add_mask_generator_peeling_paint(curvature_map, ao_map, position_map, world_normal_map);
+
+                let mut mud = Layer::new_fill_layer(
+                    3,
+                    "Road Splash & Mud".to_string(),
+                    width,
+                    height,
+                    Vec4::new(0.25, 0.18, 0.12, 1.0),
+                    0.92,
+                    0.0,
+                );
+                mud.add_mask_generator_ground_mud(curvature_map, ao_map, position_map, world_normal_map);
+
+                vec![primer, paint, mud]
+            }
+            "tactical_fabric" => {
+                let mut base = Layer::new_fill_layer(
+                    1,
+                    "Ballistic Cordura Base".to_string(),
+                    width,
+                    height,
+                    Vec4::new(0.28, 0.32, 0.22, 1.0),
+                    0.85,
+                    0.0,
+                );
+                base.fill_generator = ProceduralGenerator::FabricWeave;
+
+                let mut grime = Layer::new_fill_layer(
+                    2,
+                    "Seam Crevice Grime".to_string(),
+                    width,
+                    height,
+                    Vec4::new(0.12, 0.12, 0.10, 1.0),
+                    0.90,
+                    0.0,
+                );
+                grime.add_mask_generator_cavity_dirt(curvature_map, ao_map, position_map, world_normal_map);
+
+                let mut dust = Layer::new_fill_layer(
+                    3,
+                    "Atmospheric Dust".to_string(),
+                    width,
+                    height,
+                    Vec4::new(0.48, 0.44, 0.36, 1.0),
+                    0.95,
+                    0.0,
+                );
+                dust.add_mask_generator_directional_dust(curvature_map, ao_map, position_map, world_normal_map);
+
+                vec![base, grime, dust]
+            }
+            "rusted_cast_iron" => {
+                let base = Layer::new_fill_layer(
+                    1,
+                    "Rough Cast Iron".to_string(),
+                    width,
+                    height,
+                    Vec4::new(0.15, 0.15, 0.15, 1.0),
+                    0.65,
+                    0.85,
+                );
+
+                let mut rust = Layer::new_fill_layer(
+                    2,
+                    "Ferric Rust Pitting".to_string(),
+                    width,
+                    height,
+                    Vec4::new(0.45, 0.18, 0.08, 1.0),
+                    0.95,
+                    0.05,
+                );
+                rust.add_mask_fill_effect_advanced(ProceduralGenerator::SplatterDirt, curvature_map, ao_map, position_map, world_normal_map);
+
+                let mut leaks = Layer::new_fill_layer(
+                    3,
+                    "Gravity Rust Runoffs".to_string(),
+                    width,
+                    height,
+                    Vec4::new(0.55, 0.22, 0.09, 1.0),
+                    0.90,
+                    0.02,
+                );
+                leaks.add_mask_generator_gravity_leaks(curvature_map, ao_map, position_map, world_normal_map);
+
+                vec![base, rust, leaks]
+            }
+            _ => {
+                let default_layer = Layer::new_fill_layer(
+                    1,
+                    "Default Material".to_string(),
+                    width,
+                    height,
+                    Vec4::new(0.6, 0.6, 0.6, 1.0),
+                    0.5,
+                    0.0,
+                );
+                vec![default_layer]
+            }
+        };
+
+        for l in &mut layers {
+            l.evaluate_fill(curvature_map);
+            if l.has_mask {
+                l.evaluate_mask_full(curvature_map, ao_map, position_map, world_normal_map, None, &[]);
+            }
+        }
+
+        layers
     }
 
     pub fn smart_masks() -> &'static [SmartMaskPreset] {
@@ -457,7 +688,23 @@ mod tests {
     #[test]
     fn test_smart_material_layer_stacks() {
         let presets = SmartMaterialLibrary::presets();
-        assert!(presets.is_empty(), "Built-in smart materials should be cleared for user-created materials");
+        assert_eq!(presets.len(), 5, "Must have 5 production smart material presets");
+
+        for p in presets {
+            let layers = SmartMaterialLibrary::build_layers_with_maps(
+                p.id,
+                32,
+                32,
+                None,
+                None,
+                None,
+                None,
+            );
+            assert!(layers.len() >= 3, "Smart material {} must build a multi-layer stack of at least 3 layers", p.id);
+            for l in &layers {
+                assert!(l.base_color_buf.width == 32 && l.base_color_buf.height == 32);
+            }
+        }
 
         let default_layers = SmartMaterialLibrary::build_layers_with_maps(
             "custom_user_mat",
