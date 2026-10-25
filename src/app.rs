@@ -11,7 +11,7 @@ use crate::packing::{
 };
 use crate::file_dialog::FileExplorerDialog;
 use crate::history::{HistoryAction, HistoryManager};
-use crate::layer::{BlendMode, Layer, LayerType, ProceduralGenerator};
+use crate::layer::{BlendMode, LayerType, ProceduralGenerator};
 use crate::mesh::Mesh;
 use crate::project::Project;
 use crate::renderer::{Camera, ViewportChannelMode, ViewportRenderer};
@@ -209,7 +209,6 @@ pub struct PaintcraftApp {
     pub file_explorer: FileExplorerDialog,
 
     // Stroke undo tracking
-    pub stroke_start_layer: Option<Box<Layer>>,
     pub is_stroke_active: bool,
 
     // View & layout state
@@ -559,7 +558,6 @@ impl PaintcraftApp {
             brush_engine,
             history,
             file_explorer,
-            stroke_start_layer: None,
             is_stroke_active: false,
             view_mode: ViewportChannelMode::Material,
             layout: ViewLayout::View3DOnly,
@@ -6263,7 +6261,7 @@ impl PaintcraftApp {
                                             }
                                             if let Some(gpu_layer) = wgpu.gpu_layers.get(act_idx) {
                                                 wgpu.gpu_compositor.update_layer(active_layer, gpu_layer, doc_w, doc_h);
-                                                wgpu.composite_and_update(&self.project);
+                                                wgpu.composite_and_update_active(&self.project, act_idx);
                                                 let rw = (d_rect.2.saturating_sub(d_rect.0) + 1) as u64;
                                                 let rh = (d_rect.3.saturating_sub(d_rect.1) + 1) as u64;
                                                 self.perf_metrics.texture_transfer_bytes = rw * rh * 32;
@@ -6972,7 +6970,7 @@ impl PaintcraftApp {
                                                 let doc_h = self.project.texture_height;
                                                 let active_layer = &mut self.project.layers[act_idx];
                                                 wgpu.gpu_compositor.update_layer(active_layer, gpu_layer, doc_w, doc_h);
-                                                wgpu.composite_and_update(&self.project);
+                                                wgpu.composite_and_update_active(&self.project, act_idx);
                                             }
                                         }
                                     } else {
@@ -9970,7 +9968,7 @@ mod tests {
 
         // 2. Export with mesh = Some (export_mesh toggle ON)
         let temp_dir_with_mesh = std::env::temp_dir().join("test_export_mesh_toggle_on");
-        let exported_with_mesh = crate::packing::CustomTexturePacker::pack_and_export(
+        let _exported_with_mesh = crate::packing::CustomTexturePacker::pack_and_export(
             &preset,
             &proj.composite_textures,
             "WithMeshTest",

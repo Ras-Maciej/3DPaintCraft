@@ -562,7 +562,7 @@ impl WgpuViewport {
         let tex_roughness = device.create_texture(&wgpu::TextureDescriptor { label: Some("Tex R"), size: tex_size, mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::R32Float, usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST, view_formats: &[] });
         let tex_metallic = device.create_texture(&wgpu::TextureDescriptor { label: Some("Tex M"), size: tex_size, mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::R32Float, usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST, view_formats: &[] });
         let tex_baked_normal = device.create_texture(&wgpu::TextureDescriptor { label: Some("Tex BN"), size: tex_size, mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::Rgba32Float, usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST, view_formats: &[] });
-        let tex_baked_ao = device.create_texture(&wgpu::TextureDescriptor { label: Some("Tex BAO"), size: tex_size, mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::Rgba32Float, usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST, view_formats: &[] });
+        let tex_baked_ao = device.create_texture(&wgpu::TextureDescriptor { label: Some("Tex BAO"), size: tex_size, mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::Rgba8Unorm, usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST, view_formats: &[] });
         let tex_emissive = device.create_texture(&wgpu::TextureDescriptor { label: Some("Tex Emis"), size: tex_size, mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::Rgba32Float, usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST, view_formats: &[] });
         let tex_opacity = device.create_texture(&wgpu::TextureDescriptor { label: Some("Tex Opac"), size: tex_size, mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::R32Float, usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST, view_formats: &[] });
         let tex_clearcoat = device.create_texture(&wgpu::TextureDescriptor { label: Some("Tex Clearcoat"), size: tex_size, mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::R32Float, usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST, view_formats: &[] });
@@ -1218,8 +1218,37 @@ impl WgpuViewport {
     }
 
     /// Composite all layers on GPU and update material textures in VRAM
+    #[allow(dead_code)]
     pub fn composite_and_update(&mut self, project: &crate::project::Project) {
         let final_target = self.gpu_compositor.composite_all(&project.layers, &self.gpu_layers);
+        let size = wgpu::Extent3d { width: self.pbr_tex_width, height: self.pbr_tex_height, depth_or_array_layers: 1 };
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        encoder.copy_texture_to_texture(
+            wgpu::ImageCopyTexture { texture: &final_target.base_color, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            wgpu::ImageCopyTexture { texture: &self.tex_base_color, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            size
+        );
+        encoder.copy_texture_to_texture(
+            wgpu::ImageCopyTexture { texture: &final_target.normal, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            wgpu::ImageCopyTexture { texture: &self.tex_normal, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            size
+        );
+        encoder.copy_texture_to_texture(
+            wgpu::ImageCopyTexture { texture: &final_target.roughness, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            wgpu::ImageCopyTexture { texture: &self.tex_roughness, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            size
+        );
+        encoder.copy_texture_to_texture(
+            wgpu::ImageCopyTexture { texture: &final_target.metallic, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            wgpu::ImageCopyTexture { texture: &self.tex_metallic, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            size
+        );
+        self.queue.submit(std::iter::once(encoder.finish()));
+    }
+
+    /// Incremental GPU composite: reuses cached background DAG composite for active painting layer
+    pub fn composite_and_update_active(&mut self, project: &crate::project::Project, active_idx: usize) {
+        let final_target = self.gpu_compositor.composite_incremental(&project.layers, &self.gpu_layers, active_idx);
         let size = wgpu::Extent3d { width: self.pbr_tex_width, height: self.pbr_tex_height, depth_or_array_layers: 1 };
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
         encoder.copy_texture_to_texture(
@@ -1254,7 +1283,7 @@ impl WgpuViewport {
 
         let tex_size = wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 };
         self.tex_baked_normal = self.device.create_texture(&wgpu::TextureDescriptor { label: Some("Tex BN"), size: tex_size, mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::Rgba32Float, usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST, view_formats: &[] });
-        self.tex_baked_ao = self.device.create_texture(&wgpu::TextureDescriptor { label: Some("Tex BAO"), size: tex_size, mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::Rgba32Float, usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST, view_formats: &[] });
+        self.tex_baked_ao = self.device.create_texture(&wgpu::TextureDescriptor { label: Some("Tex BAO"), size: tex_size, mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::Rgba8Unorm, usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST, view_formats: &[] });
 
         self.rebuild_material_bind_group();
     }
@@ -1491,19 +1520,19 @@ impl WgpuViewport {
         let size = wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 };
         
         let total_pixels = (w * h) as usize;
-        let mut ao_curv_data = vec![1.0f32; total_pixels * 4];
+        let mut ao_curv_data = vec![255u8; total_pixels * 4];
         for i in 0..total_pixels {
-            ao_curv_data[i * 4 + 0] = 1.0f32; // Default AO = 1.0
-            ao_curv_data[i * 4 + 1] = 0.5f32; // Default flat curvature = 0.5
-            ao_curv_data[i * 4 + 2] = 1.0f32; // Default thickness = 1.0 (solid)
-            ao_curv_data[i * 4 + 3] = 1.0f32; // Alpha
+            ao_curv_data[i * 4 + 0] = 255; // Default AO = 1.0
+            ao_curv_data[i * 4 + 1] = 128; // Default flat curvature = 0.5
+            ao_curv_data[i * 4 + 2] = 255; // Default thickness = 1.0 (solid)
+            ao_curv_data[i * 4 + 3] = 255; // Alpha
         }
 
         if let Some(ao) = &project.ao_map {
             if ao.width == w && ao.height == h {
                 for (i, &val) in ao.data.iter().enumerate() {
                     if i < total_pixels {
-                        ao_curv_data[i * 4 + 0] = val;
+                        ao_curv_data[i * 4 + 0] = (val.clamp(0.0, 1.0) * 255.0).round() as u8;
                     }
                 }
             } else {
@@ -1513,7 +1542,7 @@ impl WgpuViewport {
                         let val = ao.sample_bilinear(uv);
                         let idx = (y * w + x) as usize;
                         if idx < total_pixels {
-                            ao_curv_data[idx * 4 + 0] = val;
+                            ao_curv_data[idx * 4 + 0] = (val.clamp(0.0, 1.0) * 255.0).round() as u8;
                         }
                     }
                 }
@@ -1524,7 +1553,7 @@ impl WgpuViewport {
             if curv.width == w && curv.height == h {
                 for (i, &val) in curv.data.iter().enumerate() {
                     if i < total_pixels {
-                        ao_curv_data[i * 4 + 1] = val;
+                        ao_curv_data[i * 4 + 1] = (val.clamp(0.0, 1.0) * 255.0).round() as u8;
                     }
                 }
             } else {
@@ -1534,7 +1563,7 @@ impl WgpuViewport {
                         let val = curv.sample_bilinear(uv);
                         let idx = (y * w + x) as usize;
                         if idx < total_pixels {
-                            ao_curv_data[idx * 4 + 1] = val;
+                            ao_curv_data[idx * 4 + 1] = (val.clamp(0.0, 1.0) * 255.0).round() as u8;
                         }
                     }
                 }
@@ -1545,7 +1574,7 @@ impl WgpuViewport {
             if th.width == w && th.height == h {
                 for (i, &val) in th.data.iter().enumerate() {
                     if i < total_pixels {
-                        ao_curv_data[i * 4 + 2] = val;
+                        ao_curv_data[i * 4 + 2] = (val.clamp(0.0, 1.0) * 255.0).round() as u8;
                     }
                 }
             } else {
@@ -1555,7 +1584,7 @@ impl WgpuViewport {
                         let val = th.sample_bilinear(uv);
                         let idx = (y * w + x) as usize;
                         if idx < total_pixels {
-                            ao_curv_data[idx * 4 + 2] = val;
+                            ao_curv_data[idx * 4 + 2] = (val.clamp(0.0, 1.0) * 255.0).round() as u8;
                         }
                     }
                 }
@@ -1564,8 +1593,8 @@ impl WgpuViewport {
 
         self.queue.write_texture(
             wgpu::ImageCopyTexture { texture: &self.tex_baked_ao, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-            bytemuck::cast_slice(&ao_curv_data),
-            wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(4 * 4 * size.width), rows_per_image: Some(size.height) },
+            &ao_curv_data,
+            wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(4 * size.width), rows_per_image: Some(size.height) },
             size
         );
 
@@ -2496,6 +2525,33 @@ mod tests {
         }
         let comp_elapsed = t2.elapsed();
         println!("100 composite_all calls took {:?}, avg {:.3} ms/call", comp_elapsed, comp_elapsed.as_secs_f64() * 1000.0 / iters as f64);
+
+        // Benchmark multi-layer composite_all vs incremental caching across 5 layers
+        let mut multi_cpu_layers = Vec::new();
+        let mut multi_gpu_layers = Vec::new();
+        for i in 0..5 {
+            let l = crate::layer::Layer::new_paint_layer(i as u64 + 10, format!("Layer {}", i), w, h);
+            let gl = compositor.create_layer(&l, w, h);
+            multi_cpu_layers.push(l);
+            multi_gpu_layers.push(gl);
+        }
+
+        // Full composite_all benchmark across 5 layers
+        let t_full = std::time::Instant::now();
+        for _ in 0..iters {
+            let _ = compositor.composite_all(&multi_cpu_layers, &multi_gpu_layers);
+        }
+        let full_elapsed = t_full.elapsed();
+        println!("100 composite_all (5 layers) took {:?}, avg {:.3} ms/call", full_elapsed, full_elapsed.as_secs_f64() * 1000.0 / iters as f64);
+
+        // Incremental composite benchmark on top layer (Layer 4)
+        let t_inc = std::time::Instant::now();
+        for _ in 0..iters {
+            let _ = compositor.composite_incremental(&multi_cpu_layers, &multi_gpu_layers, 4);
+        }
+        let inc_elapsed = t_inc.elapsed();
+        println!("100 composite_incremental (5 layers, active layer 4) took {:?}, avg {:.3} ms/call", inc_elapsed, inc_elapsed.as_secs_f64() * 1000.0 / iters as f64);
+        assert!(inc_elapsed <= full_elapsed, "Incremental compositing must be faster or equal to full stack compositing");
     }
 
     #[test]

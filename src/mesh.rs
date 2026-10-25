@@ -47,15 +47,10 @@ pub fn sphere_intersects_aabb(center: Vec3, radius: f32, aabb_min: Vec3, aabb_ma
     (center - closest).length_squared() <= radius * radius
 }
 
-pub fn ray_intersect_aabb(min: Vec3, max: Vec3, ray: &Ray) -> Option<f32> {
-    let inv_d = Vec3::new(
-        if ray.direction.x.abs() > 1e-8 { 1.0 / ray.direction.x } else { 1e8 },
-        if ray.direction.y.abs() > 1e-8 { 1.0 / ray.direction.y } else { 1e8 },
-        if ray.direction.z.abs() > 1e-8 { 1.0 / ray.direction.z } else { 1e8 },
-    );
-
-    let t0 = (min - ray.origin) * inv_d;
-    let t1 = (max - ray.origin) * inv_d;
+#[inline(always)]
+pub fn ray_intersect_aabb_fast(min: Vec3, max: Vec3, ray_origin: Vec3, inv_d: Vec3) -> Option<f32> {
+    let t0 = (min - ray_origin) * inv_d;
+    let t1 = (max - ray_origin) * inv_d;
 
     let tmin = t0.min(t1);
     let tmax = t0.max(t1);
@@ -70,19 +65,32 @@ pub fn ray_intersect_aabb(min: Vec3, max: Vec3, ray: &Ray) -> Option<f32> {
     }
 }
 
-/// Bounding Volume Hierarchy Node for ultra-fast raycasting
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct BvhNode {
-    pub aabb_min: Vec3,
-    pub aabb_max: Vec3,
-    pub left_child: Option<usize>,
-    pub right_child: Option<usize>,
-    pub triangle_indices: Vec<u32>,
+#[allow(dead_code)]
+pub fn ray_intersect_aabb(min: Vec3, max: Vec3, ray: &Ray) -> Option<f32> {
+    let inv_d = Vec3::new(
+        if ray.direction.x.abs() > 1e-8 { 1.0 / ray.direction.x } else { ray.direction.x.signum() * 1e8 },
+        if ray.direction.y.abs() > 1e-8 { 1.0 / ray.direction.y } else { ray.direction.y.signum() * 1e8 },
+        if ray.direction.z.abs() > 1e-8 { 1.0 / ray.direction.z } else { ray.direction.z.signum() * 1e8 },
+    );
+    ray_intersect_aabb_fast(min, max, ray.origin, inv_d)
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// Cache-line aligned Flat BVH Node for ultra-fast raycasting and geometry queries
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct BvhNode {
+    pub aabb_min: [f32; 3],
+    pub left_child_or_offset: u32,
+    pub aabb_max: [f32; 3],
+    pub right_child: u32,
+    pub tri_count: u32, // 0 for internal node, > 0 for leaf node
+    pub _pad: u32,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Bvh {
     pub nodes: Vec<BvhNode>,
+    pub triangles: Vec<u32>,
 }
 
 impl Bvh {
@@ -91,26 +99,29 @@ impl Bvh {
         let mut tri_list: Vec<u32> = (0..tri_count as u32).collect();
 
         let mut nodes = Vec::new();
+        let mut triangles = Vec::with_capacity(tri_count);
         if tri_count > 0 {
-            Self::build_recursive(&mut nodes, vertices, indices, &mut tri_list);
+            Self::build_recursive(&mut nodes, &mut triangles, vertices, indices, &mut tri_list);
         }
 
-        Self { nodes }
+        Self { nodes, triangles }
     }
 
     fn build_recursive(
         nodes: &mut Vec<BvhNode>,
+        triangles: &mut Vec<u32>,
         vertices: &[Vertex],
         indices: &[u32],
         tri_indices: &mut [u32],
     ) -> usize {
         let node_idx = nodes.len();
         nodes.push(BvhNode {
-            aabb_min: Vec3::splat(f32::MAX),
-            aabb_max: Vec3::splat(f32::MIN),
-            left_child: None,
-            right_child: None,
-            triangle_indices: Vec::new(),
+            aabb_min: [f32::MAX; 3],
+            left_child_or_offset: 0,
+            aabb_max: [f32::MIN; 3],
+            right_child: u32::MAX,
+            tri_count: 0,
+            _pad: 0,
         });
 
         // Compute AABB for this node
@@ -136,12 +147,15 @@ impl Bvh {
             centroid_max = centroid_max.max(centroid);
         }
 
-        nodes[node_idx].aabb_min = min_pos;
-        nodes[node_idx].aabb_max = max_pos;
+        nodes[node_idx].aabb_min = min_pos.to_array();
+        nodes[node_idx].aabb_max = max_pos.to_array();
 
         // Leaf threshold: <= 8 triangles
         if tri_indices.len() <= 8 {
-            nodes[node_idx].triangle_indices = tri_indices.to_vec();
+            let offset = triangles.len() as u32;
+            triangles.extend_from_slice(tri_indices);
+            nodes[node_idx].left_child_or_offset = offset;
+            nodes[node_idx].tri_count = tri_indices.len() as u32;
             return node_idx;
         }
 
@@ -173,11 +187,12 @@ impl Bvh {
         let mid = tri_indices.len() / 2;
         let (left_slice, right_slice) = tri_indices.split_at_mut(mid);
 
-        let left_child = Self::build_recursive(nodes, vertices, indices, left_slice);
-        let right_child = Self::build_recursive(nodes, vertices, indices, right_slice);
+        let left_child = Self::build_recursive(nodes, triangles, vertices, indices, left_slice);
+        let right_child = Self::build_recursive(nodes, triangles, vertices, indices, right_slice);
 
-        nodes[node_idx].left_child = Some(left_child);
-        nodes[node_idx].right_child = Some(right_child);
+        nodes[node_idx].left_child_or_offset = left_child as u32;
+        nodes[node_idx].right_child = right_child as u32;
+        nodes[node_idx].tri_count = 0;
 
         node_idx
     }
@@ -188,21 +203,30 @@ impl Bvh {
             return result;
         }
 
-        let mut stack = Vec::with_capacity(128);
-        stack.push(0usize);
+        let mut stack = [0u32; 128];
+        stack[0] = 0;
+        let mut stack_len = 1;
 
-        while let Some(node_idx) = stack.pop() {
+        while stack_len > 0 {
+            stack_len -= 1;
+            let node_idx = stack[stack_len] as usize;
             let node = &self.nodes[node_idx];
 
-            if sphere_intersects_aabb(center, radius, node.aabb_min, node.aabb_max) {
-                if !node.triangle_indices.is_empty() {
-                    result.extend_from_slice(&node.triangle_indices);
-                }
-                if let Some(left) = node.left_child {
-                    stack.push(left);
-                }
-                if let Some(right) = node.right_child {
-                    stack.push(right);
+            let aabb_min = Vec3::from_array(node.aabb_min);
+            let aabb_max = Vec3::from_array(node.aabb_max);
+
+            if sphere_intersects_aabb(center, radius, aabb_min, aabb_max) {
+                if node.tri_count > 0 {
+                    let start = node.left_child_or_offset as usize;
+                    let end = start + node.tri_count as usize;
+                    result.extend_from_slice(&self.triangles[start..end]);
+                } else {
+                    if stack_len < 126 {
+                        stack[stack_len] = node.left_child_or_offset;
+                        stack_len += 1;
+                        stack[stack_len] = node.right_child;
+                        stack_len += 1;
+                    }
                 }
             }
         }
@@ -226,124 +250,130 @@ impl Bvh {
             return None;
         }
 
+        let inv_d = Vec3::new(
+            if ray.direction.x.abs() > 1e-8 { 1.0 / ray.direction.x } else { ray.direction.x.signum() * 1e8 },
+            if ray.direction.y.abs() > 1e-8 { 1.0 / ray.direction.y } else { ray.direction.y.signum() * 1e8 },
+            if ray.direction.z.abs() > 1e-8 { 1.0 / ray.direction.z } else { ray.direction.z.signum() * 1e8 },
+        );
+
+        let root_min = Vec3::from_array(self.nodes[0].aabb_min);
+        let root_max = Vec3::from_array(self.nodes[0].aabb_max);
+        let t_root = match ray_intersect_aabb_fast(root_min, root_max, ray.origin, inv_d) {
+            Some(t) => t,
+            None => return None,
+        };
+
         let mut closest_hit: Option<RayHit> = None;
         let mut min_t = max_dist;
 
-        // Traverse stack on CPU stack rather than heap vector
-        let mut stack = [0usize; 128];
-        stack[0] = 0;
+        // Traverse stack stores (node_idx, t_box) to avoid repeated AABB tests
+        let mut stack = [(0u32, 0.0f32); 128];
+        stack[0] = (0, t_root);
         let mut stack_len = 1;
 
         while stack_len > 0 {
             stack_len -= 1;
-            let node_idx = stack[stack_len];
-            let node = &self.nodes[node_idx];
+            let (node_idx, t_box) = stack[stack_len];
+            if t_box >= min_t {
+                continue;
+            }
 
-            if let Some(t_box) = ray_intersect_aabb(node.aabb_min, node.aabb_max, ray) {
-                if t_box >= min_t {
-                    continue;
+            let node = &self.nodes[node_idx as usize];
+
+            if node.tri_count > 0 {
+                // Leaf node: test triangles
+                let start = node.left_child_or_offset as usize;
+                let end = start + node.tri_count as usize;
+                for &t_idx in &self.triangles[start..end] {
+                    let t_idx_usize = t_idx as usize;
+                    if let Some(allowed) = allowed_triangles {
+                        if !allowed.contains(&t_idx_usize) {
+                            continue;
+                        }
+                    }
+
+                    let i0 = indices[t_idx_usize * 3] as usize;
+                    let i1 = indices[t_idx_usize * 3 + 1] as usize;
+                    let i2 = indices[t_idx_usize * 3 + 2] as usize;
+
+                    let v0 = &vertices[i0];
+                    let v1 = &vertices[i1];
+                    let v2 = &vertices[i2];
+
+                    let edge1 = v1.position - v0.position;
+                    let edge2 = v2.position - v0.position;
+
+                    let h = ray.direction.cross(edge2);
+                    let a = edge1.dot(h);
+
+                    if a.abs() < 1e-7 {
+                        continue;
+                    }
+
+                    let f = 1.0 / a;
+                    let s = ray.origin - v0.position;
+                    let u = f * s.dot(h);
+
+                    if u < 0.0 || u > 1.0 {
+                        continue;
+                    }
+
+                    let q = s.cross(edge1);
+                    let v = f * ray.direction.dot(q);
+
+                    if v < 0.0 || u + v > 1.0 {
+                        continue;
+                    }
+
+                    let t = f * edge2.dot(q);
+                    if t > 1e-5 && t < min_t {
+                        min_t = t;
+                        let w = 1.0 - u - v;
+
+                        let point = ray.origin + ray.direction * t;
+                        let mut normal = (v0.normal * w + v1.normal * u + v2.normal * v).normalize_or_zero();
+                        if normal.length_squared() < 1e-5 {
+                            normal = edge1.cross(edge2).normalize_or_zero();
+                        }
+                        let uv = v0.uv * w + v1.uv * u + v2.uv * v;
+
+                        closest_hit = Some(RayHit {
+                            t,
+                            point,
+                            normal,
+                            uv,
+                            triangle_idx: t_idx_usize,
+                            barycentric: Vec3::new(w, u, v),
+                        });
+                    }
                 }
+            } else {
+                // Internal node: test children and push closer child second so it pops first
+                let l = node.left_child_or_offset;
+                let r = node.right_child;
+                let l_node = &self.nodes[l as usize];
+                let r_node = &self.nodes[r as usize];
 
-                // If leaf node, test triangles
-                if !node.triangle_indices.is_empty() {
-                    for &t_idx in &node.triangle_indices {
-                        let t_idx_usize = t_idx as usize;
-                        if let Some(allowed) = allowed_triangles {
-                            if !allowed.contains(&t_idx_usize) {
-                                continue;
-                            }
-                        }
+                let t_l = ray_intersect_aabb_fast(Vec3::from_array(l_node.aabb_min), Vec3::from_array(l_node.aabb_max), ray.origin, inv_d);
+                let t_r = ray_intersect_aabb_fast(Vec3::from_array(r_node.aabb_min), Vec3::from_array(r_node.aabb_max), ray.origin, inv_d);
 
-                        let i0 = indices[t_idx_usize * 3] as usize;
-                        let i1 = indices[t_idx_usize * 3 + 1] as usize;
-                        let i2 = indices[t_idx_usize * 3 + 2] as usize;
-
-                        let v0 = &vertices[i0];
-                        let v1 = &vertices[i1];
-                        let v2 = &vertices[i2];
-
-                        let edge1 = v1.position - v0.position;
-                        let edge2 = v2.position - v0.position;
-
-                        let h = ray.direction.cross(edge2);
-                        let a = edge1.dot(h);
-
-                        if a.abs() < 1e-7 {
-                            continue;
-                        }
-
-                        let f = 1.0 / a;
-                        let s = ray.origin - v0.position;
-                        let u = f * s.dot(h);
-
-                        if u < 0.0 || u > 1.0 {
-                            continue;
-                        }
-
-                        let q = s.cross(edge1);
-                        let v = f * ray.direction.dot(q);
-
-                        if v < 0.0 || u + v > 1.0 {
-                            continue;
-                        }
-
-                        let t = f * edge2.dot(q);
-                        if t > 1e-5 && t < min_t {
-                            min_t = t;
-                            let w = 1.0 - u - v;
-
-                            let point = ray.origin + ray.direction * t;
-                            let mut normal = (v0.normal * w + v1.normal * u + v2.normal * v).normalize_or_zero();
-                            if normal.length_squared() < 1e-5 {
-                                normal = edge1.cross(edge2).normalize_or_zero();
-                            }
-                            let uv = v0.uv * w + v1.uv * u + v2.uv * v;
-
-                            closest_hit = Some(RayHit {
-                                t,
-                                point,
-                                normal,
-                                uv,
-                                triangle_idx: t_idx_usize,
-                                barycentric: Vec3::new(w, u, v),
-                            });
+                match (t_l, t_r) {
+                    (Some(tl), Some(tr)) => {
+                        if tl < tr {
+                            if tr < min_t && stack_len < 127 { stack[stack_len] = (r, tr); stack_len += 1; }
+                            if tl < min_t && stack_len < 127 { stack[stack_len] = (l, tl); stack_len += 1; }
+                        } else {
+                            if tl < min_t && stack_len < 127 { stack[stack_len] = (l, tl); stack_len += 1; }
+                            if tr < min_t && stack_len < 127 { stack[stack_len] = (r, tr); stack_len += 1; }
                         }
                     }
-                } else {
-                    // Internal node: push children in front-to-back order along the ray
-                    match (node.left_child, node.right_child) {
-                        (Some(l), Some(r)) => {
-                            let t_l = ray_intersect_aabb(self.nodes[l].aabb_min, self.nodes[l].aabb_max, ray);
-                            let t_r = ray_intersect_aabb(self.nodes[r].aabb_min, self.nodes[r].aabb_max, ray);
-                            match (t_l, t_r) {
-                                (Some(tl), Some(tr)) => {
-                                    if tl < tr {
-                                        // Left is closer: push Right first so Left is popped and tested first
-                                        if tr < min_t && stack_len < 128 { stack[stack_len] = r; stack_len += 1; }
-                                        if tl < min_t && stack_len < 128 { stack[stack_len] = l; stack_len += 1; }
-                                    } else {
-                                        // Right is closer: push Left first so Right is popped and tested first
-                                        if tl < min_t && stack_len < 128 { stack[stack_len] = l; stack_len += 1; }
-                                        if tr < min_t && stack_len < 128 { stack[stack_len] = r; stack_len += 1; }
-                                    }
-                                }
-                                (Some(tl), None) => {
-                                    if tl < min_t && stack_len < 128 { stack[stack_len] = l; stack_len += 1; }
-                                }
-                                (None, Some(tr)) => {
-                                    if tr < min_t && stack_len < 128 { stack[stack_len] = r; stack_len += 1; }
-                                }
-                                (None, None) => {}
-                            }
-                        }
-                        (Some(l), None) => {
-                            if stack_len < 128 { stack[stack_len] = l; stack_len += 1; }
-                        }
-                        (None, Some(r)) => {
-                            if stack_len < 128 { stack[stack_len] = r; stack_len += 1; }
-                        }
-                        (None, None) => {}
+                    (Some(tl), None) => {
+                        if tl < min_t && stack_len < 127 { stack[stack_len] = (l, tl); stack_len += 1; }
                     }
+                    (None, Some(tr)) => {
+                        if tr < min_t && stack_len < 127 { stack[stack_len] = (r, tr); stack_len += 1; }
+                    }
+                    (None, None) => {}
                 }
             }
         }
@@ -400,7 +430,7 @@ impl Mesh {
             indices,
             aabb_min: Vec3::splat(f32::MAX),
             aabb_max: Vec3::splat(f32::MIN),
-            bvh: Bvh { nodes: Vec::new() },
+            bvh: Bvh::default(),
             original_center: Vec3::ZERO,
             original_scale: 1.0,
             submeshes,
@@ -2422,6 +2452,34 @@ f 1/1/1 3/3/1 4/4/1
         // Since unit box normalization scales sphere, closest hit should be in front (+Z)
         assert!(h.point.z > 0.0, "Expected front facing hit with z > 0, got {}", h.point.z);
         assert!(h.normal.z > 0.8, "Normal should face toward +Z, got {}", h.normal.z);
+    }
+
+    #[test]
+    fn test_flat_bvh_traversal_speed_and_memory() {
+        assert!(std::mem::size_of::<BvhNode>() <= 48, "BvhNode must be compact and cache-friendly (<= 48 bytes)");
+        let dense_sphere = Mesh::create_sphere(1.0, 64, 32);
+        assert!(!dense_sphere.bvh.nodes.is_empty(), "BVH nodes must not be empty");
+        assert!(!dense_sphere.bvh.triangles.is_empty(), "BVH contiguous triangles must not be empty");
+
+        // 10,000 raycast stress test
+        let t0 = std::time::Instant::now();
+        let iters = 10_000;
+        let mut hit_count = 0;
+        for i in 0..iters {
+            let offset_x = ((i % 100) as f32 - 50.0) / 100.0 * 0.8;
+            let offset_y = (((i / 100) % 100) as f32 - 50.0) / 100.0 * 0.8;
+            let ray = Ray::new(glam::Vec3::new(offset_x, offset_y, 3.0), glam::Vec3::new(0.0, 0.0, -1.0));
+            if dense_sphere.raycast(&ray).is_some() {
+                hit_count += 1;
+            }
+        }
+        let elapsed = t0.elapsed();
+        assert!(hit_count > 0, "Stress rays must hit sphere");
+        println!("10,000 BVH raycasts took {:?}, avg {:.4} us/ray", elapsed, elapsed.as_secs_f64() * 1_000_000.0 / iters as f64);
+
+        // Query sphere stress test on the sphere surface
+        let queried_tris = dense_sphere.query_sphere(glam::Vec3::new(0.0, 0.0, 1.0), 0.3);
+        assert!(!queried_tris.is_empty(), "Sphere query on surface must find triangles");
     }
 }
 

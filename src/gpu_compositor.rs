@@ -30,6 +30,10 @@ pub struct GpuCompositor {
     // Ping-pong buffers
     pub buffer_a: CompositorTarget,
     pub buffer_b: CompositorTarget,
+
+    // Sub-composite background cache (layers below active painting layer)
+    pub cache_target: CompositorTarget,
+    pub cached_up_to: Option<usize>,
     
     pub width: u32,
     pub height: u32,
@@ -135,10 +139,11 @@ impl GpuCompositor {
 
         let buffer_a = Self::create_target(&device, width, height, &bg_bind_group_layout);
         let buffer_b = Self::create_target(&device, width, height, &bg_bind_group_layout);
+        let cache_target = Self::create_target(&device, width, height, &bg_bind_group_layout);
 
         Self {
             device, queue, pipeline_color, pipeline_scalar, bg_bind_group_layout, layer_bind_group_layout, params_bind_group_layout,
-            sampler, buffer_a, buffer_b, width, height
+            sampler, buffer_a, buffer_b, cache_target, cached_up_to: None, width, height
         }
     }
 
@@ -369,36 +374,52 @@ impl GpuCompositor {
         }
     }
 
-    pub fn composite_all(&mut self, cpu_layers: &[crate::layer::Layer], gpu_layers: &[GpuLayer]) -> &CompositorTarget {
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("Compositor All") });
+    pub fn invalidate_cache(&mut self) {
+        self.cached_up_to = None;
+    }
 
-        // Clear Buffer A and Buffer B to initial states
+    fn clear_target(&self, encoder: &mut wgpu::CommandEncoder, target: &CompositorTarget, label: &'static str) {
         encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("Clear A"),
+            label: Some(label),
             color_attachments: &[
-                Some(wgpu::RenderPassColorAttachment { view: &self.buffer_a.base_color_view, resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store } }),
-                Some(wgpu::RenderPassColorAttachment { view: &self.buffer_a.normal_view, resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.5, g: 0.5, b: 1.0, a: 0.5 }), store: wgpu::StoreOp::Store } }),
-                Some(wgpu::RenderPassColorAttachment { view: &self.buffer_a.roughness_view, resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color { r: 1.0, g: 0.0, b: 0.0, a: 0.0 }), store: wgpu::StoreOp::Store } }),
-                Some(wgpu::RenderPassColorAttachment { view: &self.buffer_a.metallic_view, resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store } }),
+                Some(wgpu::RenderPassColorAttachment { view: &target.base_color_view, resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store } }),
+                Some(wgpu::RenderPassColorAttachment { view: &target.normal_view, resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.5, g: 0.5, b: 1.0, a: 0.5 }), store: wgpu::StoreOp::Store } }),
+                Some(wgpu::RenderPassColorAttachment { view: &target.roughness_view, resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color { r: 1.0, g: 0.0, b: 0.0, a: 0.0 }), store: wgpu::StoreOp::Store } }),
+                Some(wgpu::RenderPassColorAttachment { view: &target.metallic_view, resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store } }),
             ],
             depth_stencil_attachment: None, timestamp_writes: None, occlusion_query_set: None,
         });
-        encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("Clear B"),
-            color_attachments: &[
-                Some(wgpu::RenderPassColorAttachment { view: &self.buffer_b.base_color_view, resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store } }),
-                Some(wgpu::RenderPassColorAttachment { view: &self.buffer_b.normal_view, resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.5, g: 0.5, b: 1.0, a: 0.5 }), store: wgpu::StoreOp::Store } }),
-                Some(wgpu::RenderPassColorAttachment { view: &self.buffer_b.roughness_view, resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color { r: 1.0, g: 0.0, b: 0.0, a: 0.0 }), store: wgpu::StoreOp::Store } }),
-                Some(wgpu::RenderPassColorAttachment { view: &self.buffer_b.metallic_view, resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store } }),
-            ],
-            depth_stencil_attachment: None, timestamp_writes: None, occlusion_query_set: None,
-        });
+    }
 
-        // Write uniform parameters directly to each layer's pre-allocated buffer
-        for (cpu, gpu) in cpu_layers.iter().zip(gpu_layers.iter()) {
+    fn copy_target(&self, encoder: &mut wgpu::CommandEncoder, src: &CompositorTarget, dst: &CompositorTarget) {
+        let size = wgpu::Extent3d { width: self.width, height: self.height, depth_or_array_layers: 1 };
+        encoder.copy_texture_to_texture(
+            wgpu::ImageCopyTexture { texture: &src.base_color, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            wgpu::ImageCopyTexture { texture: &dst.base_color, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            size,
+        );
+        encoder.copy_texture_to_texture(
+            wgpu::ImageCopyTexture { texture: &src.normal, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            wgpu::ImageCopyTexture { texture: &dst.normal, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            size,
+        );
+        encoder.copy_texture_to_texture(
+            wgpu::ImageCopyTexture { texture: &src.roughness, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            wgpu::ImageCopyTexture { texture: &dst.roughness, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            size,
+        );
+        encoder.copy_texture_to_texture(
+            wgpu::ImageCopyTexture { texture: &src.metallic, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            wgpu::ImageCopyTexture { texture: &dst.metallic, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            size,
+        );
+    }
+
+    fn update_uniforms_for_layers(&self, all_layers: &[crate::layer::Layer], subset_cpu: &[crate::layer::Layer], subset_gpu: &[GpuLayer]) {
+        for (cpu, gpu) in subset_cpu.iter().zip(subset_gpu.iter()) {
             if !cpu.visible || cpu.layer_type == crate::layer::LayerType::Folder { continue; }
 
-            let parent_folder = cpu.parent_folder_id.and_then(|fid| cpu_layers.iter().find(|l| l.id == fid));
+            let parent_folder = cpu.parent_folder_id.and_then(|fid| all_layers.iter().find(|l| l.id == fid));
             if let Some(folder) = parent_folder {
                 if !folder.visible { continue; }
             }
@@ -435,6 +456,52 @@ impl GpuCompositor {
 
             self.queue.write_buffer(&gpu.param_buffer, 0, &data);
         }
+    }
+
+    fn render_composite_pass(&self, encoder: &mut wgpu::CommandEncoder, dst: &CompositorTarget, src: &CompositorTarget, gpu: &GpuLayer) {
+        {
+            let mut pass_color = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Composite Pass Color"),
+                color_attachments: &[
+                    Some(wgpu::RenderPassColorAttachment { view: &dst.base_color_view, resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store } }),
+                    Some(wgpu::RenderPassColorAttachment { view: &dst.normal_view, resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store } }),
+                ],
+                depth_stencil_attachment: None, timestamp_writes: None, occlusion_query_set: None,
+            });
+
+            pass_color.set_pipeline(&self.pipeline_color);
+            pass_color.set_bind_group(0, &src.bind_group, &[]);
+            pass_color.set_bind_group(1, &gpu.bind_group, &[]);
+            pass_color.set_bind_group(2, &gpu.param_bind_group, &[]);
+            pass_color.draw(0..3, 0..1);
+        }
+
+        {
+            let mut pass_scalar = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Composite Pass Scalar"),
+                color_attachments: &[
+                    Some(wgpu::RenderPassColorAttachment { view: &dst.roughness_view, resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store } }),
+                    Some(wgpu::RenderPassColorAttachment { view: &dst.metallic_view, resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store } }),
+                ],
+                depth_stencil_attachment: None, timestamp_writes: None, occlusion_query_set: None,
+            });
+
+            pass_scalar.set_pipeline(&self.pipeline_scalar);
+            pass_scalar.set_bind_group(0, &src.bind_group, &[]);
+            pass_scalar.set_bind_group(1, &gpu.bind_group, &[]);
+            pass_scalar.set_bind_group(2, &gpu.param_bind_group, &[]);
+            pass_scalar.draw(0..3, 0..1);
+        }
+    }
+
+    pub fn composite_all(&mut self, cpu_layers: &[crate::layer::Layer], gpu_layers: &[GpuLayer]) -> &CompositorTarget {
+        self.invalidate_cache();
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("Compositor All") });
+
+        self.clear_target(&mut encoder, &self.buffer_a, "Clear A");
+        self.clear_target(&mut encoder, &self.buffer_b, "Clear B");
+
+        self.update_uniforms_for_layers(cpu_layers, cpu_layers, gpu_layers);
 
         let mut current_src = &self.buffer_a;
         let mut current_dst = &self.buffer_b;
@@ -447,43 +514,91 @@ impl GpuCompositor {
                 if !folder.visible { continue; }
             }
 
-            {
-                let mut pass_color = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("Composite Pass Color"),
-                    color_attachments: &[
-                        Some(wgpu::RenderPassColorAttachment { view: &current_dst.base_color_view, resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store } }),
-                        Some(wgpu::RenderPassColorAttachment { view: &current_dst.normal_view, resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store } }),
-                    ],
-                    depth_stencil_attachment: None, timestamp_writes: None, occlusion_query_set: None,
-                });
+            self.render_composite_pass(&mut encoder, current_dst, current_src, gpu);
 
-                pass_color.set_pipeline(&self.pipeline_color);
-                pass_color.set_bind_group(0, &current_src.bind_group, &[]);
-                pass_color.set_bind_group(1, &gpu.bind_group, &[]);
-                pass_color.set_bind_group(2, &gpu.param_bind_group, &[]);
-                pass_color.draw(0..3, 0..1);
-            }
-
-            {
-                let mut pass_scalar = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("Composite Pass Scalar"),
-                    color_attachments: &[
-                        Some(wgpu::RenderPassColorAttachment { view: &current_dst.roughness_view, resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store } }),
-                        Some(wgpu::RenderPassColorAttachment { view: &current_dst.metallic_view, resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store } }),
-                    ],
-                    depth_stencil_attachment: None, timestamp_writes: None, occlusion_query_set: None,
-                });
-
-                pass_scalar.set_pipeline(&self.pipeline_scalar);
-                pass_scalar.set_bind_group(0, &current_src.bind_group, &[]);
-                pass_scalar.set_bind_group(1, &gpu.bind_group, &[]);
-                pass_scalar.set_bind_group(2, &gpu.param_bind_group, &[]);
-                pass_scalar.draw(0..3, 0..1);
-            }
-
-            // Ping pong
             using_a_as_src = !using_a_as_src;
             if using_a_as_src {
+                current_src = &self.buffer_a;
+                current_dst = &self.buffer_b;
+            } else {
+                current_src = &self.buffer_b;
+                current_dst = &self.buffer_a;
+            }
+        }
+
+        self.queue.submit(std::iter::once(encoder.finish()));
+
+        current_src
+    }
+
+    /// Hierarchical Sub-Composite DAG: Fast-path for interactive brush painting.
+    /// Reuses cached composite of all layers below `active_layer_idx` to achieve O(1) compositing.
+    pub fn composite_incremental(
+        &mut self,
+        cpu_layers: &[crate::layer::Layer],
+        gpu_layers: &[GpuLayer],
+        active_layer_idx: usize,
+    ) -> &CompositorTarget {
+        if active_layer_idx == 0 || active_layer_idx >= cpu_layers.len() || cpu_layers.len() != gpu_layers.len() {
+            return self.composite_all(cpu_layers, gpu_layers);
+        }
+
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("Compositor Incremental") });
+
+        // Check if cache for layers below active_layer_idx is valid
+        if self.cached_up_to != Some(active_layer_idx) {
+            self.clear_target(&mut encoder, &self.buffer_a, "Clear A for Subcomposite");
+            self.clear_target(&mut encoder, &self.buffer_b, "Clear B for Subcomposite");
+
+            self.update_uniforms_for_layers(cpu_layers, &cpu_layers[0..active_layer_idx], &gpu_layers[0..active_layer_idx]);
+
+            let mut current_src = &self.buffer_a;
+            let mut current_dst = &self.buffer_b;
+            let mut using_a = true;
+
+            for (cpu, gpu) in cpu_layers[0..active_layer_idx].iter().zip(gpu_layers[0..active_layer_idx].iter()) {
+                if !cpu.visible || cpu.layer_type == crate::layer::LayerType::Folder { continue; }
+                let parent_folder = cpu.parent_folder_id.and_then(|fid| cpu_layers.iter().find(|l| l.id == fid));
+                if let Some(folder) = parent_folder {
+                    if !folder.visible { continue; }
+                }
+
+                self.render_composite_pass(&mut encoder, current_dst, current_src, gpu);
+
+                using_a = !using_a;
+                if using_a {
+                    current_src = &self.buffer_a;
+                    current_dst = &self.buffer_b;
+                } else {
+                    current_src = &self.buffer_b;
+                    current_dst = &self.buffer_a;
+                }
+            }
+
+            self.copy_target(&mut encoder, current_src, &self.cache_target);
+            self.cached_up_to = Some(active_layer_idx);
+        }
+
+        // Copy cache_target into buffer_a to serve as the background for remaining layers
+        self.copy_target(&mut encoder, &self.cache_target, &self.buffer_a);
+
+        self.update_uniforms_for_layers(cpu_layers, &cpu_layers[active_layer_idx..], &gpu_layers[active_layer_idx..]);
+
+        let mut current_src = &self.buffer_a;
+        let mut current_dst = &self.buffer_b;
+        let mut using_a = true;
+
+        for (cpu, gpu) in cpu_layers[active_layer_idx..].iter().zip(gpu_layers[active_layer_idx..].iter()) {
+            if !cpu.visible || cpu.layer_type == crate::layer::LayerType::Folder { continue; }
+            let parent_folder = cpu.parent_folder_id.and_then(|fid| cpu_layers.iter().find(|l| l.id == fid));
+            if let Some(folder) = parent_folder {
+                if !folder.visible { continue; }
+            }
+
+            self.render_composite_pass(&mut encoder, current_dst, current_src, gpu);
+
+            using_a = !using_a;
+            if using_a {
                 current_src = &self.buffer_a;
                 current_dst = &self.buffer_b;
             } else {
