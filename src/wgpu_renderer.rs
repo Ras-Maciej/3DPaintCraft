@@ -352,6 +352,7 @@ pub struct WgpuViewport {
     pub adapter_info: Option<eframe::wgpu::AdapterInfo>,
     pub cmd_encoding_ms: f32,
     pub queue_submit_ms: f32,
+    pub profiler: crate::gpu_profiler::GpuProfiler,
     aniso_staging: Vec<f32>,
 }
 
@@ -379,6 +380,7 @@ impl WgpuViewport {
         let (depth_texture, depth_view) = Self::create_depth_target(&device, width, height);
         let (tex_history, tex_history_view) = Self::create_history_target(&device, width, height);
         let dlaa_manager = crate::nvidia_dlaa::NvidiaDlaaManager::new(Some(&render_state.adapter.get_info().name));
+        let profiler = crate::gpu_profiler::GpuProfiler::new(&device, &queue, &render_state.adapter);
 
         let (mesh_center, mesh_radius) = calculate_mesh_bounds(&mesh.vertices);
 
@@ -1158,6 +1160,7 @@ impl WgpuViewport {
             adapter_info: Some(render_state.adapter.get_info()),
             cmd_encoding_ms: 0.0,
             queue_submit_ms: 0.0,
+            profiler,
             aniso_staging: Vec::new(),
         }
     }
@@ -1204,6 +1207,7 @@ impl WgpuViewport {
         self.gpu_brush.resize(w, h);
     }
 
+
     /// Dispatch hardware-accelerated 3D projection stamping on GPU compute cores
     pub fn stamp_3d_gpu(
         &mut self,
@@ -1212,7 +1216,10 @@ impl WgpuViewport {
         triangles: &[crate::gpu_brush::GpuBrushTriangle],
     ) {
         if let Some(gpu_layer) = self.gpu_layers.get(active_layer_idx) {
+            let t0 = std::time::Instant::now();
             self.gpu_brush.stamp_3d_gpu(gpu_layer, uniforms, triangles);
+            let elapsed = t0.elapsed().as_secs_f32() * 1000.0;
+            self.profiler.cpu_record_compute_brush(elapsed);
         }
     }
 
@@ -1223,7 +1230,10 @@ impl WgpuViewport {
         uniforms: &crate::gpu_brush::GpuBrushUniform,
     ) {
         if let Some(gpu_layer) = self.gpu_layers.get(active_layer_idx) {
+            let t0 = std::time::Instant::now();
             self.gpu_brush.stamp_3d_gpu(gpu_layer, uniforms, &[]);
+            let elapsed = t0.elapsed().as_secs_f32() * 1000.0;
+            self.profiler.cpu_record_compute_brush(elapsed);
         }
     }
 
@@ -1246,6 +1256,7 @@ impl WgpuViewport {
     /// Composite all layers on GPU and update material textures in VRAM
     #[allow(dead_code)]
     pub fn composite_and_update(&mut self, project: &crate::project::Project) {
+        let t0 = std::time::Instant::now();
         let final_target = self.gpu_compositor.composite_all(&project.layers, &self.gpu_layers);
         let size = wgpu::Extent3d { width: self.pbr_tex_width, height: self.pbr_tex_height, depth_or_array_layers: 1 };
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
@@ -1270,10 +1281,13 @@ impl WgpuViewport {
             size
         );
         self.queue.submit(std::iter::once(encoder.finish()));
+        let elapsed = t0.elapsed().as_secs_f32() * 1000.0;
+        self.profiler.cpu_record_compositing(elapsed);
     }
 
     /// Incremental GPU composite: reuses cached background DAG composite for active painting layer
     pub fn composite_and_update_active(&mut self, project: &crate::project::Project, active_idx: usize) {
+        let t0 = std::time::Instant::now();
         let final_target = self.gpu_compositor.composite_incremental(&project.layers, &self.gpu_layers, active_idx);
         let size = wgpu::Extent3d { width: self.pbr_tex_width, height: self.pbr_tex_height, depth_or_array_layers: 1 };
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
@@ -1298,6 +1312,13 @@ impl WgpuViewport {
             size
         );
         self.queue.submit(std::iter::once(encoder.finish()));
+        let elapsed = t0.elapsed().as_secs_f32() * 1000.0;
+        self.profiler.cpu_record_compositing(elapsed);
+    }
+
+    /// Access latest GPU execution stage timings
+    pub fn stage_timings(&self) -> crate::gpu_profiler::GpuStageTimings {
+        self.profiler.smoothed_timings()
     }
 
     pub fn ensure_baked_textures(&mut self, w: u32, h: u32) {
@@ -2074,6 +2095,9 @@ fn blur_equirectangular(
         }
 
         // --- PASS 1: RENDER 3D SCENE (SKYBOX + MESH) INTO SCENE_VIEW ---
+        self.profiler.begin_frame(&self.device);
+        self.profiler.cpu_begin_pbr();
+        let pbr_ts_writes = self.profiler.pbr_timestamp_writes();
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Scene Render Pass"),
@@ -2107,7 +2131,7 @@ fn blur_equirectangular(
                     }),
                     stencil_ops: None,
                 }),
-                timestamp_writes: None,
+                timestamp_writes: pbr_ts_writes,
                 occlusion_query_set: None,
             });
 
@@ -2172,6 +2196,7 @@ fn blur_equirectangular(
                 }
             }
         }
+        self.profiler.cpu_end_pbr();
 
         // --- UPDATE POSTPROCESS UNIFORM BUFFER ---
         let mut pp_data = [0u8; 272];
@@ -2228,6 +2253,8 @@ fn blur_equirectangular(
         self.queue.write_buffer(&self.postprocess_buffer, 0, &pp_data);
 
         // --- PASS 2: POST-PROCESSING (FXAA/DLAA, DENOISER, BLOOM, DOF, LENS) INTO COLOR_VIEW ---
+        self.profiler.cpu_begin_postprocess();
+        let pp_ts_writes = self.profiler.postprocess_timestamp_writes();
         {
             let mut pp_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("PostProcess Render Pass"),
@@ -2240,7 +2267,7 @@ fn blur_equirectangular(
                     },
                 })],
                 depth_stencil_attachment: None,
-                timestamp_writes: None,
+                timestamp_writes: pp_ts_writes,
                 occlusion_query_set: None,
             });
 
@@ -2248,6 +2275,7 @@ fn blur_equirectangular(
             pp_pass.set_bind_group(0, &self.postprocess_bind_group, &[]);
             pp_pass.draw(0..3, 0..1);
         }
+        self.profiler.cpu_end_postprocess();
 
         // Copy current resolved color buffer to history texture for DLAA temporal reconstruction
         let copy_size = wgpu::Extent3d {
@@ -2273,12 +2301,15 @@ fn blur_equirectangular(
         self.dlaa_manager.history_valid = true;
         self.dlaa_manager.prev_view_proj = view_proj;
 
+        self.profiler.resolve(&mut encoder);
+
         let cmd_buffer = encoder.finish();
         self.cmd_encoding_ms = t_enc.elapsed().as_secs_f32() * 1000.0;
 
         let t_sub = std::time::Instant::now();
         self.queue.submit(std::iter::once(cmd_buffer));
         self.queue_submit_ms = t_sub.elapsed().as_secs_f32() * 1000.0;
+        self.profiler.on_submitted();
     }
 }
 
@@ -2775,6 +2806,92 @@ mod tests {
         // 5. Assert untouched corner pixel (0, 0) remains base material
         let corner_col = layer.base_color_buf.get_pixel(0, 0);
         assert_eq!(corner_col, glam::Vec4::ONE, "Corner pixel outside brush must remain untouched default white");
+    }
+
+    #[test]
+    fn test_wgpu_viewport_gpu_profiler_telemetry() {
+        let instance = wgpu::Instance::default();
+        let adapter = match pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            compatible_surface: None,
+            force_fallback_adapter: false,
+        })) {
+            Some(a) => a,
+            None => {
+                eprintln!("Skipping test_wgpu_viewport_gpu_profiler_telemetry: no GPU adapter");
+                return;
+            }
+        };
+
+        let mut req_features = wgpu::Features::empty();
+        if adapter.features().contains(wgpu::Features::FLOAT32_FILTERABLE) {
+            req_features |= wgpu::Features::FLOAT32_FILTERABLE;
+        } else {
+            eprintln!("Skipping test_wgpu_viewport_gpu_profiler_telemetry: FLOAT32_FILTERABLE missing");
+            return;
+        }
+        if adapter.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
+            req_features |= wgpu::Features::TIMESTAMP_QUERY;
+        }
+        if adapter.features().contains(wgpu::Features::TIMESTAMP_QUERY_INSIDE_PASSES) {
+            req_features |= wgpu::Features::TIMESTAMP_QUERY_INSIDE_PASSES;
+        }
+
+        let (device, queue) = match pollster::block_on(adapter.request_device(
+            &wgpu::DeviceDescriptor {
+                label: Some("Profiler Test Device"),
+                required_features: req_features,
+                required_limits: wgpu::Limits::default(),
+            },
+            None,
+        )) {
+            Ok(dq) => dq,
+            Err(e) => {
+                eprintln!("Skipping test_wgpu_viewport_gpu_profiler_telemetry: {}", e);
+                return;
+            }
+        };
+
+        let device = std::sync::Arc::new(device);
+        let queue = std::sync::Arc::new(queue);
+        let adapter_arc = std::sync::Arc::new(adapter);
+        let renderer = std::sync::Arc::new(eframe::egui::mutex::RwLock::new(
+            egui_wgpu::Renderer::new(&device, wgpu::TextureFormat::Rgba8UnormSrgb, None, 1),
+        ));
+
+        let render_state = eframe::egui_wgpu::RenderState {
+            device: device.clone(),
+            queue: queue.clone(),
+            target_format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            renderer,
+            available_adapters: std::sync::Arc::new([]),
+            adapter: adapter_arc,
+        };
+
+        let mesh = crate::mesh::Mesh::create_cube_mesh("Cube", 1.0);
+        let mut viewport = WgpuViewport::new(&render_state, &mesh);
+
+        let res = 256;
+        let mut project = crate::project::Project::new_default(res, res);
+        project.mesh = mesh;
+        viewport.sync_textures(&mut project);
+
+        // Frame 1: render viewport
+        let vp = glam::Mat4::IDENTITY;
+        let eye = glam::Vec4::new(0.0, 0.0, 3.0, 1.0);
+        let shader = ShaderSettings::default();
+        viewport.render(vp, eye, 0.0, 0, 0.0, 1.0, &shader, false);
+
+        // Frame 2: render viewport again to complete double-buffered query readback
+        viewport.render(vp, eye, 0.0, 0, 0.0, 1.0, &shader, false);
+
+        let timings = viewport.stage_timings();
+        println!("GPU Stage Timings: {:?}", timings);
+
+        // Verify telemetry fields are valid non-negative floats
+        assert!(timings.pbr_pass_ms >= 0.0, "PBR pass time must be non-negative");
+        assert!(timings.postprocess_pass_ms >= 0.0, "Postprocess pass time must be non-negative");
+        assert!(timings.total_gpu_ms >= 0.0, "Total GPU time must be non-negative");
     }
 }
 

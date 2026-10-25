@@ -13,6 +13,7 @@ mod hdri_generator;
 mod gpu_compositor;
 mod gpu_brush;
 pub mod gpu_baker;
+pub mod gpu_profiler;
 mod history;
 mod layer;
 mod mcp;
@@ -167,9 +168,18 @@ fn main() -> Result<(), eframe::Error> {
         "no_vsync" | "autonovsync" => eframe::wgpu::PresentMode::AutoNoVsync,
         _ => eframe::wgpu::PresentMode::AutoVsync,
     };
-    wgpu_options.device_descriptor = std::sync::Arc::new(|_adapter| {
+    wgpu_options.device_descriptor = std::sync::Arc::new(|adapter| {
         let mut desc = eframe::wgpu::DeviceDescriptor::default();
         desc.required_features |= eframe::wgpu::Features::FLOAT32_FILTERABLE;
+        if adapter.features().contains(eframe::wgpu::Features::TIMESTAMP_QUERY) {
+            desc.required_features |= eframe::wgpu::Features::TIMESTAMP_QUERY;
+        }
+        if adapter.features().contains(eframe::wgpu::Features::TIMESTAMP_QUERY_INSIDE_PASSES) {
+            desc.required_features |= eframe::wgpu::Features::TIMESTAMP_QUERY_INSIDE_PASSES;
+        }
+        if adapter.features().contains(eframe::wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS) {
+            desc.required_features |= eframe::wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;
+        }
         desc
     });
 

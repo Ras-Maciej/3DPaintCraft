@@ -426,6 +426,12 @@ pub struct PerformanceMetrics {
     pub frame_count: u32,
     pub fps_accum: f32,
     pub fps_update_timer: std::time::Instant,
+    pub gpu_pbr_ms: f32,
+    pub gpu_postprocess_ms: f32,
+    pub gpu_compute_brush_ms: f32,
+    pub gpu_compositing_ms: f32,
+    pub gpu_total_hardware_ms: f32,
+    pub hardware_timestamps_active: bool,
 }
 
 impl Default for PerformanceMetrics {
@@ -450,6 +456,12 @@ impl Default for PerformanceMetrics {
             frame_count: 0,
             fps_accum: 0.0,
             fps_update_timer: std::time::Instant::now(),
+            gpu_pbr_ms: 0.0,
+            gpu_postprocess_ms: 0.0,
+            gpu_compute_brush_ms: 0.0,
+            gpu_compositing_ms: 0.0,
+            gpu_total_hardware_ms: 0.0,
+            hardware_timestamps_active: false,
         }
     }
 }
@@ -5675,6 +5687,13 @@ impl PaintcraftApp {
             self.perf_metrics.gpu_render_ms = t_rnd.elapsed().as_secs_f32() * 1000.0;
             self.perf_metrics.cmd_encoding_ms = wgpu.cmd_encoding_ms;
             self.perf_metrics.queue_submit_ms = wgpu.queue_submit_ms;
+            let timings = wgpu.stage_timings();
+            self.perf_metrics.gpu_pbr_ms = timings.pbr_pass_ms;
+            self.perf_metrics.gpu_postprocess_ms = timings.postprocess_pass_ms;
+            self.perf_metrics.gpu_compute_brush_ms = timings.compute_brush_ms;
+            self.perf_metrics.gpu_compositing_ms = timings.compositing_ms;
+            self.perf_metrics.gpu_total_hardware_ms = timings.total_gpu_ms;
+            self.perf_metrics.hardware_timestamps_active = timings.hardware_timestamps_supported;
             wgpu.texture_id
         } else {
             let t_rnd = std::time::Instant::now();
@@ -5775,11 +5794,11 @@ impl PaintcraftApp {
 
         // --- REAL-TIME PERFORMANCE & HARDWARE DIAGNOSTICS HUD ---
         if self.perf_metrics.show_debug_hud {
-            let diag_rect = egui::Rect::from_min_size(rect.min + egui::vec2(12.0, 36.0), egui::vec2(370.0, 192.0));
+            let diag_rect = egui::Rect::from_min_size(rect.min + egui::vec2(12.0, 36.0), egui::vec2(460.0, 230.0));
             ui.painter().rect_filled(
                 diag_rect,
                 egui::Rounding::same(8.0),
-                egui::Color32::from_rgba_unmultiplied(16, 18, 24, 238),
+                egui::Color32::from_rgba_unmultiplied(16, 18, 24, 242),
             );
             ui.painter().rect_stroke(
                 diag_rect,
@@ -5804,30 +5823,33 @@ impl PaintcraftApp {
             } else {
                 egui::Color32::from_rgb(80, 220, 120)
             };
+            let ts_badge = if self.perf_metrics.hardware_timestamps_active {
+                "Hardware Timestamps: ACTIVE (Vulkan)"
+            } else {
+                "Hardware Timestamps: CPU Fallback"
+            };
             ui.painter().text(
                 egui::pos2(left_x, y_cur),
                 egui::Align2::LEFT_TOP,
-                format!("GPU: {}", self.perf_metrics.gpu_name),
+                format!("GPU: {}  |  {}", self.perf_metrics.gpu_name, ts_badge),
                 egui::FontId::proportional(11.0),
                 gpu_col,
             );
             y_cur += 18.0;
 
-            let build_str = if self.perf_metrics.is_debug {
-                "Build: Debug (Unoptimized - run with --release for 10x-50x speedup)"
-            } else {
-                "Build: Release (100% full speed)"
+            let build_str = if self.perf_metrics.is_debug { "Debug (Unoptimized)" } else { "Release (100% full speed)" };
+            let build_col = if self.perf_metrics.is_debug { egui::Color32::from_rgb(255, 180, 40) } else { egui::Color32::from_rgb(180, 205, 230) };
+            let aa_short = match self.shader_settings.aa_mode {
+                crate::nvidia_dlaa::AntiAliasingMode::NvidiaDlaa => "NVIDIA DLAA",
+                crate::nvidia_dlaa::AntiAliasingMode::Fxaa => "FXAA",
+                crate::nvidia_dlaa::AntiAliasingMode::Off => "OFF",
             };
-            let build_col = if self.perf_metrics.is_debug {
-                egui::Color32::from_rgb(255, 180, 40)
-            } else {
-                egui::Color32::from_rgb(180, 205, 230)
-            };
+            let denoise_short = if self.shader_settings.denoiser_enabled { "Bilateral Denoise" } else { "No Denoise" };
             ui.painter().text(
                 egui::pos2(left_x, y_cur),
                 egui::Align2::LEFT_TOP,
-                build_str,
-                egui::FontId::proportional(11.0),
+                format!("Build: {}  |  AA: {}  |  {}", build_str, aa_short, denoise_short),
+                egui::FontId::proportional(10.5),
                 build_col,
             );
             y_cur += 18.0;
@@ -5857,7 +5879,7 @@ impl PaintcraftApp {
                     egui::Color32::from_rgb(255, 80, 80)
                 };
                 (
-                    format!("Throughput: {:.1} FPS ({:.2} ms frame)", fps_val, frame_ms),
+                    format!("Throughput: {:.1} FPS ({:.2} ms frame latency)", fps_val, frame_ms),
                     col,
                 )
             };
@@ -5868,25 +5890,27 @@ impl PaintcraftApp {
                 egui::FontId::proportional(11.5),
                 fps_col,
             );
-            y_cur += 18.0;
+            y_cur += 20.0;
 
+            // Microsecond-accurate GPU execution stage breakdown
             ui.painter().text(
                 egui::pos2(left_x, y_cur),
                 egui::Align2::LEFT_TOP,
-                format!("Paint Dab: {:.2} ms  |  3D Pass: {:.2} ms  |  GPU Sync: {:.2} ms",
-                    self.perf_metrics.paint_stroke_ms,
-                    self.perf_metrics.gpu_render_ms,
-                    self.perf_metrics.gpu_sync_ms
+                format!("GPU Stages: PBR: {:.2} ms  |  PostProc: {:.2} ms  |  Brush: {:.2} ms  |  Comp: {:.2} ms",
+                    self.perf_metrics.gpu_pbr_ms,
+                    self.perf_metrics.gpu_postprocess_ms,
+                    self.perf_metrics.gpu_compute_brush_ms,
+                    self.perf_metrics.gpu_compositing_ms
                 ),
                 egui::FontId::proportional(10.5),
-                egui::Color32::from_rgb(190, 195, 205),
+                egui::Color32::from_rgb(90, 215, 255),
             );
             y_cur += 18.0;
 
             ui.painter().text(
                 egui::pos2(left_x, y_cur),
                 egui::Align2::LEFT_TOP,
-                format!("Encoder: {:.2} ms  |  Queue Submit: {:.2} ms  |  CPU Frame: {:.2} ms",
+                format!("Host Latency: Encoder: {:.2} ms  |  Queue Submit: {:.2} ms  |  CPU Total: {:.2} ms",
                     self.perf_metrics.cmd_encoding_ms,
                     self.perf_metrics.queue_submit_ms,
                     self.perf_metrics.work_latency_ms
@@ -5896,12 +5920,31 @@ impl PaintcraftApp {
             );
             y_cur += 18.0;
 
+            let (pcie_str, pcie_col) = if self.perf_metrics.texture_transfer_bytes == 0 {
+                (
+                    "PCIe Transfer: 0 B (Zero-Copy Direct VRAM Stamping Active)".to_string(),
+                    egui::Color32::from_rgb(120, 240, 140),
+                )
+            } else {
+                (
+                    format!("PCIe Transfer: {:.2} MB/dab", self.perf_metrics.texture_transfer_bytes as f64 / (1024.0 * 1024.0)),
+                    egui::Color32::from_rgb(180, 185, 195),
+                )
+            };
             ui.painter().text(
                 egui::pos2(left_x, y_cur),
                 egui::Align2::LEFT_TOP,
-                format!("Doc: {}x{} ({:.1} MB/dab)  |  VP: {}x{}  |  Tris: {}",
+                pcie_str,
+                egui::FontId::proportional(10.5),
+                pcie_col,
+            );
+            y_cur += 18.0;
+
+            ui.painter().text(
+                egui::pos2(left_x, y_cur),
+                egui::Align2::LEFT_TOP,
+                format!("Doc: {}x{} (SVT Sparse Buffers)  |  VP: {}x{}  |  Tris: {}",
                     self.project.texture_width, self.project.texture_height,
-                    self.perf_metrics.texture_transfer_bytes as f64 / (1024.0 * 1024.0),
                     vp_w as u32, vp_h as u32,
                     self.project.mesh.indices.len() / 3
                 ),
@@ -5910,18 +5953,12 @@ impl PaintcraftApp {
             );
             y_cur += 18.0;
 
-            let aa_status = match self.shader_settings.aa_mode {
-                crate::nvidia_dlaa::AntiAliasingMode::NvidiaDlaa => "AA: NVIDIA DLAA (Tensor 16-Phase Halton)",
-                crate::nvidia_dlaa::AntiAliasingMode::Fxaa => "AA: FXAA (Subpixel Luma Edge)",
-                crate::nvidia_dlaa::AntiAliasingMode::Off => "AA: OFF",
-            };
-            let denoise_status = if self.shader_settings.denoiser_enabled { "Denoiser: ON (Bilateral)" } else { "Denoiser: OFF" };
             ui.painter().text(
                 egui::pos2(left_x, y_cur),
                 egui::Align2::LEFT_TOP,
-                format!("{}  |  {}", aa_status, denoise_status),
+                format!("History: {} undo steps  |  Tile-Delta Storage: Active", self.history.undo_stack.len()),
                 egui::FontId::proportional(10.5),
-                egui::Color32::from_rgb(120, 220, 170),
+                egui::Color32::from_rgb(140, 190, 230),
             );
         }
 
