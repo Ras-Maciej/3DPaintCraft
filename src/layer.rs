@@ -1,4 +1,5 @@
 use rayon::prelude::*;
+use std::collections::{HashMap, HashSet};
 
 // 3D Paintcraft - Multi-channel Layer System & Compositor
 // Pure safe Rust
@@ -498,6 +499,20 @@ pub struct Layer {
     // Anchor point identifier for cross-layer referencing
     #[serde(default)]
     pub anchor_point: Option<String>,
+
+    // Active stroke tile-delta undo buffer (Sub-megabyte sparse history recording)
+    #[serde(skip)]
+    pub stroke_undo_buffer: Option<TileUndoBuffer>,
+}
+
+/// Dynamic sparse tile accumulator for active paint strokes
+#[derive(Clone, Debug)]
+pub struct TileUndoBuffer {
+    pub target: crate::brush::PaintTarget,
+    pub channels: crate::channel::ChannelFlags,
+    pub initial_has_mask: bool,
+    pub touched_tiles: HashSet<(u16, u16)>,
+    pub undo_tiles: HashMap<(u16, u16), crate::history::LayerTileDelta>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -616,6 +631,7 @@ impl Layer {
             channel_blend_modes: ChannelBlendModes::default(),
             channel_opacities: ChannelOpacities::default(),
             anchor_point: None,
+            stroke_undo_buffer: None,
         }
     }
 
@@ -689,6 +705,7 @@ impl Layer {
             },
             channel_opacities: ChannelOpacities::default(),
             anchor_point: None,
+            stroke_undo_buffer: None,
         }
     }
 
@@ -968,6 +985,7 @@ impl Layer {
             channel_blend_modes: self.channel_blend_modes,
             channel_opacities: self.channel_opacities,
             anchor_point: self.anchor_point.clone(),
+            stroke_undo_buffer: None,
         })
     }
 
@@ -1016,6 +1034,488 @@ impl Layer {
         self.channel_flags = snapshot.channel_flags;
         self.dirty_rect = snapshot.dirty_rect;
         self.dirty_flags = snapshot.dirty_flags;
+    }
+
+    /// Begin recording a stroke with sparse tile deltas.
+    /// Allocates zero buffer clones at stroke start.
+    pub fn begin_stroke_recording(
+        &mut self,
+        target: crate::brush::PaintTarget,
+        channels: crate::channel::ChannelFlags,
+    ) {
+        self.stroke_undo_buffer = Some(TileUndoBuffer {
+            target,
+            channels,
+            initial_has_mask: self.has_mask,
+            touched_tiles: HashSet::new(),
+            undo_tiles: HashMap::new(),
+        });
+    }
+
+    /// Record un-modified tile state for any tiles overlapping [min_x..=max_x, min_y..=max_y].
+    /// Only copies the 128x128 pixels of unvisited tiles on first contact.
+    pub fn record_tiles_for_rect(&mut self, min_x: u32, min_y: u32, max_x: u32, max_y: u32) {
+        let (target, channels) = match &self.stroke_undo_buffer {
+            Some(buf) => (buf.target, buf.channels),
+            None => return,
+        };
+
+        let doc_w = self.base_color_buf.width as usize;
+        let doc_h = self.base_color_buf.height as usize;
+        if doc_w == 0 || doc_h == 0 {
+            return;
+        }
+
+        let max_x = (max_x as usize).min(doc_w.saturating_sub(1));
+        let max_y = (max_y as usize).min(doc_h.saturating_sub(1));
+        let min_x = (min_x as usize).min(max_x);
+        let min_y = (min_y as usize).min(max_y);
+
+        let tile_size = crate::history::HISTORY_TILE_SIZE;
+        let tx_start = (min_x / tile_size) as u16;
+        let tx_end = (max_x / tile_size) as u16;
+        let ty_start = (min_y / tile_size) as u16;
+        let ty_end = (max_y / tile_size) as u16;
+
+        for ty in ty_start..=ty_end {
+            for tx in tx_start..=tx_end {
+                let key = (tx, ty);
+                let is_unvisited = match &self.stroke_undo_buffer {
+                    Some(buf) => !buf.touched_tiles.contains(&key),
+                    None => false,
+                };
+
+                if is_unvisited {
+                    let tile = self.extract_tile(tx, ty, target, channels);
+                    if let Some(buf) = &mut self.stroke_undo_buffer {
+                        buf.touched_tiles.insert(key);
+                        buf.undo_tiles.insert(key, tile);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Complete active stroke recording and package into a TileStroke HistoryAction.
+    /// Returns None if no pixels/tiles were modified.
+    pub fn finish_stroke_delta(
+        &mut self,
+        layer_idx: usize,
+        description: &str,
+    ) -> Option<crate::history::HistoryAction> {
+        let buf = self.stroke_undo_buffer.take()?;
+        if buf.undo_tiles.is_empty() {
+            return None;
+        }
+
+        let mut undo_list = Vec::with_capacity(buf.undo_tiles.len());
+        let mut redo_list = Vec::with_capacity(buf.undo_tiles.len());
+
+        for (key, undo_tile) in buf.undo_tiles {
+            let redo_tile = self.extract_tile(key.0, key.1, buf.target, buf.channels);
+            undo_list.push(undo_tile);
+            redo_list.push(redo_tile);
+        }
+
+        Some(crate::history::HistoryAction::TileStroke {
+            layer_idx,
+            undo_tiles: undo_list,
+            redo_tiles: redo_list,
+            target: buf.target,
+            channels: buf.channels,
+            prev_has_mask: buf.initial_has_mask,
+            next_has_mask: self.has_mask,
+            description: description.to_string(),
+        })
+    }
+
+    /// Cancel active stroke recording without saving to history
+    pub fn cancel_stroke_recording(&mut self) {
+        self.stroke_undo_buffer = None;
+    }
+
+    /// Extract a 128x128 (or boundary sub-size) tile from the layer
+    pub fn extract_tile(
+        &self,
+        tx: u16,
+        ty: u16,
+        target: crate::brush::PaintTarget,
+        channels: crate::channel::ChannelFlags,
+    ) -> crate::history::LayerTileDelta {
+        let doc_w = self.base_color_buf.width as usize;
+        let doc_h = self.base_color_buf.height as usize;
+        let tile_size = crate::history::HISTORY_TILE_SIZE;
+
+        let x0 = (tx as usize) * tile_size;
+        let y0 = (ty as usize) * tile_size;
+        if doc_w == 0 || doc_h == 0 || x0 >= doc_w || y0 >= doc_h {
+            return crate::history::LayerTileDelta {
+                tile_x: tx,
+                tile_y: ty,
+                width: 0,
+                height: 0,
+                base_color: None,
+                normal: None,
+                emissive: None,
+                roughness: None,
+                metallic: None,
+                height_buf: None,
+                opacity: None,
+                clearcoat: None,
+                anisotropy: None,
+                anisotropy_angle: None,
+                mask: None,
+                mask_paint_buf: None,
+                mask_paint_alpha: None,
+            };
+        }
+
+        let x1 = (x0 + tile_size).min(doc_w);
+        let y1 = (y0 + tile_size).min(doc_h);
+        let w = x1 - x0;
+        let h = y1 - y0;
+        let total = w * h;
+
+        let is_mask = target == crate::brush::PaintTarget::Mask;
+
+        let base_color = if !is_mask && channels.base_color {
+            let mut v = Vec::with_capacity(total);
+            for y in y0..y1 {
+                let start = y * doc_w + x0;
+                v.extend_from_slice(&self.base_color_buf.data[start..start + w]);
+            }
+            Some(v)
+        } else {
+            None
+        };
+
+        let normal = if !is_mask && (channels.normal || channels.height) {
+            let mut v = Vec::with_capacity(total);
+            for y in y0..y1 {
+                let start = y * doc_w + x0;
+                v.extend_from_slice(&self.normal_buf.data[start..start + w]);
+            }
+            Some(v)
+        } else {
+            None
+        };
+
+        let emissive = if !is_mask && channels.emission {
+            let mut v = Vec::with_capacity(total);
+            for y in y0..y1 {
+                let start = y * doc_w + x0;
+                v.extend_from_slice(&self.emissive_buf.data[start..start + w]);
+            }
+            Some(v)
+        } else {
+            None
+        };
+
+        let roughness = if !is_mask && channels.roughness {
+            let mut v = Vec::with_capacity(total);
+            for y in y0..y1 {
+                let start = y * doc_w + x0;
+                v.extend_from_slice(&self.roughness_buf.data[start..start + w]);
+            }
+            Some(v)
+        } else {
+            None
+        };
+
+        let metallic = if !is_mask && channels.metallic {
+            let mut v = Vec::with_capacity(total);
+            for y in y0..y1 {
+                let start = y * doc_w + x0;
+                v.extend_from_slice(&self.metallic_buf.data[start..start + w]);
+            }
+            Some(v)
+        } else {
+            None
+        };
+
+        let height_buf = if !is_mask && channels.height {
+            let mut v = Vec::with_capacity(total);
+            for y in y0..y1 {
+                let start = y * doc_w + x0;
+                v.extend_from_slice(&self.height_buf.data[start..start + w]);
+            }
+            Some(v)
+        } else {
+            None
+        };
+
+        let opacity = if !is_mask && channels.opacity {
+            let mut v = Vec::with_capacity(total);
+            for y in y0..y1 {
+                let start = y * doc_w + x0;
+                v.extend_from_slice(&self.opacity_buf.data[start..start + w]);
+            }
+            Some(v)
+        } else {
+            None
+        };
+
+        let clearcoat = if !is_mask && channels.clearcoat {
+            let mut v = Vec::with_capacity(total);
+            for y in y0..y1 {
+                let start = y * doc_w + x0;
+                v.extend_from_slice(&self.clearcoat_buf.data[start..start + w]);
+            }
+            Some(v)
+        } else {
+            None
+        };
+
+        let anisotropy = if !is_mask && channels.anisotropy {
+            let mut v = Vec::with_capacity(total);
+            for y in y0..y1 {
+                let start = y * doc_w + x0;
+                v.extend_from_slice(&self.anisotropy_buf.data[start..start + w]);
+            }
+            Some(v)
+        } else {
+            None
+        };
+
+        let anisotropy_angle = if !is_mask && channels.anisotropy {
+            let mut v = Vec::with_capacity(total);
+            for y in y0..y1 {
+                let start = y * doc_w + x0;
+                v.extend_from_slice(&self.anisotropy_angle_buf.data[start..start + w]);
+            }
+            Some(v)
+        } else {
+            None
+        };
+
+        let (mask, mask_paint_buf, mask_paint_alpha) = if is_mask {
+            let m_v = if self.mask_buf.data.len() >= doc_w * doc_h {
+                let mut v = Vec::with_capacity(total);
+                for y in y0..y1 {
+                    let start = y * doc_w + x0;
+                    v.extend_from_slice(&self.mask_buf.data[start..start + w]);
+                }
+                Some(v)
+            } else {
+                None
+            };
+
+            let mut mp_b = None;
+            let mut mp_a = None;
+            if let Some(eff_id) = self.active_mask_effect_id {
+                if let Some(eff) = self.mask_effects.iter().find(|e| e.id == eff_id) {
+                    if let MaskEffectType::Paint { buffer, alpha } = &eff.effect_type {
+                        if buffer.data.len() >= doc_w * doc_h {
+                            let mut b_vec = Vec::with_capacity(total);
+                            for y in y0..y1 {
+                                let start = y * doc_w + x0;
+                                b_vec.extend_from_slice(&buffer.data[start..start + w]);
+                            }
+                            mp_b = Some(b_vec);
+                        }
+                        if alpha.data.len() >= doc_w * doc_h {
+                            let mut a_vec = Vec::with_capacity(total);
+                            for y in y0..y1 {
+                                let start = y * doc_w + x0;
+                                a_vec.extend_from_slice(&alpha.data[start..start + w]);
+                            }
+                            mp_a = Some(a_vec);
+                        }
+                    }
+                }
+            }
+            (m_v, mp_b, mp_a)
+        } else {
+            (None, None, None)
+        };
+
+        crate::history::LayerTileDelta {
+            tile_x: tx,
+            tile_y: ty,
+            width: w as u16,
+            height: h as u16,
+            base_color,
+            normal,
+            emissive,
+            roughness,
+            metallic,
+            height_buf,
+            opacity,
+            clearcoat,
+            anisotropy,
+            anisotropy_angle,
+            mask,
+            mask_paint_buf,
+            mask_paint_alpha,
+        }
+    }
+
+    /// Apply a tile delta back into the layer
+    pub fn apply_tile(&mut self, tile: &crate::history::LayerTileDelta) {
+        let doc_w = self.base_color_buf.width as usize;
+        let doc_h = self.base_color_buf.height as usize;
+        let tile_size = crate::history::HISTORY_TILE_SIZE;
+
+        let x0 = (tile.tile_x as usize) * tile_size;
+        let y0 = (tile.tile_y as usize) * tile_size;
+        let w = tile.width as usize;
+        let h = tile.height as usize;
+
+        if doc_w == 0 || doc_h == 0 || x0 >= doc_w || y0 >= doc_h || w == 0 || h == 0 {
+            return;
+        }
+
+        let y1 = (y0 + h).min(doc_h);
+        let actual_h = y1 - y0;
+        let actual_w = w.min(doc_w - x0);
+
+        if let Some(src) = &tile.base_color {
+            if self.base_color_buf.data.len() >= doc_w * doc_h {
+                for y_idx in 0..actual_h {
+                    let dst_start = (y0 + y_idx) * doc_w + x0;
+                    let src_start = y_idx * w;
+                    self.base_color_buf.data[dst_start..dst_start + actual_w]
+                        .copy_from_slice(&src[src_start..src_start + actual_w]);
+                }
+            }
+        }
+
+        if let Some(src) = &tile.normal {
+            if self.normal_buf.data.len() >= doc_w * doc_h {
+                for y_idx in 0..actual_h {
+                    let dst_start = (y0 + y_idx) * doc_w + x0;
+                    let src_start = y_idx * w;
+                    self.normal_buf.data[dst_start..dst_start + actual_w]
+                        .copy_from_slice(&src[src_start..src_start + actual_w]);
+                }
+            }
+        }
+
+        if let Some(src) = &tile.emissive {
+            if self.emissive_buf.data.len() >= doc_w * doc_h {
+                for y_idx in 0..actual_h {
+                    let dst_start = (y0 + y_idx) * doc_w + x0;
+                    let src_start = y_idx * w;
+                    self.emissive_buf.data[dst_start..dst_start + actual_w]
+                        .copy_from_slice(&src[src_start..src_start + actual_w]);
+                }
+            }
+        }
+
+        if let Some(src) = &tile.roughness {
+            if self.roughness_buf.data.len() >= doc_w * doc_h {
+                for y_idx in 0..actual_h {
+                    let dst_start = (y0 + y_idx) * doc_w + x0;
+                    let src_start = y_idx * w;
+                    self.roughness_buf.data[dst_start..dst_start + actual_w]
+                        .copy_from_slice(&src[src_start..src_start + actual_w]);
+                }
+            }
+        }
+
+        if let Some(src) = &tile.metallic {
+            if self.metallic_buf.data.len() >= doc_w * doc_h {
+                for y_idx in 0..actual_h {
+                    let dst_start = (y0 + y_idx) * doc_w + x0;
+                    let src_start = y_idx * w;
+                    self.metallic_buf.data[dst_start..dst_start + actual_w]
+                        .copy_from_slice(&src[src_start..src_start + actual_w]);
+                }
+            }
+        }
+
+        if let Some(src) = &tile.height_buf {
+            if self.height_buf.data.len() >= doc_w * doc_h {
+                for y_idx in 0..actual_h {
+                    let dst_start = (y0 + y_idx) * doc_w + x0;
+                    let src_start = y_idx * w;
+                    self.height_buf.data[dst_start..dst_start + actual_w]
+                        .copy_from_slice(&src[src_start..src_start + actual_w]);
+                }
+            }
+        }
+
+        if let Some(src) = &tile.opacity {
+            if self.opacity_buf.data.len() >= doc_w * doc_h {
+                for y_idx in 0..actual_h {
+                    let dst_start = (y0 + y_idx) * doc_w + x0;
+                    let src_start = y_idx * w;
+                    self.opacity_buf.data[dst_start..dst_start + actual_w]
+                        .copy_from_slice(&src[src_start..src_start + actual_w]);
+                }
+            }
+        }
+
+        if let Some(src) = &tile.clearcoat {
+            if self.clearcoat_buf.data.len() >= doc_w * doc_h {
+                for y_idx in 0..actual_h {
+                    let dst_start = (y0 + y_idx) * doc_w + x0;
+                    let src_start = y_idx * w;
+                    self.clearcoat_buf.data[dst_start..dst_start + actual_w]
+                        .copy_from_slice(&src[src_start..src_start + actual_w]);
+                }
+            }
+        }
+
+        if let Some(src) = &tile.anisotropy {
+            if self.anisotropy_buf.data.len() >= doc_w * doc_h {
+                for y_idx in 0..actual_h {
+                    let dst_start = (y0 + y_idx) * doc_w + x0;
+                    let src_start = y_idx * w;
+                    self.anisotropy_buf.data[dst_start..dst_start + actual_w]
+                        .copy_from_slice(&src[src_start..src_start + actual_w]);
+                }
+            }
+        }
+
+        if let Some(src) = &tile.anisotropy_angle {
+            if self.anisotropy_angle_buf.data.len() >= doc_w * doc_h {
+                for y_idx in 0..actual_h {
+                    let dst_start = (y0 + y_idx) * doc_w + x0;
+                    let src_start = y_idx * w;
+                    self.anisotropy_angle_buf.data[dst_start..dst_start + actual_w]
+                        .copy_from_slice(&src[src_start..src_start + actual_w]);
+                }
+            }
+        }
+
+        if let Some(src) = &tile.mask {
+            if self.mask_buf.data.len() >= doc_w * doc_h {
+                for y_idx in 0..actual_h {
+                    let dst_start = (y0 + y_idx) * doc_w + x0;
+                    let src_start = y_idx * w;
+                    self.mask_buf.data[dst_start..dst_start + actual_w]
+                        .copy_from_slice(&src[src_start..src_start + actual_w]);
+                }
+            }
+        }
+
+        if let Some(eff_id) = self.active_mask_effect_id {
+            if let Some(eff) = self.mask_effects.iter_mut().find(|e| e.id == eff_id) {
+                if let MaskEffectType::Paint { buffer, alpha } = &mut eff.effect_type {
+                    if let Some(src) = &tile.mask_paint_buf {
+                        if buffer.data.len() >= doc_w * doc_h {
+                            for y_idx in 0..actual_h {
+                                let dst_start = (y0 + y_idx) * doc_w + x0;
+                                let src_start = y_idx * w;
+                                buffer.data[dst_start..dst_start + actual_w]
+                                    .copy_from_slice(&src[src_start..src_start + actual_w]);
+                            }
+                        }
+                    }
+                    if let Some(src) = &tile.mask_paint_alpha {
+                        if alpha.data.len() >= doc_w * doc_h {
+                            for y_idx in 0..actual_h {
+                                let dst_start = (y0 + y_idx) * doc_w + x0;
+                                let src_start = y_idx * w;
+                                alpha.data[dst_start..dst_start + actual_w]
+                                    .copy_from_slice(&src[src_start..src_start + actual_w]);
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     pub fn get_channel_blend_mode(&self, ch: ChannelType) -> BlendMode {

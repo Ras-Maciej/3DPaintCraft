@@ -586,6 +586,8 @@ impl BrushEngine {
         let rect_min_y = min_y as u32;
         let rect_max_y = max_y as u32;
 
+        layer.record_tiles_for_rect(rect_min_x, rect_min_y, rect_max_x, rect_max_y);
+
         if let Some((dx0, dy0, dx1, dy1)) = layer.dirty_rect {
             layer.dirty_rect = Some((
                 dx0.min(rect_min_x), dy0.min(rect_min_y), dx1.max(rect_max_x), dy1.max(rect_max_y)
@@ -993,6 +995,8 @@ pub fn barycentric_3d(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> (f32, f32, f32) {
             if min_x > max_x || min_y > max_y {
                 continue;
             }
+
+            layer.record_tiles_for_rect(min_x as u32, min_y as u32, max_x as u32, max_y as u32);
 
             let dw0_dx = (p1_uv.y - p2_uv.y) * inv_det;
             let dw1_dx = (p2_uv.y - p0_uv.y) * inv_det;

@@ -3171,6 +3171,11 @@ impl eframe::App for PaintcraftApp {
         if input.modifiers.command && input.key_pressed(egui::Key::Z) && !input.modifiers.shift {
             if let Some(desc) = self.history.undo(&mut self.project) {
                 self.status_message = format!("Undo: {}", desc);
+                self.project.gpu_sync_needed = true;
+                if let Some(wgpu) = &mut self.wgpu_viewport {
+                    wgpu.sync_textures(&mut self.project);
+                }
+                ctx.request_repaint();
             }
         }
         // Redo: Ctrl+Y or Ctrl+Shift+Z
@@ -3179,6 +3184,11 @@ impl eframe::App for PaintcraftApp {
         {
             if let Some(desc) = self.history.redo(&mut self.project) {
                 self.status_message = format!("Redo: {}", desc);
+                self.project.gpu_sync_needed = true;
+                if let Some(wgpu) = &mut self.wgpu_viewport {
+                    wgpu.sync_textures(&mut self.project);
+                }
+                ctx.request_repaint();
             }
         }
 
@@ -3358,12 +3368,22 @@ impl eframe::App for PaintcraftApp {
                     if ui.add_enabled(self.history.can_undo(), egui::Button::new("Undo (Ctrl+Z)")).clicked() {
                         if let Some(desc) = self.history.undo(&mut self.project) {
                             self.status_message = format!("Undo: {}", desc);
+                            self.project.gpu_sync_needed = true;
+                            if let Some(wgpu) = &mut self.wgpu_viewport {
+                                wgpu.sync_textures(&mut self.project);
+                            }
+                            ctx.request_repaint();
                         }
                         ui.close_menu();
                     }
                     if ui.add_enabled(self.history.can_redo(), egui::Button::new("Redo (Ctrl+Y)")).clicked() {
                         if let Some(desc) = self.history.redo(&mut self.project) {
                             self.status_message = format!("Redo: {}", desc);
+                            self.project.gpu_sync_needed = true;
+                            if let Some(wgpu) = &mut self.wgpu_viewport {
+                                wgpu.sync_textures(&mut self.project);
+                            }
+                            ctx.request_repaint();
                         }
                         ui.close_menu();
                     }
@@ -5974,7 +5994,7 @@ impl PaintcraftApp {
                             wgpu.ensure_gpu_layers(&mut self.project);
                         }
                     }
-                    if let Some(layer) = self.project.active_layer() {
+                    if let Some(layer) = self.project.active_layer_mut() {
                         let target = self.brush_engine.settings.target;
                         let channels = if target == PaintTarget::Mask {
                             crate::channel::ChannelFlags::none()
@@ -5994,7 +6014,7 @@ impl PaintcraftApp {
                                 ao: false,
                             }
                         };
-                        self.stroke_start_layer = Some(layer.clone_stroke_snapshot_selective(Some(target), Some(channels)));
+                        layer.begin_stroke_recording(target, channels);
                         self.is_stroke_active = true;
                     }
                     self.polygon_fill_drag_tris.clear();
@@ -6094,6 +6114,11 @@ impl PaintcraftApp {
                                             let w = layer.mask_buf.width;
                                             let h = layer.mask_buf.height;
                                             for &(uv0, uv1, uv2) in &tri_uvs {
+                                                let min_x = ((uv0.x.min(uv1.x).min(uv2.x) * w as f32).floor() as i32).clamp(0, w as i32 - 1) as u32;
+                                                let max_x = ((uv0.x.max(uv1.x).max(uv2.x) * w as f32).ceil() as i32).clamp(0, w as i32 - 1) as u32;
+                                                let min_y = ((uv0.y.min(uv1.y).min(uv2.y) * h as f32).floor() as i32).clamp(0, h as i32 - 1) as u32;
+                                                let max_y = ((uv0.y.max(uv1.y).max(uv2.y) * h as f32).ceil() as i32).clamp(0, h as i32 - 1) as u32;
+                                                layer.record_tiles_for_rect(min_x, min_y, max_x, max_y);
                                                 crate::mesh::Mesh::rasterize_triangle_uv(w, h, uv0, uv1, uv2, |px, py| {
                                                     layer.mask_buf.set_pixel(px, py, val);
                                                 });
@@ -6127,6 +6152,11 @@ impl PaintcraftApp {
                                             let w = layer.base_color_buf.width;
                                             let h = layer.base_color_buf.height;
                                             for &(uv0, uv1, uv2) in &tri_uvs {
+                                                let min_x = ((uv0.x.min(uv1.x).min(uv2.x) * w as f32).floor() as i32).clamp(0, w as i32 - 1) as u32;
+                                                let max_x = ((uv0.x.max(uv1.x).max(uv2.x) * w as f32).ceil() as i32).clamp(0, w as i32 - 1) as u32;
+                                                let min_y = ((uv0.y.min(uv1.y).min(uv2.y) * h as f32).floor() as i32).clamp(0, h as i32 - 1) as u32;
+                                                let max_y = ((uv0.y.max(uv1.y).max(uv2.y) * h as f32).ceil() as i32).clamp(0, h as i32 - 1) as u32;
+                                                layer.record_tiles_for_rect(min_x, min_y, max_x, max_y);
                                                 crate::mesh::Mesh::rasterize_triangle_uv(w, h, uv0, uv1, uv2, |px, py| {
                                                     if do_col {
                                                         layer.base_color_buf.set_pixel(px, py, col);
@@ -6270,40 +6300,15 @@ impl PaintcraftApp {
                     wgpu.sync_textures(&mut self.project);
                 }
                 if self.is_stroke_active {
-                    if let Some(prev) = self.stroke_start_layer.take() {
-                        if let Some(next) = self.project.active_layer() {
-                            let idx = self.project.active_layer_idx;
-                            let desc = if self.brush_engine.settings.mode == ToolMode::FillBucket {
-                                format!("Polygon Fill ({})", self.brush_engine.settings.polygon_fill_mode.name())
-                            } else {
-                                "Paint Stroke".to_string()
-                            };
-                            let target = self.brush_engine.settings.target;
-                            let channels = if target == PaintTarget::Mask {
-                                crate::channel::ChannelFlags::none()
-                            } else {
-                                let b = self.brush_engine.settings.channels;
-                                let l = next.channel_flags;
-                                crate::channel::ChannelFlags {
-                                    base_color: b.base_color && l.base_color,
-                                    roughness: b.roughness && l.roughness,
-                                    metallic: b.metallic && l.metallic,
-                                    height: b.height && l.height,
-                                    normal: (b.normal || b.height) && (l.normal || l.height),
-                                    emission: b.emission && l.emission,
-                                    opacity: b.opacity && l.opacity,
-                                    clearcoat: b.clearcoat && l.clearcoat,
-                                    anisotropy: b.anisotropy && l.anisotropy,
-                                    ao: false,
-                                }
-                            };
-                            let next_layer = next.clone_stroke_snapshot_selective(Some(target), Some(channels));
-                            self.history.push(&desc.clone(), HistoryAction::Stroke {
-                                layer_idx: idx,
-                                prev_layer: prev,
-                                next_layer,
-                                description: desc,
-                            });
+                    let idx = self.project.active_layer_idx;
+                    let desc = if self.brush_engine.settings.mode == ToolMode::FillBucket {
+                        format!("Polygon Fill ({})", self.brush_engine.settings.polygon_fill_mode.name())
+                    } else {
+                        "Paint Stroke".to_string()
+                    };
+                    if let Some(layer) = self.project.layers.get_mut(idx) {
+                        if let Some(action) = layer.finish_stroke_delta(idx, &desc) {
+                            self.history.push(&desc, action);
                         }
                     }
                     self.is_stroke_active = false;
@@ -6771,7 +6776,7 @@ impl PaintcraftApp {
                             wgpu.ensure_gpu_layers(&mut self.project);
                         }
                     }
-                    if let Some(layer) = self.project.active_layer() {
+                    if let Some(layer) = self.project.active_layer_mut() {
                         let target = self.brush_engine.settings.target;
                         let channels = if target == PaintTarget::Mask {
                             crate::channel::ChannelFlags::none()
@@ -6791,7 +6796,7 @@ impl PaintcraftApp {
                                 ao: false,
                             }
                         };
-                        self.stroke_start_layer = Some(layer.clone_stroke_snapshot_selective(Some(target), Some(channels)));
+                        layer.begin_stroke_recording(target, channels);
                         self.is_stroke_active = true;
                     }
                     self.polygon_fill_drag_tris.clear();
@@ -6849,7 +6854,12 @@ impl PaintcraftApp {
                                                 let val = self.brush_engine.settings.polygon_fill_value;
                                                 let w = layer.mask_buf.width;
                                                 let h = layer.mask_buf.height;
-                                                for &(uv0, uv1, uv2) in &tri_uvs {
+                                                 for &(uv0, uv1, uv2) in &tri_uvs {
+                                                    let min_x = ((uv0.x.min(uv1.x).min(uv2.x) * w as f32).floor() as i32).clamp(0, w as i32 - 1) as u32;
+                                                    let max_x = ((uv0.x.max(uv1.x).max(uv2.x) * w as f32).ceil() as i32).clamp(0, w as i32 - 1) as u32;
+                                                    let min_y = ((uv0.y.min(uv1.y).min(uv2.y) * h as f32).floor() as i32).clamp(0, h as i32 - 1) as u32;
+                                                    let max_y = ((uv0.y.max(uv1.y).max(uv2.y) * h as f32).ceil() as i32).clamp(0, h as i32 - 1) as u32;
+                                                    layer.record_tiles_for_rect(min_x, min_y, max_x, max_y);
                                                     crate::mesh::Mesh::rasterize_triangle_uv(w, h, uv0, uv1, uv2, |px, py| {
                                                         layer.mask_buf.set_pixel(px, py, val);
                                                     });
@@ -6883,6 +6893,11 @@ impl PaintcraftApp {
                                                 let w = layer.base_color_buf.width;
                                                 let h = layer.base_color_buf.height;
                                                 for &(uv0, uv1, uv2) in &tri_uvs {
+                                                    let min_x = ((uv0.x.min(uv1.x).min(uv2.x) * w as f32).floor() as i32).clamp(0, w as i32 - 1) as u32;
+                                                    let max_x = ((uv0.x.max(uv1.x).max(uv2.x) * w as f32).ceil() as i32).clamp(0, w as i32 - 1) as u32;
+                                                    let min_y = ((uv0.y.min(uv1.y).min(uv2.y) * h as f32).floor() as i32).clamp(0, h as i32 - 1) as u32;
+                                                    let max_y = ((uv0.y.max(uv1.y).max(uv2.y) * h as f32).ceil() as i32).clamp(0, h as i32 - 1) as u32;
+                                                    layer.record_tiles_for_rect(min_x, min_y, max_x, max_y);
                                                     crate::mesh::Mesh::rasterize_triangle_uv(w, h, uv0, uv1, uv2, |px, py| {
                                                         if do_col {
                                                             layer.base_color_buf.set_pixel(px, py, col);
@@ -6988,40 +7003,15 @@ impl PaintcraftApp {
                     wgpu.sync_textures(&mut self.project);
                 }
                 if self.is_stroke_active {
-                    if let Some(prev) = self.stroke_start_layer.take() {
-                        if let Some(next) = self.project.active_layer() {
-                            let idx = self.project.active_layer_idx;
-                            let desc = if self.brush_engine.settings.mode == ToolMode::FillBucket {
-                                format!("2D Polygon Fill ({})", self.brush_engine.settings.polygon_fill_mode.name())
-                            } else {
-                                "2D UV Paint Stroke".to_string()
-                            };
-                            let target = self.brush_engine.settings.target;
-                            let channels = if target == PaintTarget::Mask {
-                                crate::channel::ChannelFlags::none()
-                            } else {
-                                let b = self.brush_engine.settings.channels;
-                                let l = next.channel_flags;
-                                crate::channel::ChannelFlags {
-                                    base_color: b.base_color && l.base_color,
-                                    roughness: b.roughness && l.roughness,
-                                    metallic: b.metallic && l.metallic,
-                                    height: b.height && l.height,
-                                    normal: (b.normal || b.height) && (l.normal || l.height),
-                                    emission: b.emission && l.emission,
-                                    opacity: b.opacity && l.opacity,
-                                    clearcoat: b.clearcoat && l.clearcoat,
-                                    anisotropy: b.anisotropy && l.anisotropy,
-                                    ao: false,
-                                }
-                            };
-                            let next_layer = next.clone_stroke_snapshot_selective(Some(target), Some(channels));
-                            self.history.push(&desc.clone(), HistoryAction::Stroke {
-                                layer_idx: idx,
-                                prev_layer: prev,
-                                next_layer,
-                                description: desc,
-                            });
+                    let idx = self.project.active_layer_idx;
+                    let desc = if self.brush_engine.settings.mode == ToolMode::FillBucket {
+                        format!("2D Polygon Fill ({})", self.brush_engine.settings.polygon_fill_mode.name())
+                    } else {
+                        "2D UV Paint Stroke".to_string()
+                    };
+                    if let Some(layer) = self.project.layers.get_mut(idx) {
+                        if let Some(action) = layer.finish_stroke_delta(idx, &desc) {
+                            self.history.push(&desc, action);
                         }
                     }
                     self.is_stroke_active = false;
