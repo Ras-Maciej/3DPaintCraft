@@ -1007,10 +1007,11 @@ pub fn barycentric_3d(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> (f32, f32, f32) {
 
             // Normal falloff check (don't paint on back-facing surfaces)
             let normal_dot = tri_normal.dot(hit_normal);
-            if normal_dot < -0.1 {
+            if normal_dot < -0.2 {
                 continue;
             }
-            let angle_weight = (normal_dot + 0.1).clamp(0.0, 1.0);
+            let t_norm = ((normal_dot - (-0.2)) / (0.25 - (-0.2))).clamp(0.0, 1.0);
+            let angle_weight = t_norm * t_norm * (3.0 - 2.0 * t_norm);
 
             // UV seam unwrapping relative to v0.uv
             let mut u0 = v0.uv.x;
@@ -2001,5 +2002,46 @@ mod tests {
 
         assert!(r_soft > r_linear, "Soft curve must produce larger radius than Linear at 0.5 pressure");
         assert!(r_linear > r_firm, "Linear curve must produce larger radius than Firm at 0.5 pressure");
+    }
+
+    #[test]
+    fn test_brush_3d_glancing_angle_falloff_and_interpolation() {
+        // 1. Verify smoothstep cosine falloff for grazing angles
+        let calc_angle_weight = |normal_dot: f32| -> f32 {
+            if normal_dot < -0.2 {
+                return 0.0;
+            }
+            let t_norm = ((normal_dot - (-0.2)) / (0.25 - (-0.2))).clamp(0.0, 1.0);
+            t_norm * t_norm * (3.0 - 2.0 * t_norm)
+        };
+
+        assert_eq!(calc_angle_weight(1.0), 1.0);
+        assert_eq!(calc_angle_weight(0.25), 1.0);
+        assert_eq!(calc_angle_weight(-0.2), 0.0);
+        assert_eq!(calc_angle_weight(-0.5), 0.0);
+        let mid = calc_angle_weight(0.025);
+        assert!((mid - 0.5).abs() < 1e-4, "Midpoint between -0.2 and 0.25 must evaluate to 0.5");
+
+        // 2. Verify 3D stroke step distance interpolation
+        let prev_pos = glam::Vec3::new(0.0, 0.0, 0.0);
+        let prev_norm = glam::Vec3::new(0.0, 1.0, 0.0);
+        let hit_pos = glam::Vec3::new(0.1, 0.0, 0.0);
+        let hit_norm = glam::Vec3::new(0.0, 1.0, 0.0);
+        let world_radius = 0.05f32;
+        let spacing = 0.2f32; // step_dist = 0.01
+
+        let delta = hit_pos - prev_pos;
+        let dist = delta.length();
+        let step_dist = (world_radius * spacing).max(0.001);
+        let steps = ((dist / step_dist).ceil() as usize).clamp(1, 16);
+        assert_eq!(steps, 10, "10 steps should be generated for dist=0.1 with step_dist=0.01");
+
+        let mut pts = Vec::with_capacity(steps);
+        for i in 1..=steps {
+            let t = i as f32 / steps as f32;
+            pts.push(prev_pos.lerp(hit_pos, t));
+        }
+        assert_eq!(pts.len(), 10);
+        assert!((pts.last().unwrap().x - 0.1).abs() < 1e-5);
     }
 }

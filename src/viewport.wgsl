@@ -273,8 +273,8 @@ fn fs_main(@builtin(front_facing) is_front: bool, in: VertexOutput) -> FragmentO
     let sobel_x = (h_tr + 2.0 * h_mr + h_br) - (h_tl + 2.0 * h_ml + h_bl);
     let sobel_y = (h_tr + 2.0 * h_tc + h_tl) - (h_br + 2.0 * h_bc + h_bl);
 
-    let dh_dx = sobel_x * 2.0;
-    let dh_dy = sobel_y * 2.0;
+    let dh_dx = sobel_x * 0.25;
+    let dh_dy = sobel_y * 0.25;
     let bump_n = normalize(vec3<f32>(-dh_dx, -dh_dy, 1.0));
 
     // Reoriented Normal Mapping (RNM) blending between bump_n and layer_n
@@ -334,12 +334,16 @@ fn fs_main(@builtin(front_facing) is_front: bool, in: VertexOutput) -> FragmentO
     let b = normalize(cross(n, t) * tw);
     let tbn = mat3x3<f32>(t, b, n);
 
-    let world_normal = normalize(tbn * normal_map);
+    var world_normal = normalize(tbn * normal_map);
 
     let specular_weight = 1.0 * camera.specular_mult; 
     
     let v = normalize(camera.eye_pos.xyz - in.world_pos);
-    let n_dot_v = max(dot(world_normal, v), 1e-4);
+    let v_dot_norm = dot(world_normal, v);
+    if v_dot_norm < 0.02 {
+        world_normal = normalize(world_normal + v * (0.02 - v_dot_norm));
+    }
+    let n_dot_v = max(dot(world_normal, v), 0.02);
 
     // Anisotropic tangent frame rotation & parameters
     let theta = aniso_angle * 2.0 * PI;
@@ -439,7 +443,7 @@ fn fs_main(@builtin(front_facing) is_front: bool, in: VertexOutput) -> FragmentO
     let f_dir = f0 + (f90 - f0) * pow(clamp(1.0 - v_dot_h, 0.0, 1.0), 5.0);
     let specular_brdf = (d * g * f_dir * specular_weight) / max(4.0 * n_dot_l * n_dot_v, 1e-4);
     
-    let shadow_factor = calculate_directional_shadow(in.world_pos, world_normal, light_dir);
+    let shadow_factor = calculate_directional_shadow(in.world_pos, n, light_dir);
     let sun_color = vec3<f32>(1.2, 1.18, 1.15);
     let dir_specular = specular_brdf * sun_color * n_dot_l * camera.sun_intensity * matte_factor * shadow_factor;
     let dir_diffuse = diffuse_color * (sun_color * n_dot_l / PI) * camera.sun_intensity * shadow_factor;

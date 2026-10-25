@@ -137,10 +137,10 @@ impl NvidiaDlaaManager {
         }
 
         let mut jittered = proj;
-        // In standard column-major glam Mat4:
-        // col 2 contains the Z terms and projection translation offsets
-        jittered.w_axis.x += self.current_jitter.0 * 2.0;
-        jittered.w_axis.y += self.current_jitter.1 * 2.0;
+        // In standard column-major glam Mat4 perspective projection:
+        // z_axis terms (col 2) control projection shear/translation in NDC space
+        jittered.z_axis.x += self.current_jitter.0 * 2.0;
+        jittered.z_axis.y += self.current_jitter.1 * 2.0;
         jittered
     }
 
@@ -173,5 +173,20 @@ mod tests {
 
         let (jx_off, jy_off) = mgr.next_jitter(1920, 1080, false);
         assert_eq!((jx_off, jy_off), (0.0, 0.0));
+    }
+
+    #[test]
+    fn test_nvidia_dlaa_jitter_projection() {
+        let mut mgr = NvidiaDlaaManager::new(Some("NVIDIA GeForce RTX 4060"));
+        let proj = Mat4::perspective_rh(1.0, 1.77, 0.1, 100.0);
+        let unjittered = mgr.jitter_projection(proj, false);
+        assert_eq!(unjittered, proj);
+
+        mgr.next_jitter(1920, 1080, true);
+        let jittered = mgr.jitter_projection(proj, true);
+        assert_ne!(jittered, proj);
+        // z_axis shear offset should be modified
+        assert_ne!(jittered.z_axis.x, proj.z_axis.x);
+        assert_ne!(jittered.z_axis.y, proj.z_axis.y);
     }
 }

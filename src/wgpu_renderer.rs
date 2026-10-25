@@ -146,8 +146,8 @@ impl ShaderSettings {
                 self.shadows_enabled = true;
                 self.shadow_bias = 0.015;
                 self.shadow_softness = 1.0;
-                self.aa_mode = crate::nvidia_dlaa::AntiAliasingMode::NvidiaDlaa;
-                self.fxaa_enabled = false;
+                self.aa_mode = crate::nvidia_dlaa::AntiAliasingMode::Fxaa;
+                self.fxaa_enabled = true;
                 self.denoiser_enabled = false;
                 self.denoiser_radius = 0.8;
                 self.denoiser_normal_weight = 24.0;
@@ -164,8 +164,8 @@ impl ShaderSettings {
                 self.shadows_enabled = true;
                 self.shadow_bias = 0.015;
                 self.shadow_softness = 1.0;
-                self.aa_mode = crate::nvidia_dlaa::AntiAliasingMode::NvidiaDlaa;
-                self.fxaa_enabled = false;
+                self.aa_mode = crate::nvidia_dlaa::AntiAliasingMode::Fxaa;
+                self.fxaa_enabled = true;
                 self.denoiser_enabled = false;
                 self.denoiser_radius = 0.8;
                 self.denoiser_normal_weight = 24.0;
@@ -208,7 +208,7 @@ impl Default for ShaderSettings {
             ior: 1.52,
             refraction_dispersion: 0.015,
             translucency_depth: 1.0,
-            aa_mode: crate::nvidia_dlaa::AntiAliasingMode::NvidiaDlaa,
+            aa_mode: crate::nvidia_dlaa::AntiAliasingMode::Fxaa,
             fxaa_enabled: true,
             denoiser_enabled: false,
             denoiser_radius: 0.8,
@@ -588,6 +588,7 @@ impl WgpuViewport {
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
             mipmap_filter: wgpu::FilterMode::Linear,
+            anisotropy_clamp: 16,
             ..Default::default()
         });
 
@@ -2584,7 +2585,7 @@ mod tests {
     #[test]
     fn test_shader_settings_defaults_and_postprocess() {
         let settings = ShaderSettings::default();
-        assert_eq!(settings.aa_mode, crate::nvidia_dlaa::AntiAliasingMode::NvidiaDlaa);
+        assert_eq!(settings.aa_mode, crate::nvidia_dlaa::AntiAliasingMode::Fxaa);
         assert!(!settings.denoiser_enabled);
         assert_eq!(settings.denoiser_radius, 0.8);
         assert!(!settings.bloom_enabled);

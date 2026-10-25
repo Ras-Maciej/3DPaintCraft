@@ -6491,30 +6491,79 @@ impl PaintcraftApp {
                                             && self.wgpu_viewport.is_some();
 
                                         if is_gpu_compute {
+                                            let (points, normals) = match (self.brush_engine.last_hit_pos, self.brush_engine.last_hit_normal) {
+                                                (Some(prev_pos), Some(prev_norm)) => {
+                                                    let delta = hit.point - prev_pos;
+                                                    if self.brush_engine.settings.follow_path && delta.length_squared() > 1e-8 {
+                                                        let n = hit.normal.normalize_or_zero();
+                                                        let tan_delta = delta - n * n.dot(delta);
+                                                        if tan_delta.length_squared() > 1e-8 {
+                                                            let up = if n.y.abs() < 0.95 { glam::Vec3::Y } else { glam::Vec3::X };
+                                                            let t_axis = n.cross(up).normalize();
+                                                            let b_axis = n.cross(t_axis);
+                                                            let u_proj = tan_delta.dot(t_axis);
+                                                            let v_proj = tan_delta.dot(b_axis);
+                                                            self.brush_engine.follow_path_angle = v_proj.atan2(u_proj) + self.brush_engine.settings.follow_path_offset;
+                                                        }
+                                                    }
+                                                    let dist = delta.length();
+                                                    let step_dist = (world_radius * self.brush_engine.settings.spacing).max(0.001);
+                                                    let steps = ((dist / step_dist).ceil() as usize).clamp(1, 16);
+
+                                                    if steps > 1 {
+                                                        let mut pts = Vec::with_capacity(steps);
+                                                        let mut nrms = Vec::with_capacity(steps);
+                                                        for i in 1..=steps {
+                                                            let t = i as f32 / steps as f32;
+                                                            pts.push(prev_pos.lerp(hit.point, t));
+                                                            nrms.push(prev_norm.lerp(hit.normal, t).normalize());
+                                                        }
+                                                        (pts, nrms)
+                                                    } else {
+                                                        (vec![hit.point], vec![hit.normal])
+                                                    }
+                                                }
+                                                _ => (vec![hit.point], vec![hit.normal]),
+                                            };
+
                                             let wgpu = self.wgpu_viewport.as_mut().unwrap();
-                                            if let Some((uniform, gpu_tris)) = self.brush_engine.build_gpu_stamp_data(
-                                                &self.project.mesh,
-                                                hit.point,
-                                                hit.normal,
-                                                world_radius,
-                                                doc_w,
-                                                doc_h,
-                                            ) {
-                                                let s_min_x = uniform.bounds_min[0].max(0) as u32;
-                                                let s_min_y = uniform.bounds_min[1].max(0) as u32;
-                                                let s_max_x = (uniform.bounds_max[0] as u32).min(doc_w.saturating_sub(1));
-                                                let s_max_y = (uniform.bounds_max[1] as u32).min(doc_h.saturating_sub(1));
+                                            let mut any_stamped = false;
 
-                                                self.gpu_stroke_dirty_rect = Some(match self.gpu_stroke_dirty_rect {
-                                                    Some((x0, y0, x1, y1)) => (x0.min(s_min_x), y0.min(s_min_y), x1.max(s_max_x), y1.max(s_max_y)),
-                                                    None => (s_min_x, s_min_y, s_max_x, s_max_y),
-                                                });
+                                            for (p_base, n_base) in points.into_iter().zip(normals.into_iter()) {
+                                                let sym_pts = self.brush_engine.get_symmetry_points(p_base, n_base);
+                                                for (p, n) in sym_pts {
+                                                    if let Some((uniform, gpu_tris)) = self.brush_engine.build_gpu_stamp_data(
+                                                        &self.project.mesh,
+                                                        p,
+                                                        n,
+                                                        world_radius,
+                                                        doc_w,
+                                                        doc_h,
+                                                    ) {
+                                                        let s_min_x = uniform.bounds_min[0].max(0) as u32;
+                                                        let s_min_y = uniform.bounds_min[1].max(0) as u32;
+                                                        let s_max_x = (uniform.bounds_max[0] as u32).min(doc_w.saturating_sub(1));
+                                                        let s_max_y = (uniform.bounds_max[1] as u32).min(doc_h.saturating_sub(1));
 
-                                                wgpu.stamp_3d_gpu(act_idx, &uniform, &gpu_tris);
+                                                        self.gpu_stroke_dirty_rect = Some(match self.gpu_stroke_dirty_rect {
+                                                            Some((x0, y0, x1, y1)) => (x0.min(s_min_x), y0.min(s_min_y), x1.max(s_max_x), y1.max(s_max_y)),
+                                                            None => (s_min_x, s_min_y, s_max_x, s_max_y),
+                                                        });
+
+                                                        wgpu.stamp_3d_gpu(act_idx, &uniform, &gpu_tris);
+                                                        any_stamped = true;
+                                                    }
+                                                }
+                                            }
+
+                                            if any_stamped {
                                                 wgpu.composite_and_update_active(&self.project, act_idx);
                                                 self.perf_metrics.texture_transfer_bytes = 0;
                                                 gpu_synced = true;
                                             }
+
+                                            self.brush_engine.last_hit_pos = Some(hit.point);
+                                            self.brush_engine.last_hit_normal = Some(hit.normal);
                                         } else {
                                             // Software fallback for specialized carrier tools (e.g. smudge, clone) or CPU mode
                                             let layer = &mut self.project.layers[act_idx];

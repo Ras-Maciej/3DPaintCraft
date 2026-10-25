@@ -102,8 +102,8 @@ fn cs_stamp(@builtin(global_invocation_id) global_id: vec3<u32>) {
                 let dist = length(pos3d - brush.hit_pos.xyz);
                 if (dist <= brush.hit_pos.w) {
                     let n_dot = dot(nrm3d, brush.hit_normal.xyz);
-                    if (n_dot >= -0.1) {
-                        let angle_w = clamp(n_dot + 0.1, 0.0, 1.0);
+                    if (n_dot >= -0.2) {
+                        let angle_w = smoothstep(-0.2, 0.25, n_dot);
                         let norm_dist = clamp(dist / brush.hit_pos.w, 0.0, 1.0);
                         let hardness = brush.hit_normal.w;
                         var falloff: f32 = 1.0;
