@@ -331,6 +331,7 @@ impl Baker {
     }
 
     /// Bake Curvature map (Convex edges = white, Crevices = black, Flat = 0.5 gray)
+    #[allow(dead_code)]
     pub fn bake_curvature(mesh: &Mesh, width: u32, height: u32) -> ScalarBuffer {
         Self::bake_curvature_with_options(mesh, width, height, &CurvatureBakeConfig::default())
     }
@@ -1273,11 +1274,13 @@ impl Baker {
 
 
     /// Bake World Position Object (WPO) / Position map normalized to [0, 1] bounding box
+    #[allow(dead_code)]
     pub fn bake_position(mesh: &Mesh, width: u32, height: u32) -> RgbaBuffer {
         Self::bake_position_with_options(mesh, width, height, &PositionBakeConfig::default())
     }
 
     /// Bake World Position Object (WPO) / Position map with configurable normalization mode
+    #[allow(dead_code)]
     pub fn bake_position_with_options(
         mesh: &Mesh,
         width: u32,
@@ -1451,6 +1454,7 @@ impl Baker {
     }
 
     /// Bake World Space Normal map encoded into RGB [0, 1]
+    #[allow(dead_code)]
     pub fn bake_world_space_normal(mesh: &Mesh, width: u32, height: u32) -> RgbaBuffer {
         Self::bake_world_space_normal_with_high_poly(
             mesh,
