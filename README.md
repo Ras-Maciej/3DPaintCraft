@@ -91,14 +91,14 @@ Pre-compiled standalone releases are available for Windows and Linux on the [Rel
 ### Linux (AppImage and Tarball)
 ```bash
 # Make the standalone AppImage executable
-chmod +x Paintcraft-v0.2.0-x86_64.AppImage
+chmod +x Paintcraft-v0.3.0-x86_64.AppImage
 
 # Launch application
-./Paintcraft-v0.2.0-x86_64.AppImage
+./Paintcraft-v0.3.0-x86_64.AppImage
 ```
 
 ### Windows (Standalone Distribution)
-1. Download `paintcraft-v0.2.0-windows-x86_64.zip`.
+1. Download `paintcraft-v0.3.0-windows-x86_64.zip`.
 2. Extract the archive to your preferred directory.
 3. Launch `paintcraft.exe`.
 

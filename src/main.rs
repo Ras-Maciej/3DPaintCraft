@@ -42,6 +42,28 @@ use std::path::{Path, PathBuf};
 fn main() -> Result<(), eframe::Error> {
     let args: Vec<String> = env::args().collect();
 
+    // Mode 0a: Version query
+    if args.iter().any(|arg| arg == "--version" || arg == "-V" || arg == "-v") {
+        println!("3D Paintcraft v{}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+
+    // Mode 0b: Help query
+    if args.iter().any(|arg| arg == "--help" || arg == "-h") {
+        println!("3D Paintcraft v{} - High-Performance PBR Texture Painting & Mesh Map Baking Suite", env!("CARGO_PKG_VERSION"));
+        println!("Usage: paintcraft [OPTIONS] [MODEL_OR_PROJECT_PATH]\n");
+        println!("Options:");
+        println!("  -h, --help                  Print help information");
+        println!("  -v, --version               Print version information");
+        println!("      --mcp                   Launch Model Context Protocol (MCP) server over stdio");
+        println!("      --export <PRESET>       Headless texture map export (UnrealEngine, Unity, BlenderGltf, Individual)");
+        println!("      --pack <PRESET|PATH>    Headless custom texture packing (unreal_orm, unity_hdrp, unity_urp, godot4, etc.)");
+        println!("      --out <DIRECTORY>       Output directory for exported textures (default: ./exports)");
+        println!("      --material <NAME>       Apply smart material before export");
+        println!("      --diagnostics           Run hardware diagnostics, GPU profile, and raycast benchmarks");
+        return Ok(());
+    }
+
     // Mode 1: AI Agent Model Context Protocol (MCP) Server
     if args.iter().any(|arg| arg == "--mcp") {
         eprintln!("[3D Paintcraft] Starting Model Context Protocol (MCP) Server...");

@@ -1,6 +1,6 @@
 [package]
 name = "paintcraft-3d"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 authors = ["Ras-Maciej <maciejjakubras@gmail.com>"]
 description = "High-performance PBR texture painting and mesh map baking suite written in pure Rust for Windows and Linux"
