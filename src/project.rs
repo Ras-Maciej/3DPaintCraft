@@ -1,7 +1,7 @@
 // 3D Paintcraft - Document, Project Model & State Management
 // Pure safe Rust
 
-use crate::baker::Baker;
+use crate::baker::{AoBakeConfig, BakeCageConfig, BakeMatchConfig, Baker, CurvatureBakeConfig, PositionBakeConfig, ThicknessBakeConfig};
 use crate::channel::{RgbaBuffer, ScalarBuffer};
 use crate::layer::{CompositeTextureSet, Layer};
 use crate::mesh::Mesh;
@@ -289,29 +289,79 @@ impl Project {
             self.world_normal_map = Some(wn);
         }
         if bake_ws_normal {
-            let wsn = Baker::bake_world_space_normal(&self.mesh, w, h);
+            let wsn = Baker::bake_world_space_normal_with_high_poly(
+                &self.mesh,
+                self.high_poly_mesh.as_ref(),
+                frontal_dist,
+                rear_dist,
+                w,
+                h,
+                &BakeMatchConfig::default(),
+                &BakeCageConfig::default(),
+            );
             self.world_space_normal_map = Some(wsn);
         }
         if bake_curvature {
-            let mut curv = Baker::bake_curvature(&self.mesh, w, h);
+            let mut curv = Baker::bake_curvature_with_options_and_high_poly(
+                &self.mesh,
+                self.high_poly_mesh.as_ref(),
+                self.world_normal_map.as_ref(),
+                frontal_dist,
+                rear_dist,
+                w,
+                h,
+                &BakeMatchConfig::default(),
+                &BakeCageConfig::default(),
+                &CurvatureBakeConfig::default(),
+            );
             if denoise && denoise_iterations > 0 {
                 Baker::denoise_scalar_buffer(&mut curv, self.world_normal_map.as_ref(), 1, 1, 0.8, 24.0);
             }
             self.curvature_map = Some(curv);
         }
         if bake_ao {
-            let mut ao = Baker::bake_ao(&self.mesh, w, h);
+            let mut ao = Baker::bake_ao_with_options_high_poly_and_distances(
+                &self.mesh,
+                self.high_poly_mesh.as_ref(),
+                frontal_dist,
+                rear_dist,
+                w,
+                h,
+                &BakeMatchConfig::default(),
+                &BakeCageConfig::default(),
+                &AoBakeConfig::default(),
+            ).unwrap_or_else(|_| Baker::bake_ao(&self.mesh, w, h));
             if denoise && denoise_iterations > 0 {
                 Baker::denoise_scalar_buffer(&mut ao, self.world_normal_map.as_ref(), denoise_iterations.min(2), 2, 1.2, 24.0);
             }
             self.ao_map = Some(ao);
         }
         if bake_position {
-            let pos = Baker::bake_position(&self.mesh, w, h);
+            let pos = Baker::bake_position_with_options_and_high_poly(
+                &self.mesh,
+                self.high_poly_mesh.as_ref(),
+                frontal_dist,
+                rear_dist,
+                w,
+                h,
+                &BakeMatchConfig::default(),
+                &BakeCageConfig::default(),
+                &PositionBakeConfig::default(),
+            );
             self.position_map = Some(pos);
         }
         if bake_thickness {
-            let mut th = Baker::bake_thickness(&self.mesh, w, h);
+            let mut th = Baker::bake_thickness_with_options_high_poly_and_distances(
+                &self.mesh,
+                self.high_poly_mesh.as_ref(),
+                frontal_dist,
+                rear_dist,
+                w,
+                h,
+                &BakeMatchConfig::default(),
+                &BakeCageConfig::default(),
+                &ThicknessBakeConfig::default(),
+            ).unwrap_or_else(|_| Baker::bake_thickness(&self.mesh, w, h));
             if denoise && denoise_iterations > 0 {
                 Baker::denoise_scalar_buffer(&mut th, self.world_normal_map.as_ref(), denoise_iterations.min(2), 2, 1.2, 24.0);
             }

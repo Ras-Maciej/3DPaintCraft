@@ -9301,7 +9301,16 @@ impl PaintcraftApp {
                     st.step_name = format!("[{}/{}] Baking World Space Normal Map...", completed_tasks + 1, total_tasks);
                     st.progress = (completed_tasks as f32) / (total_tasks as f32).max(1.0);
                 }
-                result.world_space_normal = Some(crate::baker::Baker::bake_world_space_normal(&mesh, res, res));
+                result.world_space_normal = Some(crate::baker::Baker::bake_world_space_normal_with_high_poly(
+                    &mesh,
+                    high_poly.as_ref(),
+                    frontal,
+                    rear,
+                    res,
+                    res,
+                    &match_config,
+                    &cage_config,
+                ));
                 completed_tasks += 1;
             }
 
@@ -9312,8 +9321,17 @@ impl PaintcraftApp {
                     st.step_name = format!("[{}/{}] Baking Ambient Occlusion (Raycasting)...", completed_tasks + 1, total_tasks);
                     st.progress = (completed_tasks as f32) / (total_tasks as f32).max(1.0);
                 }
-                let mut ao = crate::baker::Baker::bake_ao_with_options_and_high_poly(&mesh, high_poly.as_ref(), res, res, &cage_config, &ao_config)
-                    .unwrap_or_else(|_| crate::baker::Baker::bake_ao(&mesh, res, res));
+                let mut ao = crate::baker::Baker::bake_ao_with_options_high_poly_and_distances(
+                    &mesh,
+                    high_poly.as_ref(),
+                    frontal,
+                    rear,
+                    res,
+                    res,
+                    &match_config,
+                    &cage_config,
+                    &ao_config,
+                ).unwrap_or_else(|_| crate::baker::Baker::bake_ao(&mesh, res, res));
                 if denoise {
                     {
                         let mut st = state_clone.lock().unwrap();
@@ -9332,7 +9350,18 @@ impl PaintcraftApp {
                     st.step_name = format!("[{}/{}] Baking Curvature Map...", completed_tasks + 1, total_tasks);
                     st.progress = (completed_tasks as f32) / (total_tasks as f32).max(1.0);
                 }
-                let mut curv = crate::baker::Baker::bake_curvature_with_options(&mesh, res, res, &curvature_config);
+                let mut curv = crate::baker::Baker::bake_curvature_with_options_and_high_poly(
+                    &mesh,
+                    high_poly.as_ref(),
+                    result.tangent_normal.as_ref(),
+                    frontal,
+                    rear,
+                    res,
+                    res,
+                    &match_config,
+                    &cage_config,
+                    &curvature_config,
+                );
                 if denoise {
                     {
                         let mut st = state_clone.lock().unwrap();
@@ -9351,7 +9380,17 @@ impl PaintcraftApp {
                     st.step_name = format!("[{}/{}] Baking World Position WPO...", completed_tasks + 1, total_tasks);
                     st.progress = (completed_tasks as f32) / (total_tasks as f32).max(1.0);
                 }
-                result.position = Some(crate::baker::Baker::bake_position_with_options(&mesh, res, res, &position_config));
+                result.position = Some(crate::baker::Baker::bake_position_with_options_and_high_poly(
+                    &mesh,
+                    high_poly.as_ref(),
+                    frontal,
+                    rear,
+                    res,
+                    res,
+                    &match_config,
+                    &cage_config,
+                    &position_config,
+                ));
                 completed_tasks += 1;
             }
 
@@ -9362,8 +9401,17 @@ impl PaintcraftApp {
                     st.step_name = format!("[{}/{}] Baking Thickness Map...", completed_tasks + 1, total_tasks);
                     st.progress = (completed_tasks as f32) / (total_tasks as f32).max(1.0);
                 }
-                let mut th = crate::baker::Baker::bake_thickness_with_options_and_high_poly(&mesh, high_poly.as_ref(), res, res, &cage_config, &thickness_config)
-                    .unwrap_or_else(|_| crate::baker::Baker::bake_thickness(&mesh, res, res));
+                let mut th = crate::baker::Baker::bake_thickness_with_options_high_poly_and_distances(
+                    &mesh,
+                    high_poly.as_ref(),
+                    frontal,
+                    rear,
+                    res,
+                    res,
+                    &match_config,
+                    &cage_config,
+                    &thickness_config,
+                ).unwrap_or_else(|_| crate::baker::Baker::bake_thickness(&mesh, res, res));
                 if denoise {
                     crate::baker::Baker::denoise_scalar_buffer(&mut th, result.world_space_normal.as_ref(), 1, 2, 1.2, 24.0);
                 }

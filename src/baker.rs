@@ -295,6 +295,41 @@ impl Baker {
         }
     }
 
+    /// Precomputes allowed high-poly triangle indices for each low-poly submesh according to BakeMatchConfig
+    fn compute_submesh_allowed_hp_tris(
+        mesh: &Mesh,
+        high_poly: Option<&Mesh>,
+        match_config: &BakeMatchConfig,
+    ) -> Vec<Option<HashSet<usize>>> {
+        if match_config.mode == BakeMatchMode::ByMeshName {
+            if let Some(hp) = high_poly {
+                mesh.submeshes.iter().map(|sm_low| {
+                    let base_low = strip_mesh_suffix(&sm_low.material_name, &match_config.low_suffix);
+                    let mut matched_tris = HashSet::new();
+                    for sm_hp in &hp.submeshes {
+                        let base_hp = strip_mesh_suffix(&sm_hp.material_name, &match_config.high_suffix);
+                        if base_low.eq_ignore_ascii_case(&base_hp) {
+                            let tri_start = sm_hp.start_index / 3;
+                            let tri_count = sm_hp.index_count / 3;
+                            for t in tri_start..(tri_start + tri_count) {
+                                matched_tris.insert(t);
+                            }
+                        }
+                    }
+                    if !matched_tris.is_empty() {
+                        Some(matched_tris)
+                    } else {
+                        None
+                    }
+                }).collect()
+            } else {
+                vec![None; mesh.submeshes.len()]
+            }
+        } else {
+            vec![None; mesh.submeshes.len()]
+        }
+    }
+
     /// Bake Curvature map (Convex edges = white, Crevices = black, Flat = 0.5 gray)
     pub fn bake_curvature(mesh: &Mesh, width: u32, height: u32) -> ScalarBuffer {
         Self::bake_curvature_with_options(mesh, width, height, &CurvatureBakeConfig::default())
@@ -522,6 +557,119 @@ impl Baker {
         current_buf
     }
 
+    /// Compute high-definition Curvature from Tangent Space Normal map using 2D divergence filtering (Sobel operators)
+    pub fn compute_curvature_from_normal_map(
+        normal_map: &RgbaBuffer,
+        intensity: f32,
+        contrast: f32,
+    ) -> ScalarBuffer {
+        let width = normal_map.width;
+        let height = normal_map.height;
+        let mut buffer = ScalarBuffer::new(width, height, 0.5);
+        if width == 0 || height == 0 {
+            return buffer;
+        }
+
+        let w = width as i32;
+        let h = height as i32;
+
+        buffer.data
+            .par_chunks_exact_mut(width as usize)
+            .enumerate()
+            .for_each(|(y_idx, row)| {
+                let y = y_idx as i32;
+                for x in 0..w {
+                    let get_norm = |px: i32, py: i32| -> Vec3 {
+                        let cx = px.clamp(0, w - 1) as u32;
+                        let cy = py.clamp(0, h - 1) as u32;
+                        let p = normal_map.get_pixel(cx, cy);
+                        Vec3::new(p.x * 2.0 - 1.0, p.y * 2.0 - 1.0, p.z * 2.0 - 1.0).normalize_or_zero()
+                    };
+
+                    let n_tl = get_norm(x - 1, y - 1);
+                    let n_ml = get_norm(x - 1, y);
+                    let n_bl = get_norm(x - 1, y + 1);
+
+                    let n_tr = get_norm(x + 1, y - 1);
+                    let n_mr = get_norm(x + 1, y);
+                    let n_br = get_norm(x + 1, y + 1);
+
+                    let n_tc = get_norm(x, y - 1);
+                    let n_bc = get_norm(x, y + 1);
+
+                    let d_nx_dx = ((n_tr.x + 2.0 * n_mr.x + n_br.x) - (n_tl.x + 2.0 * n_ml.x + n_bl.x)) / 8.0;
+                    let d_ny_dy = ((n_bl.y + 2.0 * n_bc.y + n_br.y) - (n_tl.y + 2.0 * n_tc.y + n_tr.y)) / 8.0;
+
+                    let div = d_nx_dx + d_ny_dy;
+                    let mut c = 0.5 + div * intensity * 0.5;
+
+                    if (contrast - 1.0).abs() > 0.01 {
+                        c = ((c - 0.5) * contrast + 0.5).clamp(0.0, 1.0);
+                    } else {
+                        c = c.clamp(0.0, 1.0);
+                    }
+
+                    row[x as usize] = c;
+                }
+            });
+
+        buffer
+    }
+
+    /// Bake Curvature map with high-poly support: blends low-poly macro vertex curvature with high-poly micro curvature derived from normals
+    pub fn bake_curvature_with_options_and_high_poly(
+        mesh: &Mesh,
+        high_poly: Option<&Mesh>,
+        normal_map: Option<&RgbaBuffer>,
+        frontal_dist: f32,
+        rear_dist: f32,
+        width: u32,
+        height: u32,
+        match_config: &BakeMatchConfig,
+        cage_config: &BakeCageConfig,
+        config: &CurvatureBakeConfig,
+    ) -> ScalarBuffer {
+        let base_curv = Self::bake_curvature_with_options(mesh, width, height, config);
+
+        let hp_norm_buf;
+        let nm = if let Some(nm) = normal_map {
+            Some(nm)
+        } else if let Some(hp) = high_poly {
+            hp_norm_buf = Self::bake_tangent_normals_with_options(
+                mesh,
+                Some(hp),
+                frontal_dist,
+                rear_dist,
+                width,
+                height,
+                match_config,
+                cage_config,
+                false,
+            ).ok();
+            hp_norm_buf.as_ref()
+        } else {
+            None
+        };
+
+        if let Some(nm) = nm {
+            let hp_curv = Self::compute_curvature_from_normal_map(nm, config.intensity, config.contrast);
+            let mut blended = ScalarBuffer::new(width, height, 0.5);
+            for i in 0..(width * height) as usize {
+                let base = base_curv.data[i];
+                let hp_c = hp_curv.data[i];
+                let delta = hp_c - 0.5;
+                blended.data[i] = (base + delta).clamp(0.0, 1.0);
+            }
+
+            if config.blur_passes > 0 {
+                Self::blur_scalar(&mut blended, config.blur_passes);
+            }
+            blended
+        } else {
+            base_curv
+        }
+    }
+
     /// Apply Separable Gaussian Blur to a scalar buffer
     pub fn blur_scalar(buffer: &mut ScalarBuffer, passes: usize) {
         if passes == 0 {
@@ -618,6 +766,25 @@ impl Baker {
         let ray_offset = (diag * ao_config.ray_bias).max(0.001);
         let min_self_dist = (ray_offset * 3.75).max(0.004);
 
+        let fallback_hp_bvh;
+        let hp_bvh = if let Some(hp) = high_poly {
+            if hp.bvh.nodes.is_empty() {
+                fallback_hp_bvh = Some(Bvh::build(&hp.vertices, &hp.indices));
+                fallback_hp_bvh.as_ref()
+            } else {
+                Some(&hp.bvh)
+            }
+        } else {
+            None
+        };
+        let fallback_mesh_bvh;
+        let mesh_bvh = if mesh.bvh.nodes.is_empty() {
+            fallback_mesh_bvh = Some(Bvh::build(&mesh.vertices, &mesh.indices));
+            fallback_mesh_bvh.as_ref().unwrap()
+        } else {
+            &mesh.bvh
+        };
+
         // Rayon parallel computation of vertex AO with smoothed normals and cage envelope
         let vert_ao: Vec<f32> = mesh.vertices.par_iter().enumerate().map(|(vi, v)| {
             let normal = if v.normal.length_squared() > 1e-4 {
@@ -644,10 +811,10 @@ impl Baker {
                     origin,
                     direction: world_dir,
                 };
-                let hit_opt = if let Some(hp) = high_poly {
-                    hp.raycast_dist(&ray, max_dist)
+                let hit_opt = if let (Some(hp), Some(bvh)) = (high_poly, hp_bvh) {
+                    bvh.raycast_filtered(&ray, &hp.vertices, &hp.indices, max_dist, None)
                 } else {
-                    mesh.raycast_dist(&ray, max_dist)
+                    mesh_bvh.raycast_filtered(&ray, &mesh.vertices, &mesh.indices, max_dist, None)
                 };
                 if let Some(hit) = hit_opt {
                     // Only count valid occlusions:
@@ -692,12 +859,15 @@ impl Baker {
         Self::bake_ao_with_options_and_high_poly(mesh, None, width, height, cage_config, ao_config)
     }
 
-    /// Bake Ambient Occlusion map against optional high-poly mesh with customizable samples, distances, bias, spread and contrast
-    pub fn bake_ao_with_options_and_high_poly(
+    /// Bake Ambient Occlusion map with high-poly support and custom ray distances using texel-based raycasting
+    pub fn bake_ao_with_options_high_poly_and_distances(
         mesh: &Mesh,
         high_poly: Option<&Mesh>,
+        frontal_dist: f32,
+        rear_dist: f32,
         width: u32,
         height: u32,
+        match_config: &BakeMatchConfig,
         cage_config: &BakeCageConfig,
         ao_config: &AoBakeConfig,
     ) -> Result<ScalarBuffer, String> {
@@ -707,28 +877,213 @@ impl Baker {
             return Ok(buffer);
         }
 
-        let vert_ao = Self::compute_vertex_ao_with_high_poly(mesh, high_poly, cage_config, ao_config)?;
+        let hp = match high_poly {
+            Some(hp) => hp,
+            None => {
+                let vert_ao = Self::compute_vertex_ao_with_high_poly(mesh, None, cage_config, ao_config)?;
+                let mut written_mask = vec![false; (width * height) as usize];
+                for t in 0..tri_count {
+                    let i0 = mesh.indices[t * 3] as usize;
+                    let i1 = mesh.indices[t * 3 + 1] as usize;
+                    let i2 = mesh.indices[t * 3 + 2] as usize;
+                    let uv0 = mesh.vertices[i0].uv;
+                    let uv1 = mesh.vertices[i1].uv;
+                    let uv2 = mesh.vertices[i2].uv;
+                    Self::rasterize_scalar_triangle_masked(
+                        &mut buffer,
+                        &mut written_mask,
+                        uv0, uv1, uv2,
+                        vert_ao[i0], vert_ao[i1], vert_ao[i2],
+                    );
+                }
+                Self::dilate_scalar(&mut buffer, &mut written_mask, 16);
+                return Ok(buffer);
+            }
+        };
 
-        let mut written_mask = vec![false; (width * height) as usize];
+        let cage_vertices = Self::compute_cage_vertices(mesh, cage_config)?;
+        let has_cage = cage_vertices.is_some();
+
+        let fallback_bvh;
+        let hp_bvh = if hp.bvh.nodes.is_empty() {
+            fallback_bvh = Bvh::build(&hp.vertices, &hp.indices);
+            &fallback_bvh
+        } else {
+            &hp.bvh
+        };
+
+        let mut pos_buf = vec![None; (width * height) as usize];
+        let mut norm_buf = vec![None; (width * height) as usize];
+        let mut tan_buf = vec![None; (width * height) as usize];
+        let mut tri_buf = vec![None; (width * height) as usize];
+        let mut cage_buf = if has_cage {
+            Some(vec![None; (width * height) as usize])
+        } else {
+            None
+        };
+
         for t in 0..tri_count {
             let i0 = mesh.indices[t * 3] as usize;
             let i1 = mesh.indices[t * 3 + 1] as usize;
             let i2 = mesh.indices[t * 3 + 2] as usize;
 
-            let uv0 = mesh.vertices[i0].uv;
-            let uv1 = mesh.vertices[i1].uv;
-            let uv2 = mesh.vertices[i2].uv;
+            let v0 = &mesh.vertices[i0];
+            let v1 = &mesh.vertices[i1];
+            let v2 = &mesh.vertices[i2];
 
-            Self::rasterize_scalar_triangle_masked(
-                &mut buffer,
-                &mut written_mask,
-                uv0, uv1, uv2,
-                vert_ao[i0], vert_ao[i1], vert_ao[i2],
+            let cage_pts = cage_vertices.as_ref().map(|cv| (cv[i0], cv[i1], cv[i2]));
+
+            Self::rasterize_pos_norm_tan_triangle(
+                &mut pos_buf,
+                &mut norm_buf,
+                &mut tan_buf,
+                Some(&mut tri_buf),
+                cage_buf.as_deref_mut(),
+                t,
+                width,
+                height,
+                v0.uv, v1.uv, v2.uv,
+                v0.position, v1.position, v2.position,
+                v0.normal, v1.normal, v2.normal,
+                v0.tangent, v1.tangent, v2.tangent,
+                cage_pts,
             );
+        }
+
+        let sample_count = ao_config.samples.clamp(4, 256);
+        let mut hemisphere_samples = Vec::with_capacity(sample_count);
+        for i in 0..sample_count {
+            let u1 = (i as f32 + 0.5) / sample_count as f32;
+            let u2 = (i as f32 * 0.6180339887).fract();
+            let cos_theta = (1.0 - u1).sqrt();
+            let sin_theta = (1.0 - cos_theta * cos_theta).max(0.0).sqrt();
+            let phi = u2 * 2.0 * std::f32::consts::PI;
+            let dir = Vec3::new(sin_theta * phi.cos(), sin_theta * phi.sin(), cos_theta);
+            hemisphere_samples.push(dir);
+        }
+
+        let extents = hp.aabb_max - hp.aabb_min;
+        let diag = extents.length().max(0.01);
+        let max_dist = (diag * ao_config.max_distance).max(0.01);
+        let ray_offset = (diag * ao_config.ray_bias).max(0.001);
+        let min_self_dist = (ray_offset * 3.75).max(0.004);
+
+        let submesh_allowed_hp_tris = Self::compute_submesh_allowed_hp_tris(mesh, Some(hp), match_config);
+        let submesh_allowed = &submesh_allowed_hp_tris;
+        let cage_ref = cage_buf.as_ref();
+        let p_buf = &pos_buf;
+        let n_buf = &norm_buf;
+        let tr_buf = &tri_buf;
+
+        buffer.data
+            .par_chunks_exact_mut(width as usize)
+            .enumerate()
+            .for_each(|(y_idx, row)| {
+                let y = y_idx as u32;
+                for x in 0..width {
+                    let idx = (y * width + x) as usize;
+                    if let (Some(pos), Some(norm)) = (p_buf[idx], n_buf[idx]) {
+                        let (ray_orig, ray_dir, max_ray_dist) = if let Some(cage_pos) = cage_ref.and_then(|cb| cb[idx]) {
+                            let to_mesh = pos - cage_pos;
+                            let dist_to_surface = to_mesh.length();
+                            if dist_to_surface > 1e-6 {
+                                let dir = to_mesh / dist_to_surface;
+                                (cage_pos, dir, dist_to_surface + rear_dist)
+                            } else {
+                                (pos + norm * frontal_dist, -norm, frontal_dist + rear_dist)
+                            }
+                        } else {
+                            (pos + norm * frontal_dist, -norm, frontal_dist + rear_dist)
+                        };
+
+                        let allowed = if match_config.mode == BakeMatchMode::ByMeshName {
+                            tr_buf[idx].and_then(|t| mesh.submesh_index_for_triangle(t))
+                                .and_then(|sm_idx| submesh_allowed.get(sm_idx))
+                                .and_then(|opt| opt.as_ref())
+                        } else {
+                            None
+                        };
+
+                        let proj_ray = Ray { origin: ray_orig, direction: ray_dir };
+                        let (surf_pos, surf_norm) = if let Some(hit) = hp_bvh.raycast_filtered(&proj_ray, &hp.vertices, &hp.indices, max_ray_dist, allowed) {
+                            (hit.point, hit.normal.normalize_or_zero())
+                        } else {
+                            (pos, norm.normalize_or_zero())
+                        };
+
+                        let normal = if surf_norm.length_squared() > 1e-4 {
+                            surf_norm.normalize()
+                        } else {
+                            Vec3::Y
+                        };
+
+                        let up = if normal.y.abs() < 0.95 { Vec3::Y } else { Vec3::X };
+                        let tangent = normal.cross(up).normalize();
+                        let bitangent = normal.cross(tangent);
+
+                        let origin = surf_pos + normal * ray_offset;
+                        let mut unoccluded = 0.0f32;
+
+                        for sample in &hemisphere_samples {
+                            let world_dir = (tangent * sample.x + bitangent * sample.y + normal * sample.z).normalize();
+                            let ray = Ray { origin, direction: world_dir };
+                            if let Some(hit) = hp_bvh.raycast_filtered(&ray, &hp.vertices, &hp.indices, max_dist, None) {
+                                let is_front_facing = hit.normal.dot(world_dir) < -0.05;
+                                let is_neighbor_facet = hit.t < min_self_dist && hit.normal.dot(normal) > 0.4;
+
+                                if is_front_facing && !is_neighbor_facet && hit.t > 0.002 && hit.t < max_dist {
+                                    let raw_occ = (1.0 - hit.t / max_dist).clamp(0.0, 1.0);
+                                    let shaped_occ = if (ao_config.spread - 1.0).abs() > 0.01 {
+                                        raw_occ.powf(ao_config.spread.max(0.05))
+                                    } else {
+                                        raw_occ
+                                    };
+                                    let occ = (shaped_occ * 0.85 * ao_config.contrast).clamp(0.0, 1.0);
+                                    unoccluded += 1.0 - occ;
+                                } else {
+                                    unoccluded += 1.0;
+                                }
+                            } else {
+                                unoccluded += 1.0;
+                            }
+                        }
+
+                        row[x as usize] = (unoccluded / sample_count as f32).clamp(0.05, 1.0);
+                    }
+                }
+            });
+
+        let mut written_mask = vec![false; (width * height) as usize];
+        for idx in 0..(width * height) as usize {
+            if pos_buf[idx].is_some() {
+                written_mask[idx] = true;
+            }
         }
 
         Self::dilate_scalar(&mut buffer, &mut written_mask, 16);
         Ok(buffer)
+    }
+
+    /// Bake Ambient Occlusion map against optional high-poly mesh with customizable samples, distances, bias, spread and contrast
+    pub fn bake_ao_with_options_and_high_poly(
+        mesh: &Mesh,
+        high_poly: Option<&Mesh>,
+        width: u32,
+        height: u32,
+        cage_config: &BakeCageConfig,
+        ao_config: &AoBakeConfig,
+    ) -> Result<ScalarBuffer, String> {
+        Self::bake_ao_with_options_high_poly_and_distances(
+            mesh,
+            high_poly,
+            0.1,
+            0.1,
+            width,
+            height,
+            &BakeMatchConfig::default(),
+            cage_config,
+            ao_config,
+        )
     }
 
     /// Bake Tangent Space Normal map
@@ -845,33 +1200,7 @@ impl Baker {
         }
 
         // Precompute allowed high-poly triangle sets per low-poly submesh for ByMeshName matching
-        let submesh_allowed_hp_tris: Vec<Option<HashSet<usize>>> = if match_config.mode == BakeMatchMode::ByMeshName {
-            if let Some(hp) = high_poly {
-                mesh.submeshes.iter().map(|sm_low| {
-                    let base_low = strip_mesh_suffix(&sm_low.material_name, &match_config.low_suffix);
-                    let mut matched_tris = HashSet::new();
-                    for sm_hp in &hp.submeshes {
-                        let base_hp = strip_mesh_suffix(&sm_hp.material_name, &match_config.high_suffix);
-                        if base_low.eq_ignore_ascii_case(&base_hp) {
-                            let tri_start = sm_hp.start_index / 3;
-                            let tri_count = sm_hp.index_count / 3;
-                            for t in tri_start..(tri_start + tri_count) {
-                                matched_tris.insert(t);
-                            }
-                        }
-                    }
-                    if !matched_tris.is_empty() {
-                        Some(matched_tris)
-                    } else {
-                        None
-                    }
-                }).collect()
-            } else {
-                vec![None; mesh.submeshes.len()]
-            }
-        } else {
-            vec![None; mesh.submeshes.len()]
-        };
+        let submesh_allowed_hp_tris = Self::compute_submesh_allowed_hp_tris(mesh, high_poly, match_config);
 
         // Raycast
         let cage_ref = cage_buf.as_ref();
@@ -955,8 +1284,36 @@ impl Baker {
         height: u32,
         config: &PositionBakeConfig,
     ) -> RgbaBuffer {
+        Self::bake_position_with_options_and_high_poly(
+            mesh,
+            None,
+            0.1,
+            0.1,
+            width,
+            height,
+            &BakeMatchConfig::default(),
+            &BakeCageConfig::default(),
+            config,
+        )
+    }
+
+    /// Bake World Position Object (WPO) / Position map with high-poly support, cage envelope, and ByMeshName matching
+    pub fn bake_position_with_options_and_high_poly(
+        mesh: &Mesh,
+        high_poly: Option<&Mesh>,
+        frontal_dist: f32,
+        rear_dist: f32,
+        width: u32,
+        height: u32,
+        match_config: &BakeMatchConfig,
+        cage_config: &BakeCageConfig,
+        config: &PositionBakeConfig,
+    ) -> RgbaBuffer {
         let mut buffer = RgbaBuffer::new(width, height, Vec4::new(0.5, 0.5, 0.5, 1.0));
         let tri_count = mesh.indices.len() / 3;
+        if tri_count == 0 || mesh.vertices.is_empty() {
+            return buffer;
+        }
 
         let mut min_bound = Vec3::splat(f32::MAX);
         let mut max_bound = Vec3::splat(f32::MIN);
@@ -964,11 +1321,38 @@ impl Baker {
             min_bound = min_bound.min(v.position);
             max_bound = max_bound.max(v.position);
         }
+        if let Some(hp) = high_poly {
+            for v in &hp.vertices {
+                min_bound = min_bound.min(v.position);
+                max_bound = max_bound.max(v.position);
+            }
+        }
         let extents = (max_bound - min_bound).max(Vec3::splat(1e-5));
+
+        let cage_vertices = Self::compute_cage_vertices(mesh, cage_config).unwrap_or(None);
+        let has_cage = cage_vertices.is_some();
+
+        let fallback_bvh;
+        let hp_bvh = if let Some(hp) = high_poly {
+            if hp.bvh.nodes.is_empty() {
+                fallback_bvh = Some(Bvh::build(&hp.vertices, &hp.indices));
+                fallback_bvh.as_ref()
+            } else {
+                Some(&hp.bvh)
+            }
+        } else {
+            None
+        };
 
         let mut pos_buf = vec![None; (width * height) as usize];
         let mut norm_buf = vec![None; (width * height) as usize];
         let mut tan_buf = vec![None; (width * height) as usize];
+        let mut tri_buf = vec![None; (width * height) as usize];
+        let mut cage_buf = if has_cage {
+            Some(vec![None; (width * height) as usize])
+        } else {
+            None
+        };
 
         for t in 0..tri_count {
             let i0 = mesh.indices[t * 3] as usize;
@@ -979,12 +1363,14 @@ impl Baker {
             let v1 = &mesh.vertices[i1];
             let v2 = &mesh.vertices[i2];
 
+            let cage_pts = cage_vertices.as_ref().map(|cv| (cv[i0], cv[i1], cv[i2]));
+
             Self::rasterize_pos_norm_tan_triangle(
                 &mut pos_buf,
                 &mut norm_buf,
                 &mut tan_buf,
-                None,
-                None,
+                Some(&mut tri_buf),
+                cage_buf.as_deref_mut(),
                 t,
                 width,
                 height,
@@ -992,9 +1378,16 @@ impl Baker {
                 v0.position, v1.position, v2.position,
                 v0.normal, v1.normal, v2.normal,
                 v0.tangent, v1.tangent, v2.tangent,
-                None,
+                cage_pts,
             );
         }
+
+        let submesh_allowed_hp_tris = Self::compute_submesh_allowed_hp_tris(mesh, high_poly, match_config);
+        let submesh_allowed = &submesh_allowed_hp_tris;
+        let cage_ref = cage_buf.as_ref();
+        let p_buf = &pos_buf;
+        let n_buf = &norm_buf;
+        let tr_buf = &tri_buf;
 
         buffer.data
             .par_chunks_exact_mut(width as usize)
@@ -1003,13 +1396,49 @@ impl Baker {
                 let y = y_idx as u32;
                 for x in 0..width {
                     let idx = (y * width + x) as usize;
-                    if let Some(pos) = pos_buf[idx] {
+                    if let (Some(pos), Some(norm)) = (p_buf[idx], n_buf[idx]) {
+                        let sample_pos = if let (Some(hp), Some(bvh)) = (high_poly, hp_bvh) {
+                            let (ray_orig, ray_dir, max_ray_dist) = if let Some(cage_pos) = cage_ref.and_then(|cb| cb[idx]) {
+                                let to_mesh = pos - cage_pos;
+                                let dist_to_surface = to_mesh.length();
+                                if dist_to_surface > 1e-6 {
+                                    let dir = to_mesh / dist_to_surface;
+                                    (cage_pos, dir, dist_to_surface + rear_dist)
+                                } else {
+                                    (pos + norm * frontal_dist, -norm, frontal_dist + rear_dist)
+                                }
+                            } else {
+                                (pos + norm * frontal_dist, -norm, frontal_dist + rear_dist)
+                            };
+
+                            let allowed = if match_config.mode == BakeMatchMode::ByMeshName {
+                                tr_buf[idx].and_then(|t| mesh.submesh_index_for_triangle(t))
+                                    .and_then(|sm_idx| submesh_allowed.get(sm_idx))
+                                    .and_then(|opt| opt.as_ref())
+                            } else {
+                                None
+                            };
+
+                            let ray = Ray {
+                                origin: ray_orig,
+                                direction: ray_dir,
+                            };
+
+                            if let Some(hit) = bvh.raycast_filtered(&ray, &hp.vertices, &hp.indices, max_ray_dist, allowed) {
+                                hit.point
+                            } else {
+                                pos
+                            }
+                        } else {
+                            pos
+                        };
+
                         let norm_pos = match config.mode {
                             PositionNormalizationMode::BoundingBox => {
-                                ((pos - min_bound) / extents).clamp(Vec3::ZERO, Vec3::ONE)
+                                ((sample_pos - min_bound) / extents).clamp(Vec3::ZERO, Vec3::ONE)
                             }
                             PositionNormalizationMode::WorldUnits => {
-                                (pos * 0.5 + Vec3::splat(0.5)).clamp(Vec3::ZERO, Vec3::ONE)
+                                (sample_pos * 0.5 + Vec3::splat(0.5)).clamp(Vec3::ZERO, Vec3::ONE)
                             }
                         };
                         row[x as usize] = Vec4::new(norm_pos.x, norm_pos.y, norm_pos.z, 1.0);
@@ -1023,12 +1452,59 @@ impl Baker {
 
     /// Bake World Space Normal map encoded into RGB [0, 1]
     pub fn bake_world_space_normal(mesh: &Mesh, width: u32, height: u32) -> RgbaBuffer {
+        Self::bake_world_space_normal_with_high_poly(
+            mesh,
+            None,
+            0.1,
+            0.1,
+            width,
+            height,
+            &BakeMatchConfig::default(),
+            &BakeCageConfig::default(),
+        )
+    }
+
+    /// Bake World Space Normal map with high-poly support, cage envelope, and ByMeshName matching
+    pub fn bake_world_space_normal_with_high_poly(
+        mesh: &Mesh,
+        high_poly: Option<&Mesh>,
+        frontal_dist: f32,
+        rear_dist: f32,
+        width: u32,
+        height: u32,
+        match_config: &BakeMatchConfig,
+        cage_config: &BakeCageConfig,
+    ) -> RgbaBuffer {
         let mut buffer = RgbaBuffer::new(width, height, Vec4::new(0.5, 0.5, 1.0, 1.0));
         let tri_count = mesh.indices.len() / 3;
+        if tri_count == 0 || mesh.vertices.is_empty() {
+            return buffer;
+        }
+
+        let cage_vertices = Self::compute_cage_vertices(mesh, cage_config).unwrap_or(None);
+        let has_cage = cage_vertices.is_some();
+
+        let fallback_bvh;
+        let hp_bvh = if let Some(hp) = high_poly {
+            if hp.bvh.nodes.is_empty() {
+                fallback_bvh = Some(Bvh::build(&hp.vertices, &hp.indices));
+                fallback_bvh.as_ref()
+            } else {
+                Some(&hp.bvh)
+            }
+        } else {
+            None
+        };
 
         let mut pos_buf = vec![None; (width * height) as usize];
         let mut norm_buf = vec![None; (width * height) as usize];
         let mut tan_buf = vec![None; (width * height) as usize];
+        let mut tri_buf = vec![None; (width * height) as usize];
+        let mut cage_buf = if has_cage {
+            Some(vec![None; (width * height) as usize])
+        } else {
+            None
+        };
 
         for t in 0..tri_count {
             let i0 = mesh.indices[t * 3] as usize;
@@ -1039,12 +1515,14 @@ impl Baker {
             let v1 = &mesh.vertices[i1];
             let v2 = &mesh.vertices[i2];
 
+            let cage_pts = cage_vertices.as_ref().map(|cv| (cv[i0], cv[i1], cv[i2]));
+
             Self::rasterize_pos_norm_tan_triangle(
                 &mut pos_buf,
                 &mut norm_buf,
                 &mut tan_buf,
-                None,
-                None,
+                Some(&mut tri_buf),
+                cage_buf.as_deref_mut(),
                 t,
                 width,
                 height,
@@ -1052,9 +1530,16 @@ impl Baker {
                 v0.position, v1.position, v2.position,
                 v0.normal, v1.normal, v2.normal,
                 v0.tangent, v1.tangent, v2.tangent,
-                None,
+                cage_pts,
             );
         }
+
+        let submesh_allowed_hp_tris = Self::compute_submesh_allowed_hp_tris(mesh, high_poly, match_config);
+        let submesh_allowed = &submesh_allowed_hp_tris;
+        let cage_ref = cage_buf.as_ref();
+        let p_buf = &pos_buf;
+        let n_buf = &norm_buf;
+        let tr_buf = &tri_buf;
 
         buffer.data
             .par_chunks_exact_mut(width as usize)
@@ -1063,7 +1548,44 @@ impl Baker {
                 let y = y_idx as u32;
                 for x in 0..width {
                     let idx = (y * width + x) as usize;
-                    if let Some(norm) = norm_buf[idx] {
+                    if let (Some(pos), Some(norm)) = (p_buf[idx], n_buf[idx]) {
+                        if let (Some(hp), Some(bvh)) = (high_poly, hp_bvh) {
+                            let (ray_orig, ray_dir, max_ray_dist) = if let Some(cage_pos) = cage_ref.and_then(|cb| cb[idx]) {
+                                let to_mesh = pos - cage_pos;
+                                let dist_to_surface = to_mesh.length();
+                                if dist_to_surface > 1e-6 {
+                                    let dir = to_mesh / dist_to_surface;
+                                    (cage_pos, dir, dist_to_surface + rear_dist)
+                                } else {
+                                    (pos + norm * frontal_dist, -norm, frontal_dist + rear_dist)
+                                }
+                            } else {
+                                (pos + norm * frontal_dist, -norm, frontal_dist + rear_dist)
+                            };
+
+                            let allowed = if match_config.mode == BakeMatchMode::ByMeshName {
+                                tr_buf[idx].and_then(|t| mesh.submesh_index_for_triangle(t))
+                                    .and_then(|sm_idx| submesh_allowed.get(sm_idx))
+                                    .and_then(|opt| opt.as_ref())
+                            } else {
+                                None
+                            };
+
+                            let ray = Ray {
+                                origin: ray_orig,
+                                direction: ray_dir,
+                            };
+
+                            if let Some(hit) = bvh.raycast_filtered(&ray, &hp.vertices, &hp.indices, max_ray_dist, allowed) {
+                                let hp_norm = hit.normal.normalize_or_zero();
+                                if hp_norm.length_squared() > 1e-4 {
+                                    row[x as usize] = Vec4::new(hp_norm.x * 0.5 + 0.5, hp_norm.y * 0.5 + 0.5, hp_norm.z * 0.5 + 0.5, 1.0);
+                                    continue;
+                                }
+                            }
+                        }
+
+                        // Fallback to low-poly interpolated normal
                         let n = norm.normalize_or_zero();
                         row[x as usize] = Vec4::new(n.x * 0.5 + 0.5, n.y * 0.5 + 0.5, n.z * 0.5 + 0.5, 1.0);
                     }
@@ -1248,6 +1770,25 @@ impl Baker {
         let ray_offset = (diag * config.ray_bias).max(0.001);
         let min_self_dist = (ray_offset * 2.0).max(0.003);
 
+        let fallback_hp_bvh;
+        let hp_bvh = if let Some(hp) = high_poly {
+            if hp.bvh.nodes.is_empty() {
+                fallback_hp_bvh = Some(Bvh::build(&hp.vertices, &hp.indices));
+                fallback_hp_bvh.as_ref()
+            } else {
+                Some(&hp.bvh)
+            }
+        } else {
+            None
+        };
+        let fallback_mesh_bvh;
+        let mesh_bvh = if mesh.bvh.nodes.is_empty() {
+            fallback_mesh_bvh = Some(Bvh::build(&mesh.vertices, &mesh.indices));
+            fallback_mesh_bvh.as_ref().unwrap()
+        } else {
+            &mesh.bvh
+        };
+
         // Rayon parallel computation of vertex thickness
         let vert_thickness: Vec<f32> = mesh.vertices.par_iter().enumerate().map(|(vi, v)| {
             let normal = if v.normal.length_squared() > 1e-4 {
@@ -1279,10 +1820,10 @@ impl Baker {
                     direction: inward_dir,
                 };
 
-                let hit_opt = if let Some(hp) = high_poly {
-                    hp.raycast_dist(&ray, max_dist)
+                let hit_opt = if let (Some(hp), Some(bvh)) = (high_poly, hp_bvh) {
+                    bvh.raycast_filtered(&ray, &hp.vertices, &hp.indices, max_dist, None)
                 } else {
-                    mesh.raycast_dist(&ray, max_dist)
+                    mesh_bvh.raycast_filtered(&ray, &mesh.vertices, &mesh.indices, max_dist, None)
                 };
 
                 if let Some(hit) = hit_opt {
@@ -1332,6 +1873,31 @@ impl Baker {
         cage_config: &BakeCageConfig,
         config: &ThicknessBakeConfig,
     ) -> Result<ScalarBuffer, String> {
+        Self::bake_thickness_with_options_high_poly_and_distances(
+            mesh,
+            high_poly,
+            0.1,
+            0.1,
+            width,
+            height,
+            &BakeMatchConfig::default(),
+            cage_config,
+            config,
+        )
+    }
+
+    /// Bake Surface Thickness map with customizable ray distances, matching mode, and high-poly raycasting
+    pub fn bake_thickness_with_options_high_poly_and_distances(
+        mesh: &Mesh,
+        high_poly: Option<&Mesh>,
+        frontal_dist: f32,
+        rear_dist: f32,
+        width: u32,
+        height: u32,
+        match_config: &BakeMatchConfig,
+        cage_config: &BakeCageConfig,
+        config: &ThicknessBakeConfig,
+    ) -> Result<ScalarBuffer, String> {
         let default_val = if config.invert { 0.0 } else { 1.0 };
         let mut buffer = ScalarBuffer::new(width, height, default_val);
         let tri_count = mesh.indices.len() / 3;
@@ -1339,24 +1905,183 @@ impl Baker {
             return Ok(buffer);
         }
 
-        let vert_thickness = Self::compute_vertex_thickness_with_high_poly(mesh, high_poly, cage_config, config)?;
+        let hp = match high_poly {
+            Some(hp) => hp,
+            None => {
+                let vert_thickness = Self::compute_vertex_thickness_with_high_poly(mesh, None, cage_config, config)?;
+                let mut written_mask = vec![false; (width * height) as usize];
+                for t in 0..tri_count {
+                    let i0 = mesh.indices[t * 3] as usize;
+                    let i1 = mesh.indices[t * 3 + 1] as usize;
+                    let i2 = mesh.indices[t * 3 + 2] as usize;
 
-        let mut written_mask = vec![false; (width * height) as usize];
+                    let uv0 = mesh.vertices[i0].uv;
+                    let uv1 = mesh.vertices[i1].uv;
+                    let uv2 = mesh.vertices[i2].uv;
+
+                    Self::rasterize_scalar_triangle_masked(
+                        &mut buffer,
+                        &mut written_mask,
+                        uv0, uv1, uv2,
+                        vert_thickness[i0], vert_thickness[i1], vert_thickness[i2],
+                    );
+                }
+                Self::dilate_scalar(&mut buffer, &mut written_mask, 16);
+                return Ok(buffer);
+            }
+        };
+
+        let cage_vertices = Self::compute_cage_vertices(mesh, cage_config)?;
+        let has_cage = cage_vertices.is_some();
+
+        let fallback_bvh;
+        let hp_bvh = if hp.bvh.nodes.is_empty() {
+            fallback_bvh = Bvh::build(&hp.vertices, &hp.indices);
+            &fallback_bvh
+        } else {
+            &hp.bvh
+        };
+
+        let mut pos_buf = vec![None; (width * height) as usize];
+        let mut norm_buf = vec![None; (width * height) as usize];
+        let mut tan_buf = vec![None; (width * height) as usize];
+        let mut tri_buf = vec![None; (width * height) as usize];
+        let mut cage_buf = if has_cage {
+            Some(vec![None; (width * height) as usize])
+        } else {
+            None
+        };
+
         for t in 0..tri_count {
             let i0 = mesh.indices[t * 3] as usize;
             let i1 = mesh.indices[t * 3 + 1] as usize;
             let i2 = mesh.indices[t * 3 + 2] as usize;
 
-            let uv0 = mesh.vertices[i0].uv;
-            let uv1 = mesh.vertices[i1].uv;
-            let uv2 = mesh.vertices[i2].uv;
+            let v0 = &mesh.vertices[i0];
+            let v1 = &mesh.vertices[i1];
+            let v2 = &mesh.vertices[i2];
 
-            Self::rasterize_scalar_triangle_masked(
-                &mut buffer,
-                &mut written_mask,
-                uv0, uv1, uv2,
-                vert_thickness[i0], vert_thickness[i1], vert_thickness[i2],
+            let cage_pts = cage_vertices.as_ref().map(|cv| (cv[i0], cv[i1], cv[i2]));
+
+            Self::rasterize_pos_norm_tan_triangle(
+                &mut pos_buf,
+                &mut norm_buf,
+                &mut tan_buf,
+                Some(&mut tri_buf),
+                cage_buf.as_deref_mut(),
+                t,
+                width,
+                height,
+                v0.uv, v1.uv, v2.uv,
+                v0.position, v1.position, v2.position,
+                v0.normal, v1.normal, v2.normal,
+                v0.tangent, v1.tangent, v2.tangent,
+                cage_pts,
             );
+        }
+
+        let sample_count = config.samples.clamp(4, 1024);
+        let mut hemisphere_samples = Vec::with_capacity(sample_count);
+        for i in 0..sample_count {
+            let u1 = (i as f32 + 0.5) / sample_count as f32;
+            let u2 = (i as f32 * 0.6180339887).fract();
+            let cos_theta = (1.0 - u1).sqrt();
+            let sin_theta = (1.0 - cos_theta * cos_theta).max(0.0).sqrt();
+            let phi = u2 * 2.0 * std::f32::consts::PI;
+            // Pointing inward into the mesh (negative z along -normal)
+            let dir = Vec3::new(sin_theta * phi.cos(), sin_theta * phi.sin(), -cos_theta);
+            hemisphere_samples.push(dir);
+        }
+
+        let extents = hp.aabb_max - hp.aabb_min;
+        let diag = extents.length().max(0.01);
+        let max_dist = (diag * config.max_distance).max(0.01);
+        let ray_offset = (diag * config.ray_bias).max(0.001);
+        let min_self_dist = (ray_offset * 2.0).max(0.003);
+
+        let submesh_allowed_hp_tris = Self::compute_submesh_allowed_hp_tris(mesh, Some(hp), match_config);
+        let submesh_allowed = &submesh_allowed_hp_tris;
+        let cage_ref = cage_buf.as_ref();
+        let p_buf = &pos_buf;
+        let n_buf = &norm_buf;
+        let tr_buf = &tri_buf;
+
+        buffer.data
+            .par_chunks_exact_mut(width as usize)
+            .enumerate()
+            .for_each(|(y_idx, row)| {
+                let y = y_idx as u32;
+                for x in 0..width {
+                    let idx = (y * width + x) as usize;
+                    if let (Some(pos), Some(norm)) = (p_buf[idx], n_buf[idx]) {
+                        let (ray_orig, ray_dir, max_ray_dist) = if let Some(cage_pos) = cage_ref.and_then(|cb| cb[idx]) {
+                            let to_mesh = pos - cage_pos;
+                            let dist_to_surface = to_mesh.length();
+                            if dist_to_surface > 1e-6 {
+                                let dir = to_mesh / dist_to_surface;
+                                (cage_pos, dir, dist_to_surface + rear_dist)
+                            } else {
+                                (pos + norm * frontal_dist, -norm, frontal_dist + rear_dist)
+                            }
+                        } else {
+                            (pos + norm * frontal_dist, -norm, frontal_dist + rear_dist)
+                        };
+
+                        let allowed = if match_config.mode == BakeMatchMode::ByMeshName {
+                            tr_buf[idx].and_then(|t| mesh.submesh_index_for_triangle(t))
+                                .and_then(|sm_idx| submesh_allowed.get(sm_idx))
+                                .and_then(|opt| opt.as_ref())
+                        } else {
+                            None
+                        };
+
+                        let proj_ray = Ray { origin: ray_orig, direction: ray_dir };
+                        let (surf_pos, surf_norm) = if let Some(hit) = hp_bvh.raycast_filtered(&proj_ray, &hp.vertices, &hp.indices, max_ray_dist, allowed) {
+                            (hit.point, hit.normal.normalize_or_zero())
+                        } else {
+                            (pos, norm.normalize_or_zero())
+                        };
+
+                        let normal = if surf_norm.length_squared() > 1e-4 {
+                            surf_norm.normalize()
+                        } else {
+                            Vec3::Y
+                        };
+
+                        let up = if normal.y.abs() < 0.95 { Vec3::Y } else { Vec3::X };
+                        let tangent = normal.cross(up).normalize();
+                        let bitangent = normal.cross(tangent);
+
+                        let origin = surf_pos - normal * (ray_offset * 1.5);
+                        let mut accum_dist = 0.0f32;
+
+                        for sample in &hemisphere_samples {
+                            let inward_dir = (tangent * sample.x + bitangent * sample.y + normal * sample.z).normalize();
+                            let ray = Ray { origin, direction: inward_dir };
+
+                            if let Some(hit) = hp_bvh.raycast_filtered(&ray, &hp.vertices, &hp.indices, max_dist, None) {
+                                if hit.t > min_self_dist && hit.t < max_dist {
+                                    accum_dist += hit.t;
+                                } else {
+                                    accum_dist += max_dist;
+                                }
+                            } else {
+                                accum_dist += max_dist;
+                            }
+                        }
+
+                        let avg_dist = accum_dist / (sample_count as f32);
+                        let val = (avg_dist / max_dist).clamp(0.0, 1.0);
+                        row[x as usize] = if config.invert { 1.0 - val } else { val };
+                    }
+                }
+            });
+
+        let mut written_mask = vec![false; (width * height) as usize];
+        for idx in 0..(width * height) as usize {
+            if pos_buf[idx].is_some() {
+                written_mask[idx] = true;
+            }
         }
 
         Self::dilate_scalar(&mut buffer, &mut written_mask, 16);
@@ -2334,6 +3059,141 @@ mod tests {
         assert_eq!(small_rear_non_flat_count, 0, "Small rear distance (0.1) must not reach geometry 0.5 units behind surface");
         assert!(large_rear_non_flat_count > 0, "Increased rear distance (1.5) must penetrate and capture recessed geometry");
         assert!(huge_rear_non_flat_count > 0, "Huge rear distance (25.0) must penetrate and capture recessed geometry");
+    }
+
+    #[test]
+    fn test_high_poly_bakes_all_maps_comprehensively() {
+        let low_cube = Mesh::create_cube_mesh("Cube_low", 1.0);
+
+        let mut high_poly = Mesh::create_sphere(0.9, 32, 24);
+        let ground = Mesh::create_cube_mesh("Ground", 2.0);
+        let base_idx = high_poly.vertices.len() as u32;
+        for mut v in ground.vertices {
+            v.position.y -= 0.5;
+            high_poly.vertices.push(v);
+        }
+        for i in ground.indices {
+            high_poly.indices.push(base_idx + i);
+        }
+        high_poly.rebuild_bvh();
+
+        let w = 32;
+        let h = 32;
+        let frontal = 0.1;
+        let rear = 0.5;
+
+        // 1. Tangent Space Normal Map
+        let tan_norm_low = Baker::bake_tangent_normals(&low_cube, None, frontal, rear, w, h);
+        let tan_norm_hp = Baker::bake_tangent_normals(&low_cube, Some(&high_poly), frontal, rear, w, h);
+        assert_ne!(tan_norm_low.data, tan_norm_hp.data, "Tangent normal map must capture high-poly geometry");
+
+        // 2. World Space Normal Map
+        let ws_norm_low = Baker::bake_world_space_normal(&low_cube, w, h);
+        let ws_norm_hp = Baker::bake_world_space_normal_with_high_poly(
+            &low_cube,
+            Some(&high_poly),
+            frontal,
+            rear,
+            w,
+            h,
+            &BakeMatchConfig::default(),
+            &BakeCageConfig::default(),
+        );
+        assert_ne!(ws_norm_low.data, ws_norm_hp.data, "World space normal map must capture high-poly curvature");
+
+        // 3. Position Map
+        let pos_low = Baker::bake_position(&low_cube, w, h);
+        let pos_hp = Baker::bake_position_with_options_and_high_poly(
+            &low_cube,
+            Some(&high_poly),
+            frontal,
+            rear,
+            w,
+            h,
+            &BakeMatchConfig::default(),
+            &BakeCageConfig::default(),
+            &PositionBakeConfig::default(),
+        );
+        assert_ne!(pos_low.data, pos_hp.data, "Position map must capture high-poly surface coordinates");
+
+        // 4. Curvature Map
+        let curv_low = Baker::bake_curvature(&low_cube, w, h);
+        let curv_hp = Baker::bake_curvature_with_options_and_high_poly(
+            &low_cube,
+            Some(&high_poly),
+            Some(&tan_norm_hp),
+            frontal,
+            rear,
+            w,
+            h,
+            &BakeMatchConfig::default(),
+            &BakeCageConfig::default(),
+            &CurvatureBakeConfig::default(),
+        );
+        assert_ne!(curv_low.data, curv_hp.data, "Curvature map must capture high-poly micro-curvature from normal map");
+
+        // 5. Ambient Occlusion Map
+        let ao_low = Baker::bake_ao(&low_cube, w, h);
+        let ao_hp = Baker::bake_ao_with_options_high_poly_and_distances(
+            &low_cube,
+            Some(&high_poly),
+            frontal,
+            rear,
+            w,
+            h,
+            &BakeMatchConfig::default(),
+            &BakeCageConfig::default(),
+            &AoBakeConfig::default(),
+        ).expect("AO high-poly bake must succeed");
+        assert_ne!(ao_low.data, ao_hp.data, "AO map must capture high-poly occlusion");
+
+        // 6. Thickness Map
+        let thick_low = Baker::bake_thickness(&low_cube, w, h);
+        let thick_hp = Baker::bake_thickness_with_options_high_poly_and_distances(
+            &low_cube,
+            Some(&high_poly),
+            frontal,
+            rear,
+            w,
+            h,
+            &BakeMatchConfig::default(),
+            &BakeCageConfig::default(),
+            &ThicknessBakeConfig::default(),
+        ).expect("Thickness high-poly bake must succeed");
+        assert_ne!(thick_low.data, thick_hp.data, "Thickness map must capture high-poly thickness");
+    }
+
+    #[test]
+    fn test_project_bakes_all_maps_with_high_poly() {
+        let mut proj = crate::project::Project::new_default(16, 16);
+        let mut low_cube = Mesh::create_cube_mesh("Cube_low", 1.0);
+        for v in &mut low_cube.vertices {
+            v.position *= 1.5;
+        }
+        low_cube.rebuild_bvh();
+        proj.mesh = low_cube;
+        proj.high_poly_mesh = Some(Mesh::create_sphere(1.0, 32, 24));
+
+        proj.bake_mesh_maps_advanced_denoised(
+            16,
+            0.1,
+            1.0,
+            true, // tangent normal
+            true, // world space normal
+            true, // ao
+            true, // curvature
+            true, // position
+            true, // thickness
+            false,
+            0,
+        );
+
+        assert!(proj.world_normal_map.is_some(), "Tangent normal map must be baked");
+        assert!(proj.world_space_normal_map.is_some(), "World space normal map must be baked");
+        assert!(proj.ao_map.is_some(), "AO map must be baked");
+        assert!(proj.curvature_map.is_some(), "Curvature map must be baked");
+        assert!(proj.position_map.is_some(), "Position map must be baked");
+        assert!(proj.thickness_map.is_some(), "Thickness map must be baked");
     }
 }
 
