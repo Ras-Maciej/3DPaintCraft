@@ -61,6 +61,9 @@ fn main() -> Result<(), eframe::Error> {
         println!("      --out <DIRECTORY>       Output directory for exported textures (default: ./exports)");
         println!("      --material <NAME>       Apply smart material before export");
         println!("      --diagnostics           Run hardware diagnostics, GPU profile, and raycast benchmarks");
+        println!("      --wayland               Force native Wayland windowing backend (Linux)");
+        println!("      --x11                   Force X11 / XWayland windowing backend (Linux)");
+        println!("      --no-vsync              Disable VSync presentation mode");
         return Ok(());
     }
 
@@ -182,6 +185,41 @@ fn main() -> Result<(), eframe::Error> {
     }
 
     // Mode 4: Desktop GUI Application (egui / eframe) - Windows & Linux
+    #[cfg(target_os = "linux")]
+    {
+        let force_x11 = args.iter().any(|arg| arg == "--x11");
+        let force_wayland = args.iter().any(|arg| arg == "--wayland");
+        let no_vsync = args.iter().any(|arg| arg == "--no-vsync");
+
+        if no_vsync {
+            std::env::set_var("PAINTCRAFT_PRESENT_MODE", "no_vsync");
+        }
+
+        if force_x11 {
+            eprintln!("[3D Paintcraft] Forcing X11 / XWayland windowing backend...");
+            std::env::set_var("WINIT_UNIX_BACKEND", "x11");
+            std::env::set_var("GDK_BACKEND", "x11");
+        } else if force_wayland {
+            eprintln!("[3D Paintcraft] Forcing native Wayland windowing backend...");
+            std::env::set_var("WINIT_UNIX_BACKEND", "wayland");
+        } else if std::env::var("WINIT_UNIX_BACKEND").is_err() {
+            // Check if running in a Wayland desktop session
+            if std::env::var("WAYLAND_DISPLAY").is_ok() {
+                // Check if running on NVIDIA hardware (which can stall on direct Wayland surface presentation)
+                let is_nvidia = std::path::Path::new("/proc/driver/nvidia").exists()
+                    || std::env::var("__NV_PRIME_RENDER_OFFLOAD").is_ok()
+                    || std::env::var("__GLX_VENDOR_LIBRARY_NAME")
+                        .map(|v| v.to_lowercase().contains("nvidia"))
+                        .unwrap_or(false);
+                if is_nvidia {
+                    eprintln!("[3D Paintcraft] Detected NVIDIA graphics on Wayland. Defaulting to X11/XWayland for stable presentation.");
+                    std::env::set_var("WINIT_UNIX_BACKEND", "x11");
+                    std::env::set_var("GDK_BACKEND", "x11");
+                }
+            }
+        }
+    }
+
     let mut wgpu_options = eframe::egui_wgpu::WgpuConfiguration::default();
     wgpu_options.power_preference = eframe::wgpu::PowerPreference::HighPerformance;
     let env_present = std::env::var("PAINTCRAFT_PRESENT_MODE").unwrap_or_default().to_lowercase();
