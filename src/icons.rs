@@ -281,6 +281,7 @@ pub struct AppIcons {
     pub smudge: TextureHandle,
     pub clone: TextureHandle,
     pub picker: TextureHandle,
+    pub path_tool: TextureHandle,
     pub shelf: TextureHandle,
     pub layer_paint: TextureHandle,
     pub layer_fill: TextureHandle,
@@ -307,6 +308,7 @@ impl AppIcons {
         let smudge = Self::load_or_generate(ctx, &assets_dir, "tool_smudge.png", generate_smudge_icon);
         let clone = Self::load_or_generate(ctx, &assets_dir, "tool_clone.png", generate_clone_icon);
         let picker = Self::load_or_generate(ctx, &assets_dir, "tool_picker.png", generate_picker_icon);
+        let path_tool = Self::load_or_generate(ctx, &assets_dir, "tool_path.png", generate_path_tool_icon);
         let shelf = Self::load_or_generate(ctx, &assets_dir, "tool_shelf.png", generate_shelf_icon);
 
         let layer_paint = Self::load_or_generate(ctx, &assets_dir, "layer_paint.png", generate_layer_paint_icon);
@@ -329,6 +331,7 @@ impl AppIcons {
             smudge,
             clone,
             picker,
+            path_tool,
             shelf,
             layer_paint,
             layer_fill,
@@ -451,6 +454,25 @@ pub fn generate_picker_icon() -> IconCanvas {
     c.draw_line(42.0, 22.0, 24.0, 40.0, 5.5, 255, 255, 255, 255);
     c.draw_line(24.0, 40.0, 18.0, 46.0, 2.5, 255, 255, 255, 255);
     c.draw_circle(14.0, 51.0, 2.5, 255, 255, 255, 255);
+    c
+}
+
+pub fn generate_path_tool_icon() -> IconCanvas {
+    let mut c = IconCanvas::new(64, 64);
+    // Smooth S-curve spline
+    c.draw_line(14.0, 50.0, 24.0, 28.0, 3.5, 255, 255, 255, 255);
+    c.draw_line(24.0, 28.0, 40.0, 36.0, 3.5, 255, 255, 255, 255);
+    c.draw_line(40.0, 36.0, 50.0, 14.0, 3.5, 255, 255, 255, 255);
+    // Tangent handle guide lines
+    c.draw_line(14.0, 50.0, 22.0, 54.0, 1.8, 180, 180, 180, 255);
+    c.draw_circle(22.0, 54.0, 2.5, 255, 255, 255, 255);
+    c.draw_line(40.0, 36.0, 34.0, 44.0, 1.8, 180, 180, 180, 255);
+    c.draw_circle(34.0, 44.0, 2.5, 255, 255, 255, 255);
+    // Vector node anchor squares
+    c.draw_rect(10.0, 46.0, 18.0, 54.0, 255, 255, 255, 255);
+    c.draw_rect(20.0, 24.0, 28.0, 32.0, 255, 255, 255, 255);
+    c.draw_rect(36.0, 32.0, 44.0, 40.0, 255, 255, 255, 255);
+    c.draw_rect(46.0, 10.0, 54.0, 18.0, 255, 255, 255, 255);
     c
 }
 
@@ -629,6 +651,7 @@ mod tests {
             ("tool_smudge.png", generate_smudge_icon()),
             ("tool_clone.png", generate_clone_icon()),
             ("tool_picker.png", generate_picker_icon()),
+            ("tool_path.png", generate_path_tool_icon()),
             ("tool_shelf.png", generate_shelf_icon()),
             ("layer_paint.png", generate_layer_paint_icon()),
             ("layer_fill.png", generate_layer_fill_icon()),

@@ -385,6 +385,42 @@ impl RgbaBuffer {
             *orig = Vec4::new(clamped.x, clamped.y, clamped.z, orig.w);
         }
     }
+
+    /// Warp / Domain distortion filter using 2D procedural noise vector displacement
+    pub fn filter_warp(&mut self, intensity: f32, scale: f32, angle: f32) {
+        if self.data.is_empty() {
+            self.materialize();
+        }
+        let w = self.width as usize;
+        let h = self.height as usize;
+        if w == 0 || h == 0 || intensity.abs() < 1e-4 {
+            return;
+        }
+
+        let orig = self.clone();
+        let rad = angle.to_radians();
+        let (sin_a, cos_a) = rad.sin_cos();
+        let eff_intensity = intensity.clamp(0.0, 1.0) * 0.15;
+
+        for y in 0..h {
+            let v = (y as f32 + 0.5) / h as f32;
+            for x in 0..w {
+                let u = (x as f32 + 0.5) / w as f32;
+                let nx = crate::utils::NoiseGenerator::fbm_perlin_2d(u * scale, v * scale, 3, 2.0, 0.5) - 0.5;
+                let ny = crate::utils::NoiseGenerator::fbm_perlin_2d(u * scale + 19.3, v * scale + 37.1, 3, 2.0, 0.5) - 0.5;
+
+                let (dx, dy) = if angle.abs() > 1e-3 {
+                    (nx * cos_a - ny * sin_a, nx * sin_a + ny * cos_a)
+                } else {
+                    (nx, ny)
+                };
+
+                let sample_u = (u + dx * eff_intensity).clamp(0.0, 1.0);
+                let sample_v = (v + dy * eff_intensity).clamp(0.0, 1.0);
+                self.data[y * w + x] = orig.sample_bilinear(Vec2::new(sample_u, sample_v));
+            }
+        }
+    }
 }
 
 /// 2D Grayscale / Scalar 32-bit floating point image buffer
@@ -648,6 +684,42 @@ impl ScalarBuffer {
         for (orig, blur) in self.data.iter_mut().zip(blurred.data.iter()) {
             let diff = (*orig - *blur) + 0.5;
             *orig = diff.clamp(0.0, 1.0);
+        }
+    }
+
+    /// Warp / Domain distortion filter using 2D procedural noise vector displacement
+    pub fn filter_warp(&mut self, intensity: f32, scale: f32, angle: f32) {
+        if self.data.is_empty() {
+            self.materialize();
+        }
+        let w = self.width as usize;
+        let h = self.height as usize;
+        if w == 0 || h == 0 || intensity.abs() < 1e-4 {
+            return;
+        }
+
+        let orig = self.clone();
+        let rad = angle.to_radians();
+        let (sin_a, cos_a) = rad.sin_cos();
+        let eff_intensity = intensity.clamp(0.0, 1.0) * 0.15;
+
+        for y in 0..h {
+            let v = (y as f32 + 0.5) / h as f32;
+            for x in 0..w {
+                let u = (x as f32 + 0.5) / w as f32;
+                let nx = crate::utils::NoiseGenerator::fbm_perlin_2d(u * scale, v * scale, 3, 2.0, 0.5) - 0.5;
+                let ny = crate::utils::NoiseGenerator::fbm_perlin_2d(u * scale + 19.3, v * scale + 37.1, 3, 2.0, 0.5) - 0.5;
+
+                let (dx, dy) = if angle.abs() > 1e-3 {
+                    (nx * cos_a - ny * sin_a, nx * sin_a + ny * cos_a)
+                } else {
+                    (nx, ny)
+                };
+
+                let sample_u = (u + dx * eff_intensity).clamp(0.0, 1.0);
+                let sample_v = (v + dy * eff_intensity).clamp(0.0, 1.0);
+                self.data[y * w + x] = orig.sample_bilinear(Vec2::new(sample_u, sample_v));
+            }
         }
     }
 }

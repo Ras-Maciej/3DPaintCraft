@@ -919,6 +919,120 @@ impl PaintcraftApp {
         }
     }
 
+    /// Commit all stamps along the Catmull-Rom spline path into the active layer or mask
+    pub fn commit_path_tool(&mut self, ctx: &egui::Context) {
+        let n_points = self.brush_engine.settings.path_tool.points.len();
+        if n_points == 0 {
+            return;
+        }
+
+        let act_idx = self.project.active_layer_idx;
+        if act_idx >= self.project.layers.len() {
+            return;
+        }
+
+        let is_fill = self.project.layers[act_idx].layer_type != LayerType::Paint;
+        let is_mask = self.brush_engine.settings.target == PaintTarget::Mask;
+        if is_fill && !is_mask {
+            self.status_message = "Cannot paint material on Fill layer. Switch target to Mask or add a Paint layer.".to_string();
+            return;
+        }
+
+        let samples = self.brush_engine.settings.path_tool.sample_path(self.brush_engine.settings.radius);
+        if samples.is_empty() {
+            return;
+        }
+
+        self.flush_pending_gpu_readbacks(ctx);
+        if let Some(wgpu) = &mut self.wgpu_viewport {
+            if wgpu.gpu_layers.len() != self.project.layers.len() {
+                wgpu.ensure_gpu_layers(&mut self.project);
+            }
+        }
+
+        let target = self.brush_engine.settings.target;
+        let channels = if target == PaintTarget::Mask {
+            crate::channel::ChannelFlags::none()
+        } else {
+            let b = self.brush_engine.settings.channels;
+            let l = self.project.layers[act_idx].channel_flags;
+            crate::channel::ChannelFlags {
+                base_color: b.base_color && l.base_color,
+                roughness: b.roughness && l.roughness,
+                metallic: b.metallic && l.metallic,
+                height: b.height && l.height,
+                normal: (b.normal || b.height) && (l.normal || l.height),
+                emission: b.emission && l.emission,
+                opacity: b.opacity && l.opacity,
+                clearcoat: b.clearcoat && l.clearcoat,
+                anisotropy: b.anisotropy && l.anisotropy,
+                ao: false,
+            }
+        };
+
+        self.project.layers[act_idx].begin_stroke_recording(target, channels);
+
+        let orig_radius = self.brush_engine.settings.radius;
+        let orig_follow_path = self.brush_engine.settings.follow_path;
+        let orig_follow_angle = self.brush_engine.follow_path_angle;
+
+        if self.brush_engine.settings.path_tool.follow_tangent {
+            self.brush_engine.settings.follow_path = true;
+        }
+
+        let mesh = self.project.mesh.clone();
+        let doc_w = self.project.texture_width;
+        let doc_h = self.project.texture_height;
+
+        self.brush_engine.last_hit_pos = None;
+        self.brush_engine.last_hit_normal = None;
+        self.brush_engine.last_uv = None;
+
+        for sample in &samples {
+            self.brush_engine.settings.radius = (orig_radius * sample.radius_scale).clamp(1.0, 300.0);
+            if self.brush_engine.settings.path_tool.follow_tangent {
+                self.brush_engine.follow_path_angle = sample.tangent_angle;
+            }
+
+            let world_rad = (self.brush_engine.settings.radius / (doc_w as f32).max(1.0)) * 2.0;
+            let layer = &mut self.project.layers[act_idx];
+            self.brush_engine.paint_stroke_3d(layer, &mesh, sample.position_3d, sample.normal, world_rad.max(0.005));
+        }
+
+        self.brush_engine.settings.radius = orig_radius;
+        self.brush_engine.settings.follow_path = orig_follow_path;
+        self.brush_engine.follow_path_angle = orig_follow_angle;
+        self.brush_engine.last_hit_pos = None;
+        self.brush_engine.last_hit_normal = None;
+        self.brush_engine.last_uv = None;
+
+        let desc = format!("Vector Path ({} stamps)", samples.len());
+        if let Some(layer) = self.project.layers.get_mut(act_idx) {
+            if let Some(action) = layer.finish_stroke_delta(act_idx, &desc) {
+                self.history.push(&desc, action);
+            }
+            if let Some(d_rect) = layer.dirty_rect {
+                if let Some(wgpu) = &mut self.wgpu_viewport {
+                    if let Some(gpu_layer) = wgpu.gpu_layers.get(act_idx) {
+                        wgpu.gpu_compositor.update_layer(layer, gpu_layer, doc_w, doc_h);
+                        wgpu.composite_and_update_active(&self.project, act_idx);
+                    }
+                }
+                self.update_uv_texture_rect(ctx, d_rect.0, d_rect.1, d_rect.2, d_rect.3);
+            } else {
+                if let Some(wgpu) = &mut self.wgpu_viewport {
+                    wgpu.sync_textures(&mut self.project);
+                }
+                self.update_uv_texture(ctx);
+            }
+        }
+
+        self.brush_engine.settings.path_tool.clear();
+        self.project.is_dirty = true;
+        self.status_message = format!("Path committed: {} stamps applied", samples.len());
+        ctx.request_repaint();
+    }
+
     /// Update 3D viewport texture in egui
     fn update_viewport_texture(&mut self, ctx: &egui::Context) {
         let eff_mode = if self.mask_preview_layer_id.is_some() {
@@ -3561,6 +3675,10 @@ impl eframe::App for PaintcraftApp {
                     self.brush_engine.settings.mode = ToolMode::Eyedropper;
                     self.status_message = "Tool: Material Picker [P/I]".to_string();
                 }
+                if input.key_pressed(egui::Key::Num7) || input.key_pressed(egui::Key::T) {
+                    self.brush_engine.settings.mode = ToolMode::Path;
+                    self.status_message = "Tool: Path Tool [7/T] (Click mesh to place points, Enter to commit, Esc to clear)".to_string();
+                }
 
                 // Shift+M = Toggle Target between Layer Material and Mask
                 // M = View Mode: Lit Material (PBR) and exit mask preview
@@ -4200,6 +4318,35 @@ impl eframe::App for PaintcraftApp {
                             let (sq_rect, _) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover());
                             ui.painter().rect_filled(sq_rect, 2.0, Color32::from_rgb(col[0], col[1], col[2]));
                         }
+                        ToolMode::Path => {
+                            ui.label(egui::RichText::new("Vector Path").strong().color(Color32::from_rgb(243, 94, 24)));
+                            let num_pts = self.brush_engine.settings.path_tool.points.len();
+                            ui.label(format!("Pts: {}", num_pts));
+
+                            if ui.add_enabled(num_pts > 0, egui::Button::new(egui::RichText::new("Commit (Enter)").color(Color32::WHITE)).fill(Color32::from_rgb(45, 120, 60))).clicked() {
+                                self.commit_path_tool(ctx);
+                            }
+                            if ui.add_enabled(num_pts > 0, egui::Button::new("Clear (Esc)")).clicked() {
+                                self.brush_engine.settings.path_tool.clear();
+                                self.status_message = "Path cleared".to_string();
+                            }
+                            ui.separator();
+                            ui.checkbox(&mut self.brush_engine.settings.path_tool.closed, "Closed Loop");
+                            ui.checkbox(&mut self.brush_engine.settings.path_tool.follow_tangent, "Follow Tangent");
+
+                            ui.label("Spacing:");
+                            ui.add_sized([55.0, 18.0], egui::Slider::new(&mut self.brush_engine.settings.path_tool.spacing_ratio, 0.05..=1.5).text(""));
+
+                            ui.label("Taper Start:");
+                            ui.add_sized([50.0, 18.0], egui::Slider::new(&mut self.brush_engine.settings.path_tool.taper_start, 0.0..=1.0).text(""));
+
+                            ui.label("End:");
+                            ui.add_sized([50.0, 18.0], egui::Slider::new(&mut self.brush_engine.settings.path_tool.taper_end, 0.0..=1.0).text(""));
+
+                            ui.separator();
+                            ui.label("Radius:");
+                            ui.add_sized([60.0, 18.0], egui::Slider::new(&mut self.brush_engine.settings.radius, 1.0..=100.0).text("px"));
+                        }
                     }
 
                     // Right: Viewport Settings, Shaders, Layout & Channel Controls
@@ -4478,6 +4625,15 @@ impl eframe::App for PaintcraftApp {
                     if render_tool_button(ui, is_eye, picker_tex, "I", "Pick", "Material Picker / Eyedropper [P / I]") {
                         self.brush_engine.settings.mode = ToolMode::Eyedropper;
                         self.status_message = "Tool: Material Picker [P/I]".to_string();
+                    }
+                    ui.add_space(2.0);
+
+                    // 8. Vector Path Tool [7 / T]
+                    let is_path = self.brush_engine.settings.mode == ToolMode::Path;
+                    let path_tex = opt_icons.map(|i| i.path_tool.id());
+                    if render_tool_button(ui, is_path, path_tex, "7", "Path", "Vector Path Tool [7 / T]") {
+                        self.brush_engine.settings.mode = ToolMode::Path;
+                        self.status_message = "Tool: Path Tool [7/T]".to_string();
                     }
                     ui.add_space(5.0);
                     ui.separator();
@@ -6435,6 +6591,81 @@ impl PaintcraftApp {
             let delta = input.pointer.delta();
             self.camera.orbit(delta.x * self.camera_orbit_speed, delta.y * self.camera_orbit_speed);
         }
+        // 7.5. Vector Path Tool 3D Surface Interaction
+        else if self.brush_engine.settings.mode == ToolMode::Path
+            && !input.modifiers.alt && !input.modifiers.command && !self.show_bake_modal && !input.key_down(egui::Key::S)
+        {
+            if input.key_pressed(egui::Key::Enter) {
+                self.commit_path_tool(ctx);
+            } else if input.key_pressed(egui::Key::Escape) {
+                self.brush_engine.settings.path_tool.clear();
+                self.status_message = "Path cleared".to_string();
+                ctx.request_repaint();
+            } else if (input.key_pressed(egui::Key::Delete) || input.key_pressed(egui::Key::Backspace))
+                && self.brush_engine.settings.path_tool.selected_point.is_some()
+            {
+                if let Some(idx) = self.brush_engine.settings.path_tool.selected_point {
+                    if idx < self.brush_engine.settings.path_tool.points.len() {
+                        self.brush_engine.settings.path_tool.points.remove(idx);
+                        self.brush_engine.settings.path_tool.selected_point = None;
+                        self.status_message = format!("Removed path point {}", idx + 1);
+                        ctx.request_repaint();
+                    }
+                }
+            } else if let Some(mouse_pos) = input.pointer.hover_pos() {
+                let local_x = mouse_pos.x - rect.min.x;
+                let local_y = mouse_pos.y - rect.min.y;
+                let ray = self.camera.screen_to_ray(local_x, local_y, vp_w, vp_h);
+                let hit_opt = self.project.mesh.raycast(&ray);
+
+                let mut hovered_pt_idx = None;
+                for (i, pt) in self.brush_engine.settings.path_tool.points.iter().enumerate() {
+                    if let Some(s_pos) = self.camera.world_to_screen(pt.position_3d, vp_w, vp_h) {
+                        let screen_p = rect.min + egui::vec2(s_pos.x, s_pos.y);
+                        if (screen_p - mouse_pos).length() < 14.0 {
+                            hovered_pt_idx = Some(i);
+                            break;
+                        }
+                    }
+                }
+
+                if response.clicked() {
+                    if let Some(idx) = hovered_pt_idx {
+                        self.brush_engine.settings.path_tool.selected_point = Some(idx);
+                        self.status_message = format!("Selected path point {}", idx + 1);
+                    } else if let Some(hit) = hit_opt {
+                        self.brush_engine.settings.path_tool.points.push(crate::brush::PathControlPoint {
+                            position_3d: hit.point,
+                            normal: hit.normal,
+                            uv: hit.uv,
+                            radius_scale: 1.0,
+                        });
+                        let new_idx = self.brush_engine.settings.path_tool.points.len() - 1;
+                        self.brush_engine.settings.path_tool.selected_point = Some(new_idx);
+                        self.status_message = format!("Added path point {} (Enter to commit, Esc to clear)", new_idx + 1);
+                    }
+                    ctx.request_repaint();
+                } else if response.drag_started_by(egui::PointerButton::Primary) {
+                    if let Some(idx) = hovered_pt_idx {
+                        self.brush_engine.settings.path_tool.selected_point = Some(idx);
+                        self.brush_engine.settings.path_tool.is_dragging = true;
+                    }
+                } else if response.dragged_by(egui::PointerButton::Primary) && self.brush_engine.settings.path_tool.is_dragging {
+                    if let Some(sel_idx) = self.brush_engine.settings.path_tool.selected_point {
+                        if let Some(hit) = hit_opt {
+                            if sel_idx < self.brush_engine.settings.path_tool.points.len() {
+                                self.brush_engine.settings.path_tool.points[sel_idx].position_3d = hit.point;
+                                self.brush_engine.settings.path_tool.points[sel_idx].normal = hit.normal;
+                                self.brush_engine.settings.path_tool.points[sel_idx].uv = hit.uv;
+                                ctx.request_repaint();
+                            }
+                        }
+                    }
+                } else if response.drag_stopped() || !input.pointer.any_down() {
+                    self.brush_engine.settings.path_tool.is_dragging = false;
+                }
+            }
+        }
         // 8. Left-drag WITHOUT Alt and WITHOUT Ctrl: 3D PROJECTION PAINTING! (Disabled when Bake modal is open)
         else if (response.dragged_by(egui::PointerButton::Primary) || response.clicked())
             && !input.modifiers.alt && !input.modifiers.command && !self.show_bake_modal && !input.key_down(egui::Key::S)
@@ -7108,6 +7339,57 @@ impl PaintcraftApp {
             }
         }
 
+        // --- 3D VECTOR PATH TOOL SPLINE & CONTROL POINTS OVERLAY ---
+        if self.brush_engine.settings.mode == ToolMode::Path || !self.brush_engine.settings.path_tool.points.is_empty() {
+            let samples = self.brush_engine.settings.path_tool.sample_path(self.brush_engine.settings.radius);
+
+            // Draw smooth Catmull-Rom curve connecting projected samples
+            let mut prev_screen_pt: Option<egui::Pos2> = None;
+            for sample in &samples {
+                if let Some(s_pos) = self.camera.world_to_screen(sample.position_3d, vp_w, vp_h) {
+                    let cur_screen_pt = rect.min + egui::vec2(s_pos.x, s_pos.y);
+                    if let Some(prev) = prev_screen_pt {
+                        ui.painter().line_segment(
+                            [prev, cur_screen_pt],
+                            egui::Stroke::new(2.5_f32, egui::Color32::from_rgb(243, 94, 24)),
+                        );
+                    }
+                    let r = (2.2 * sample.radius_scale).clamp(1.2, 7.0);
+                    ui.painter().circle_filled(cur_screen_pt, r, egui::Color32::from_rgb(255, 205, 110));
+                    prev_screen_pt = Some(cur_screen_pt);
+                } else {
+                    prev_screen_pt = None;
+                }
+            }
+
+            // Draw control point handle rings with index numbers
+            let sel_idx = self.brush_engine.settings.path_tool.selected_point;
+            for (i, pt) in self.brush_engine.settings.path_tool.points.iter().enumerate() {
+                if let Some(s_pos) = self.camera.world_to_screen(pt.position_3d, vp_w, vp_h) {
+                    let pt_screen = rect.min + egui::vec2(s_pos.x, s_pos.y);
+                    let is_selected = sel_idx == Some(i);
+
+                    if is_selected {
+                        ui.painter().circle_stroke(pt_screen, 8.0, egui::Stroke::new(2.5_f32, egui::Color32::from_rgb(255, 220, 50)));
+                        ui.painter().circle_filled(pt_screen, 4.5, egui::Color32::from_rgb(243, 94, 24));
+                    } else {
+                        ui.painter().circle_stroke(pt_screen, 6.5, egui::Stroke::new(1.8_f32, egui::Color32::WHITE));
+                        ui.painter().circle_filled(pt_screen, 3.5, egui::Color32::from_rgb(30, 30, 35));
+                    }
+
+                    // Index label badge
+                    let badge_pos = pt_screen + egui::vec2(10.0, -10.0);
+                    ui.painter().text(
+                        badge_pos,
+                        egui::Align2::LEFT_CENTER,
+                        format!("{}", i + 1),
+                        egui::FontId::monospace(11.0),
+                        if is_selected { egui::Color32::from_rgb(255, 220, 50) } else { egui::Color32::WHITE },
+                    );
+                }
+            }
+        }
+
         // --- INTERACTIVE BRUSH CURSOR, LAZY LEASH & 3D SYMMETRY GHOST CURSORS ---
         if response.hovered() && !input.modifiers.alt {
             ctx.request_repaint();
@@ -7133,7 +7415,13 @@ impl PaintcraftApp {
                     }
                 }
 
-                if self.brush_engine.settings.mode == ToolMode::FillBucket {
+                if self.brush_engine.settings.mode == ToolMode::Path {
+                    // Precision crosshair and node placement cursor for Path Tool
+                    ui.painter().circle_stroke(mouse_pos, 7.0, egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(243, 94, 24)));
+                    ui.painter().circle_filled(mouse_pos, 2.0, egui::Color32::WHITE);
+                    ui.painter().line_segment([mouse_pos + egui::vec2(-10.0, 0.0), mouse_pos + egui::vec2(10.0, 0.0)], egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(243, 94, 24)));
+                    ui.painter().line_segment([mouse_pos + egui::vec2(0.0, -10.0), mouse_pos + egui::vec2(0.0, 10.0)], egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(243, 94, 24)));
+                } else if self.brush_engine.settings.mode == ToolMode::FillBucket {
                     // Precision cursor dot and ring for Polygon Fill
                     ui.painter().circle_filled(mouse_pos, 3.0, egui::Color32::from_rgb(243, 94, 24));
                     ui.painter().circle_stroke(mouse_pos, 6.0, egui::Stroke::new(1.2_f32, egui::Color32::WHITE));
@@ -7452,8 +7740,77 @@ impl PaintcraftApp {
                 }
             }
 
+            // 2D Vector Path Tool Interaction
+            if self.brush_engine.settings.mode == ToolMode::Path && !is_panning {
+                if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    self.commit_path_tool(ctx);
+                } else if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    self.brush_engine.settings.path_tool.clear();
+                    self.status_message = "Path cleared".to_string();
+                    ctx.request_repaint();
+                } else if ui.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace)) {
+                    if let Some(idx) = self.brush_engine.settings.path_tool.selected_point {
+                        if idx < self.brush_engine.settings.path_tool.points.len() {
+                            self.brush_engine.settings.path_tool.points.remove(idx);
+                            self.brush_engine.settings.path_tool.selected_point = None;
+                            self.status_message = format!("Removed path point {}", idx + 1);
+                            ctx.request_repaint();
+                        }
+                    }
+                } else if let Some(mouse_pos) = ui.input(|i| i.pointer.hover_pos()) {
+                    if canvas_rect.contains(mouse_pos) {
+                        let u = ((mouse_pos.x - canvas_rect.min.x) / cw).clamp(0.0, 1.0);
+                        let v = ((mouse_pos.y - canvas_rect.min.y) / ch).clamp(0.0, 1.0);
+
+                        let mut hovered_pt_idx = None;
+                        for (i, pt) in self.brush_engine.settings.path_tool.points.iter().enumerate() {
+                            let pt_2d = cmin + egui::vec2(pt.uv.x * cw, pt.uv.y * ch);
+                            if (pt_2d - mouse_pos).length() < 14.0 {
+                                hovered_pt_idx = Some(i);
+                                break;
+                            }
+                        }
+
+                        if response.clicked() {
+                            if let Some(idx) = hovered_pt_idx {
+                                self.brush_engine.settings.path_tool.selected_point = Some(idx);
+                                self.status_message = format!("Selected path point {}", idx + 1);
+                            } else {
+                                let (pos_3d, norm_3d) = self.project.mesh.uv_to_3d_point(glam::Vec2::new(u, v)).unwrap_or((glam::Vec3::new(u, v, 0.0), glam::Vec3::Y));
+                                self.brush_engine.settings.path_tool.points.push(crate::brush::PathControlPoint {
+                                    position_3d: pos_3d,
+                                    normal: norm_3d,
+                                    uv: glam::Vec2::new(u, v),
+                                    radius_scale: 1.0,
+                                });
+                                let new_idx = self.brush_engine.settings.path_tool.points.len() - 1;
+                                self.brush_engine.settings.path_tool.selected_point = Some(new_idx);
+                                self.status_message = format!("Added path point {} on UV canvas (Enter to commit, Esc to clear)", new_idx + 1);
+                            }
+                            ctx.request_repaint();
+                        } else if response.drag_started_by(egui::PointerButton::Primary) {
+                            if let Some(idx) = hovered_pt_idx {
+                                self.brush_engine.settings.path_tool.selected_point = Some(idx);
+                                self.brush_engine.settings.path_tool.is_dragging = true;
+                            }
+                        } else if response.dragged_by(egui::PointerButton::Primary) && self.brush_engine.settings.path_tool.is_dragging {
+                            if let Some(sel_idx) = self.brush_engine.settings.path_tool.selected_point {
+                                if sel_idx < self.brush_engine.settings.path_tool.points.len() {
+                                    let (pos_3d, norm_3d) = self.project.mesh.uv_to_3d_point(glam::Vec2::new(u, v)).unwrap_or((glam::Vec3::new(u, v, 0.0), glam::Vec3::Y));
+                                    self.brush_engine.settings.path_tool.points[sel_idx].position_3d = pos_3d;
+                                    self.brush_engine.settings.path_tool.points[sel_idx].normal = norm_3d;
+                                    self.brush_engine.settings.path_tool.points[sel_idx].uv = glam::Vec2::new(u, v);
+                                    ctx.request_repaint();
+                                }
+                            }
+                        } else if response.drag_stopped() || !ui.input(|i| i.pointer.any_down()) {
+                            self.brush_engine.settings.path_tool.is_dragging = false;
+                        }
+                    }
+                }
+            }
             // 2D UV Painting and Tool Actions
-            if !is_panning && (response.dragged_by(egui::PointerButton::Primary) || response.clicked()) {
+            else if !is_panning && (response.dragged_by(egui::PointerButton::Primary) || response.clicked()) {
                 ctx.request_repaint();
                 if !self.is_stroke_active {
                     self.flush_pending_gpu_readbacks(ctx);
@@ -7814,6 +8171,50 @@ impl PaintcraftApp {
                 }
             }
 
+            // --- 2D VECTOR PATH TOOL SPLINE & CONTROL POINTS OVERLAY ---
+            if self.brush_engine.settings.mode == ToolMode::Path || !self.brush_engine.settings.path_tool.points.is_empty() {
+                let samples = self.brush_engine.settings.path_tool.sample_path(self.brush_engine.settings.radius);
+
+                // Draw 2D Catmull-Rom curve connecting samples
+                let mut prev_2d_pt: Option<egui::Pos2> = None;
+                for sample in &samples {
+                    let cur_2d_pt = cmin + egui::vec2(sample.uv.x * cw, sample.uv.y * ch);
+                    if let Some(prev) = prev_2d_pt {
+                        ui.painter().line_segment(
+                            [prev, cur_2d_pt],
+                            egui::Stroke::new(2.5_f32, egui::Color32::from_rgb(243, 94, 24)),
+                        );
+                    }
+                    let r = (2.2 * sample.radius_scale).clamp(1.2, 7.0);
+                    ui.painter().circle_filled(cur_2d_pt, r, egui::Color32::from_rgb(255, 205, 110));
+                    prev_2d_pt = Some(cur_2d_pt);
+                }
+
+                // Draw control point handles with index labels
+                let sel_idx = self.brush_engine.settings.path_tool.selected_point;
+                for (i, pt) in self.brush_engine.settings.path_tool.points.iter().enumerate() {
+                    let pt_2d = cmin + egui::vec2(pt.uv.x * cw, pt.uv.y * ch);
+                    let is_selected = sel_idx == Some(i);
+
+                    if is_selected {
+                        ui.painter().circle_stroke(pt_2d, 8.0, egui::Stroke::new(2.5_f32, egui::Color32::from_rgb(255, 220, 50)));
+                        ui.painter().circle_filled(pt_2d, 4.5, egui::Color32::from_rgb(243, 94, 24));
+                    } else {
+                        ui.painter().circle_stroke(pt_2d, 6.5, egui::Stroke::new(1.8_f32, egui::Color32::WHITE));
+                        ui.painter().circle_filled(pt_2d, 3.5, egui::Color32::from_rgb(30, 30, 35));
+                    }
+
+                    let badge_pos = pt_2d + egui::vec2(10.0, -10.0);
+                    ui.painter().text(
+                        badge_pos,
+                        egui::Align2::LEFT_CENTER,
+                        format!("{}", i + 1),
+                        egui::FontId::monospace(11.0),
+                        if is_selected { egui::Color32::from_rgb(255, 220, 50) } else { egui::Color32::WHITE },
+                    );
+                }
+            }
+
             // Interactive 2D Brush Cursor and Symmetry Guides
             if response.hovered() && !is_panning {
                 ctx.request_repaint();
@@ -7828,7 +8229,13 @@ impl PaintcraftApp {
                         self.last_hovered_tri = None;
                     }
 
-                    if self.brush_engine.settings.mode == ToolMode::FillBucket {
+                    if self.brush_engine.settings.mode == ToolMode::Path {
+                        // Precision crosshair and node placement cursor for Path Tool
+                        ui.painter().circle_stroke(mouse_pos, 7.0, egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(243, 94, 24)));
+                        ui.painter().circle_filled(mouse_pos, 2.0, egui::Color32::WHITE);
+                        ui.painter().line_segment([mouse_pos + egui::vec2(-10.0, 0.0), mouse_pos + egui::vec2(10.0, 0.0)], egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(243, 94, 24)));
+                        ui.painter().line_segment([mouse_pos + egui::vec2(0.0, -10.0), mouse_pos + egui::vec2(0.0, 10.0)], egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(243, 94, 24)));
+                    } else if self.brush_engine.settings.mode == ToolMode::FillBucket {
                         // Precision cursor dot and ring for Polygon Fill
                         ui.painter().circle_filled(mouse_pos, 3.0, egui::Color32::from_rgb(243, 94, 24));
                         ui.painter().circle_stroke(mouse_pos, 6.0, egui::Stroke::new(1.2_f32, egui::Color32::WHITE));
@@ -12360,6 +12767,10 @@ impl PaintcraftApp {
                                                 layer.add_mask_filter_invert(curv_ref);
                                                 prop_changed = true;
                                             }
+                                            if ui.button("+ Add Warp").on_hover_text("Substance Warp filter: organic domain vector distortion and directional wave displacement").clicked() {
+                                                layer.add_mask_filter_warp(0.5, 4.0, 0.0, curv_ref);
+                                                prop_changed = true;
+                                            }
 
                                             egui::ComboBox::from_id_source("smart_mask_quick_add")
                                                 .selected_text("+ Smart Mask...")
@@ -12567,6 +12978,21 @@ impl PaintcraftApp {
                                                             ui.label("Brightness:");
                                                             if ui.add(egui::Slider::new(brightness, -1.0..=1.0)).changed() { prop_changed = true; }
                                                         });
+                                                    }
+                                                    crate::layer::MaskEffectType::FilterWarp { ref mut warp_intensity, ref mut warp_scale, ref mut warp_angle } => {
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Intensity:");
+                                                            if ui.add(egui::Slider::new(warp_intensity, 0.0..=1.0)).changed() { prop_changed = true; }
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Noise Scale:");
+                                                            if ui.add(egui::Slider::new(warp_scale, 0.5..=32.0)).changed() { prop_changed = true; }
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Angle:");
+                                                            if ui.add(egui::Slider::new(warp_angle, 0.0..=360.0).suffix(" deg")).changed() { prop_changed = true; }
+                                                        });
+                                                        ui.label(egui::RichText::new("Substance Warp: organic domain vector displacement breaking up procedural edges.").small().color(Color32::from_rgb(160, 165, 175)));
                                                     }
                                                     crate::layer::MaskEffectType::FilterInvert => {
                                                         ui.label("Filter: Inverts lower layers in mask stack.");
@@ -13207,10 +13633,34 @@ impl PaintcraftApp {
                                 } else if layer.layer_type == LayerType::Fill {
                                     // --- PROPERTIES: FILL (PBR Material Maps Manipulation 1:1) ---
     
-                                    // 1. Transformation (UV Wrap)
-                                    ui.collapsing("Transformation (UV Wrap)", |ui| {
+                                    // 1. Transformation (UV Wrap & Tri-Planar)
+                                    ui.collapsing("Projection & Transformation", |ui| {
                                         ui.horizontal(|ui| {
-                                            ui.label("UV Scale / Tiling:");
+                                            ui.label("Projection:");
+                                            let proj_label = if layer.triplanar { "Tri-Planar (World 3D)" } else { "UV Projection" };
+                                            egui::ComboBox::from_id_source(format!("fill_proj_mode_{}", layer.id))
+                                                .selected_text(proj_label)
+                                                .show_ui(ui, |ui| {
+                                                    if ui.selectable_label(!layer.triplanar, "UV Projection").clicked() {
+                                                        layer.triplanar = false;
+                                                        prop_changed = true;
+                                                    }
+                                                    if ui.selectable_label(layer.triplanar, "Tri-Planar (World 3D)").on_hover_text("Substance Tri-Planar: 3-axis box projection eliminating UV seams on 3D geometry").clicked() {
+                                                        layer.triplanar = true;
+                                                        prop_changed = true;
+                                                    }
+                                                });
+                                        });
+                                        if layer.triplanar {
+                                            ui.horizontal(|ui| {
+                                                ui.label("Blend Hardness:");
+                                                if ui.add(egui::Slider::new(&mut layer.triplanar_hardness, 1.0..=16.0)).changed() {
+                                                    prop_changed = true;
+                                                }
+                                            });
+                                        }
+                                        ui.horizontal(|ui| {
+                                            ui.label("Scale / Tiling:");
                                             if ui.add(egui::Slider::new(&mut layer.uv_scale, 0.2..=32.0).logarithmic(true).clamp_to_range(false)).changed() {
                                                 prop_changed = true;
                                             }

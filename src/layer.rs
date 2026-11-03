@@ -326,6 +326,11 @@ pub enum MaskEffectType {
         contrast: f32,
         brightness: f32,
     },
+    FilterWarp {
+        warp_intensity: f32,
+        warp_scale: f32,
+        warp_angle: f32,
+    },
     ColorSelection {
         target_color: [f32; 3],
         tolerance: f32,
@@ -495,6 +500,8 @@ pub struct Layer {
     pub generator_contrast: f32,
     pub generator_invert: bool,
     pub triplanar: bool,
+    #[serde(default = "default_triplanar_hardness")]
+    pub triplanar_hardness: f32,
 
     // UV Transformation parameters
     pub uv_scale: f32,
@@ -624,6 +631,10 @@ fn default_base_mask_val() -> f32 {
     1.0
 }
 
+fn default_triplanar_hardness() -> f32 {
+    4.0
+}
+
 impl Layer {
     pub fn new_paint_layer(id: u64, name: String, width: u32, height: u32) -> Self {
         Self {
@@ -650,6 +661,7 @@ impl Layer {
             generator_contrast: 1.0,
             generator_invert: false,
             triplanar: false,
+            triplanar_hardness: 4.0,
 
             uv_scale: 1.0,
             uv_offset: glam::Vec2::ZERO,
@@ -717,6 +729,7 @@ impl Layer {
             generator_contrast: 1.0,
             generator_invert: false,
             triplanar: false,
+            triplanar_hardness: 4.0,
             uv_scale: 1.0,
             uv_offset: glam::Vec2::ZERO,
             uv_rotation: 0.0,
@@ -1051,6 +1064,7 @@ impl Layer {
             generator_contrast: self.generator_contrast,
             generator_invert: self.generator_invert,
             triplanar: self.triplanar,
+            triplanar_hardness: self.triplanar_hardness,
 
             uv_scale: self.uv_scale,
             uv_offset: self.uv_offset,
@@ -2940,6 +2954,9 @@ impl Layer {
                 MaskEffectType::FilterContrast { contrast, brightness } => {
                     accum.filter_contrast_brightness(*contrast, *brightness);
                 }
+                MaskEffectType::FilterWarp { warp_intensity, warp_scale, warp_angle } => {
+                    accum.filter_warp(*warp_intensity, *warp_scale, *warp_angle);
+                }
                 MaskEffectType::ColorSelection { target_color, tolerance, softness } => {
                     let mut sel_buf = ScalarBuffer::new(w, h, 0.0);
                     if let Some(id_m) = id_map {
@@ -4025,6 +4042,23 @@ impl Layer {
         id
     }
 
+    pub fn add_mask_filter_warp(&mut self, warp_intensity: f32, warp_scale: f32, warp_angle: f32, curvature_map: Option<&ScalarBuffer>) -> u64 {
+        self.preserve_base_paint_if_needed();
+        self.next_mask_effect_id += 1;
+        let id = self.next_mask_effect_id;
+        self.mask_effects.push(MaskEffect {
+            id,
+            name: "Warp Filter".to_string(),
+            effect_type: MaskEffectType::FilterWarp { warp_intensity, warp_scale, warp_angle },
+            visible: true,
+            opacity: 1.0,
+            blend_mode: BlendMode::Normal,
+        });
+        self.has_mask = true;
+        self.evaluate_mask(curvature_map);
+        id
+    }
+
     pub fn remove_mask_effect(&mut self, id: u64, curvature_map: Option<&ScalarBuffer>) {
         self.mask_effects.retain(|e| e.id != id);
         if self.active_mask_effect_id == Some(id) {
@@ -4235,6 +4269,7 @@ impl Layer {
         let fill_height = self.fill_height;
         let fill_emissive = self.fill_emissive;
         let fill_opacity = self.fill_opacity;
+        let triplanar_hardness = self.triplanar_hardness;
 
         let fill_color_tex = self.fill_color_tex.as_ref();
         let fill_roughness_tex = self.fill_roughness_tex.as_ref();
@@ -4264,22 +4299,24 @@ impl Layer {
                     let rv = (cu * sin_r + cv * cos_r + 0.5) * uv_scale;
                     let uv_mesh = glam::Vec2::new((x as f32 + 0.5) / w as f32, (y as f32 + 0.5) / h as f32);
 
-                    let (noise_factor, bump_factor) = if triplanar && position_map.is_some() {
+                    let (noise_factor, bump_factor, tri_context) = if triplanar && position_map.is_some() {
                         let pos_sample = position_map.unwrap().sample_bilinear(uv_mesh);
                         let norm_sample = normal_map.map(|nm| nm.sample_bilinear(uv_mesh)).unwrap_or(glam::Vec4::new(0.5, 0.5, 1.0, 1.0));
-                        let p3 = glam::Vec3::new(pos_sample.x, pos_sample.y, pos_sample.z) * generator_scale * 4.0;
+                        let p_raw = glam::Vec3::new(pos_sample.x, pos_sample.y, pos_sample.z);
                         let n = (norm_sample.truncate() * 2.0 - glam::Vec3::ONE).normalize_or_zero();
-                        let mut weights = glam::Vec3::new(n.x.abs().powi(4), n.y.abs().powi(4), n.z.abs().powi(4));
+                        let hardness = triplanar_hardness.clamp(1.0, 16.0);
+                        let mut weights = glam::Vec3::new(n.x.abs().powf(hardness), n.y.abs().powf(hardness), n.z.abs().powf(hardness));
                         let sum = weights.x + weights.y + weights.z;
                         if sum > 1e-4 { weights /= sum; } else { weights = glam::Vec3::new(0.33, 0.34, 0.33); }
 
+                        let p3 = p_raw * generator_scale * 4.0;
                         let nx = NoiseGenerator::fbm_2d(p3.y, p3.z, 4, 2.0, 0.5);
                         let ny = NoiseGenerator::fbm_2d(p3.x, p3.z, 4, 2.0, 0.5);
                         let nz = NoiseGenerator::fbm_2d(p3.x, p3.y, 4, 2.0, 0.5);
                         let tri = weights.x * nx + weights.y * ny + weights.z * nz;
-                        (tri, tri)
+                        (tri, tri, Some((p_raw, weights)))
                     } else {
-                        match fill_generator {
+                        let (nf, bf) = match fill_generator {
                             ProceduralGenerator::None => (1.0, 0.5),
                             ProceduralGenerator::PerlinNoise => {
                                 let n = NoiseGenerator::fbm_perlin_2d(ru * generator_scale, rv * generator_scale, 4, 2.0, 0.5);
@@ -4477,7 +4514,8 @@ impl Layer {
                                 let n = NoiseGenerator::moisture_noise_2d(ru * generator_scale, rv * generator_scale);
                                 (n, n)
                             }
-                        }
+                        };
+                        (nf, bf, None)
                     };
 
                     let (eff_noise, eff_bump) = if fill_generator != ProceduralGenerator::None {
@@ -4518,8 +4556,30 @@ impl Layer {
                     let tx = (ru.rem_euclid(1.0) * w as f32).clamp(0.0, w as f32 - 1.0) as u32;
                     let ty = (rv.rem_euclid(1.0) * h as f32).clamp(0.0, h as f32 - 1.0) as u32;
 
+                    let sample_rgba_tex = |tex: &RgbaBuffer| -> Vec4 {
+                        if let Some((p, w_tri)) = tri_context {
+                            let uv_x = glam::Vec2::new(p.y * cos_r - p.z * sin_r + uv_offset.x, p.y * sin_r + p.z * cos_r + uv_offset.y) * uv_scale;
+                            let uv_y = glam::Vec2::new(p.x * cos_r - p.z * sin_r + uv_offset.x, p.x * sin_r + p.z * cos_r + uv_offset.y) * uv_scale;
+                            let uv_z = glam::Vec2::new(p.x * cos_r - p.y * sin_r + uv_offset.x, p.x * sin_r + p.y * cos_r + uv_offset.y) * uv_scale;
+                            tex.sample_bilinear(uv_x) * w_tri.x + tex.sample_bilinear(uv_y) * w_tri.y + tex.sample_bilinear(uv_z) * w_tri.z
+                        } else {
+                            tex.get_pixel(tx, ty)
+                        }
+                    };
+
+                    let sample_scalar_tex = |tex: &ScalarBuffer| -> f32 {
+                        if let Some((p, w_tri)) = tri_context {
+                            let uv_x = glam::Vec2::new(p.y * cos_r - p.z * sin_r + uv_offset.x, p.y * sin_r + p.z * cos_r + uv_offset.y) * uv_scale;
+                            let uv_y = glam::Vec2::new(p.x * cos_r - p.z * sin_r + uv_offset.x, p.x * sin_r + p.z * cos_r + uv_offset.y) * uv_scale;
+                            let uv_z = glam::Vec2::new(p.x * cos_r - p.y * sin_r + uv_offset.x, p.x * sin_r + p.y * cos_r + uv_offset.y) * uv_scale;
+                            tex.sample_bilinear(uv_x) * w_tri.x + tex.sample_bilinear(uv_y) * w_tri.y + tex.sample_bilinear(uv_z) * w_tri.z
+                        } else {
+                            tex.get_pixel(tx, ty)
+                        }
+                    };
+
                     let final_col = if let Some(tex) = fill_color_tex {
-                        let t = tex.get_pixel(tx, ty);
+                        let t = sample_rgba_tex(tex);
                         Vec4::new(
                             (t.x * eff_noise).clamp(0.0, 1.0),
                             (t.y * eff_noise).clamp(0.0, 1.0),
@@ -4531,19 +4591,19 @@ impl Layer {
                     };
 
                     let final_rough = if let Some(tex) = fill_roughness_tex {
-                        tex.get_pixel(tx, ty)
+                        sample_scalar_tex(tex)
                     } else {
                         rough
                     };
 
                     let final_metal = if let Some(tex) = fill_metallic_tex {
-                        tex.get_pixel(tx, ty)
+                        sample_scalar_tex(tex)
                     } else {
                         metal
                     };
 
                     let final_emissive = if let Some(tex) = fill_emissive_tex {
-                        let t = tex.get_pixel(tx, ty);
+                        let t = sample_rgba_tex(tex);
                         Vec4::new(
                             t.x * fill_emissive.x,
                             t.y * fill_emissive.y,
@@ -4555,13 +4615,13 @@ impl Layer {
                     };
 
                     let final_opacity = if let Some(tex) = fill_opacity_tex {
-                        tex.get_pixel(tx, ty) * fill_opacity
+                        sample_scalar_tex(tex) * fill_opacity
                     } else {
                         fill_opacity
                     };
  
                     let final_height = if let Some(tex) = fill_height_tex {
-                        tex.get_pixel(tx, ty)
+                        sample_scalar_tex(tex)
                     } else {
                         height
                     };
@@ -6038,6 +6098,67 @@ mod tests {
         assert_eq!(test_layer.anisotropy_angle_buf.data.len(), 0);
         assert_eq!(test_layer.mask_buf.data.len(), 0);
         assert_eq!(test_layer.raster_memory_bytes(), expected_bytes);
+    }
+
+    #[test]
+    fn test_mask_filter_warp() {
+        let w = 32;
+        let h = 32;
+        let mut layer = Layer::new_fill_layer(1, "WarpTest".to_string(), w, h, Vec4::ONE, 0.5, 0.0);
+        layer.add_black_mask();
+        // Add a sharp step in the mask
+        for y in 0..h {
+            for x in 0..w {
+                if x < 16 {
+                    layer.mask_buf.set_pixel(x, y, 1.0);
+                } else {
+                    layer.mask_buf.set_pixel(x, y, 0.0);
+                }
+            }
+        }
+        let pre_warp = layer.mask_buf.get_pixel(15, 16);
+        assert_eq!(pre_warp, 1.0);
+
+        // Apply Warp filter
+        layer.add_mask_filter_warp(0.8, 6.0, 45.0, None);
+        layer.evaluate_mask(None);
+
+        // After domain warp, pixel values near edge should be displaced/interpolated
+        let post_edge = layer.mask_buf.get_pixel(16, 16);
+        assert!(post_edge >= 0.0 && post_edge <= 1.0);
+    }
+
+    #[test]
+    fn test_triplanar_bitmap_fill() {
+        let w = 32;
+        let h = 32;
+        let mut layer = Layer::new_fill_layer(1, "TriplanarBitmapTest".to_string(), w, h, Vec4::ONE, 0.5, 0.0);
+        layer.triplanar = true;
+        layer.triplanar_hardness = 4.0;
+
+        // Provide a test color texture
+        let mut col_tex = RgbaBuffer::new(16, 16, Vec4::ZERO);
+        for y in 0..16 {
+            for x in 0..16 {
+                col_tex.set_pixel(x, y, Vec4::new(x as f32 / 16.0, y as f32 / 16.0, 0.8, 1.0));
+            }
+        }
+        layer.fill_color_tex = Some(col_tex);
+
+        // Construct 3D position and normal maps
+        let mut pos_map = RgbaBuffer::new(w, h, Vec4::ZERO);
+        let mut nrm_map = RgbaBuffer::new(w, h, Vec4::new(0.5, 0.5, 1.0, 1.0));
+        for y in 0..h {
+            for x in 0..w {
+                pos_map.set_pixel(x, y, Vec4::new(x as f32 * 0.1, y as f32 * 0.1, 0.5, 1.0));
+                nrm_map.set_pixel(x, y, Vec4::new(0.5, 1.0, 0.5, 1.0)); // Facing Y
+            }
+        }
+
+        layer.evaluate_fill_advanced(None, Some(&pos_map), Some(&nrm_map), None);
+
+        let sampled = layer.base_color_buf.get_pixel(16, 16);
+        assert!(sampled.z > 0.5, "Triplanar sampling should sample color texture with z ~ 0.8, got {:?}", sampled);
     }
 }
 

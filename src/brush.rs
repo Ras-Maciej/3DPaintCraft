@@ -16,6 +16,7 @@ pub enum ToolMode {
     Smudge,     // Smudge (5)
     Clone,      // Clone (6)
     Eyedropper, // Material Picker / Eyedropper (P / I)
+    Path,       // Vector Path Tool (7 / T)
 }
 
 impl ToolMode {
@@ -29,7 +30,235 @@ impl ToolMode {
             Self::Smudge => "Smudge [5]",
             Self::Clone => "Clone [6]",
             Self::Eyedropper => "Material Picker [P/I]",
+            Self::Path => "Path Tool [7/T]",
         }
+    }
+}
+
+/// A 3D/2D control point on the spline path
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PathControlPoint {
+    pub position_3d: Vec3,
+    pub normal: Vec3,
+    pub uv: Vec2,
+    #[serde(default = "default_radius_scale")]
+    pub radius_scale: f32,
+}
+
+fn default_radius_scale() -> f32 {
+    1.0
+}
+
+/// A continuous stamp position along the evaluated path curve
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PathSample {
+    pub position_3d: Vec3,
+    pub normal: Vec3,
+    pub uv: Vec2,
+    pub tangent_angle: f32, // in radians
+    pub radius_scale: f32,
+}
+
+/// State of the Substance 3D Painter-style Vector Path Tool
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PathToolState {
+    pub points: Vec<PathControlPoint>,
+    pub closed: bool,
+    pub spacing_ratio: f32, // Spacing as fraction of brush radius (default 0.35)
+    pub follow_tangent: bool, // Align stamp rotation to path tangent (default true)
+    pub taper_start: f32, // Taper at start of path (0.0 to 1.0, default 1.0)
+    pub taper_end: f32, // Taper at end of path (0.0 to 1.0, default 1.0)
+    pub selected_point: Option<usize>,
+    pub is_dragging: bool,
+}
+
+impl Default for PathToolState {
+    fn default() -> Self {
+        Self {
+            points: Vec::new(),
+            closed: false,
+            spacing_ratio: 0.35,
+            follow_tangent: true,
+            taper_start: 1.0,
+            taper_end: 1.0,
+            selected_point: None,
+            is_dragging: false,
+        }
+    }
+}
+
+impl PathToolState {
+    pub fn clear(&mut self) {
+        self.points.clear();
+        self.selected_point = None;
+        self.is_dragging = false;
+    }
+
+    /// Evaluates smooth Catmull-Rom spline curves across control points and returns
+    /// sampled stroke points spaced evenly by (brush_radius * spacing_ratio).
+    pub fn sample_path(&self, brush_radius: f32) -> Vec<PathSample> {
+        let n = self.points.len();
+        if n == 0 {
+            return Vec::new();
+        }
+        if n == 1 {
+            let pt = &self.points[0];
+            return vec![PathSample {
+                position_3d: pt.position_3d,
+                normal: pt.normal,
+                uv: pt.uv,
+                tangent_angle: 0.0,
+                radius_scale: pt.radius_scale * self.taper_start,
+            }];
+        }
+
+        let num_segments = if self.closed { n } else { n - 1 };
+        let mut dense_eval: Vec<(Vec3, Vec3, Vec2, f32, f32)> = Vec::new();
+        let sub_steps = 24usize;
+
+        for seg in 0..num_segments {
+            let p1 = &self.points[seg];
+            let p2 = &self.points[(seg + 1) % n];
+
+            let p0 = if seg == 0 {
+                if self.closed {
+                    &self.points[n - 1]
+                } else {
+                    p1
+                }
+            } else {
+                &self.points[seg - 1]
+            };
+
+            let p3 = if seg + 1 >= num_segments {
+                if self.closed {
+                    &self.points[(seg + 2) % n]
+                } else {
+                    p2
+                }
+            } else {
+                &self.points[(seg + 2) % n]
+            };
+
+            for step in 0..sub_steps {
+                let t = step as f32 / sub_steps as f32;
+                let t2 = t * t;
+                let t3 = t2 * t;
+
+                // Catmull-Rom spline basis
+                let b0 = -t3 + 2.0 * t2 - t;
+                let b1 = 3.0 * t3 - 5.0 * t2 + 2.0;
+                let b2 = -3.0 * t3 + 4.0 * t2 + t;
+                let b3 = t3 - t2;
+
+                let pos = 0.5 * (p0.position_3d * b0 + p1.position_3d * b1 + p2.position_3d * b2 + p3.position_3d * b3);
+                let norm = (0.5 * (p0.normal * b0 + p1.normal * b1 + p2.normal * b2 + p3.normal * b3)).normalize_or_zero();
+                let uv = 0.5 * (p0.uv * b0 + p1.uv * b1 + p2.uv * b2 + p3.uv * b3);
+
+                // Derivative for tangent vector
+                let d0 = -3.0 * t2 + 4.0 * t - 1.0;
+                let d1 = 9.0 * t2 - 10.0 * t;
+                let d2 = -9.0 * t2 + 8.0 * t + 1.0;
+                let d3 = 3.0 * t2 - 2.0 * t;
+
+                let d_uv = 0.5 * (p0.uv * d0 + p1.uv * d1 + p2.uv * d2 + p3.uv * d3);
+                let tangent_angle = d_uv.y.atan2(d_uv.x);
+
+                let r_scale = p1.radius_scale * (1.0 - t) + p2.radius_scale * t;
+
+                dense_eval.push((pos, norm, uv, tangent_angle, r_scale));
+            }
+        }
+
+        // Add final point for open curves
+        if !self.closed {
+            let last = &self.points[n - 1];
+            let prev = &self.points[n - 2];
+            let d_uv = last.uv - prev.uv;
+            dense_eval.push((last.position_3d, last.normal, last.uv, d_uv.y.atan2(d_uv.x), last.radius_scale));
+        }
+
+        if dense_eval.is_empty() {
+            return Vec::new();
+        }
+
+        // Compute cumulative arc length across dense points
+        let mut cumulative_dist = Vec::with_capacity(dense_eval.len());
+        cumulative_dist.push(0.0f32);
+        let mut total_len = 0.0f32;
+
+        for i in 1..dense_eval.len() {
+            let seg_len = (dense_eval[i].0 - dense_eval[i - 1].0).length();
+            total_len += seg_len;
+            cumulative_dist.push(total_len);
+        }
+
+        if total_len < 1e-4 {
+            let (pos, norm, uv, ang, r) = dense_eval[0];
+            return vec![PathSample {
+                position_3d: pos,
+                normal: norm,
+                uv,
+                tangent_angle: ang,
+                radius_scale: r * self.taper_start,
+            }];
+        }
+
+        let step_dist = (brush_radius * self.spacing_ratio.max(0.05)).max(0.005);
+        let mut samples = Vec::new();
+        let mut cur_dist = 0.0f32;
+        let mut dense_idx = 0;
+
+        while cur_dist <= total_len {
+            while dense_idx + 1 < cumulative_dist.len() && cumulative_dist[dense_idx + 1] < cur_dist {
+                dense_idx += 1;
+            }
+
+            let (pos, norm, uv, angle, base_r) = if dense_idx + 1 < dense_eval.len() {
+                let d0 = cumulative_dist[dense_idx];
+                let d1 = cumulative_dist[dense_idx + 1];
+                let frac = if (d1 - d0).abs() > 1e-5 {
+                    ((cur_dist - d0) / (d1 - d0)).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                let a = &dense_eval[dense_idx];
+                let b = &dense_eval[dense_idx + 1];
+                (
+                    a.0.lerp(b.0, frac),
+                    a.1.lerp(b.1, frac).normalize_or_zero(),
+                    a.2.lerp(b.2, frac),
+                    a.3,
+                    a.4 * (1.0 - frac) + b.4 * frac,
+                )
+            } else {
+                dense_eval[dense_eval.len() - 1]
+            };
+
+            // Calculate taper factor
+            let norm_pos = (cur_dist / total_len).clamp(0.0, 1.0);
+            let taper = if norm_pos < 0.25 {
+                let f = norm_pos / 0.25;
+                self.taper_start * (1.0 - f) + 1.0 * f
+            } else if norm_pos > 0.75 {
+                let f = (norm_pos - 0.75) / 0.25;
+                1.0 * (1.0 - f) + self.taper_end * f
+            } else {
+                1.0
+            };
+
+            samples.push(PathSample {
+                position_3d: pos,
+                normal: norm,
+                uv,
+                tangent_angle: angle,
+                radius_scale: base_r * taper,
+            });
+
+            cur_dist += step_dist;
+        }
+
+        samples
     }
 }
 
@@ -179,6 +408,10 @@ pub struct BrushSettings {
     // Clone Stamp Settings
     #[serde(default)]
     pub clone_source_uv: Option<Vec2>,
+
+    // Vector Path Tool Settings
+    #[serde(default)]
+    pub path_tool: PathToolState,
 }
 
 fn default_smudge_strength() -> f32 {
@@ -297,6 +530,7 @@ impl Default for BrushSettings {
             stencil: StencilSettings::default(),
             smudge_strength: 0.5,
             clone_source_uv: None,
+            path_tool: PathToolState::default(),
         }
     }
 }
@@ -2060,5 +2294,53 @@ mod tests {
         }
         assert_eq!(pts.len(), 10);
         assert!((pts.last().unwrap().x - 0.1).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_path_tool_spline_sampling() {
+        let mut path = PathToolState::default();
+        assert!(path.sample_path(10.0).is_empty());
+
+        // Single point
+        path.points.push(PathControlPoint {
+            position_3d: Vec3::new(0.0, 0.0, 0.0),
+            normal: Vec3::Y,
+            uv: Vec2::new(0.1, 0.1),
+            radius_scale: 1.0,
+        });
+        let samples = path.sample_path(10.0);
+        assert_eq!(samples.len(), 1);
+        assert_eq!(samples[0].uv, Vec2::new(0.1, 0.1));
+
+        // Add more points along a curve
+        path.points.push(PathControlPoint {
+            position_3d: Vec3::new(1.0, 0.5, 0.0),
+            normal: Vec3::Y,
+            uv: Vec2::new(0.5, 0.3),
+            radius_scale: 1.0,
+        });
+        path.points.push(PathControlPoint {
+            position_3d: Vec3::new(2.0, 0.0, 0.0),
+            normal: Vec3::Y,
+            uv: Vec2::new(0.9, 0.1),
+            radius_scale: 1.0,
+        });
+
+        path.spacing_ratio = 0.2;
+        path.taper_start = 0.2;
+        path.taper_end = 0.4;
+        let samples = path.sample_path(0.1);
+        assert!(samples.len() > 5, "Should generate multiple equidistant samples along the Catmull-Rom spline");
+
+        // Verify start and end radius tapering
+        let first = &samples[0];
+        let last = samples.last().unwrap();
+        assert!((first.radius_scale - 0.2).abs() < 0.15, "Start radius should be tapered close to taper_start");
+        assert!((last.radius_scale - 0.4).abs() < 0.15, "End radius should be tapered close to taper_end");
+
+        // Test closed loop
+        path.closed = true;
+        let closed_samples = path.sample_path(0.1);
+        assert!(closed_samples.len() > samples.len(), "Closed loop path should generate samples for return segment");
     }
 }
