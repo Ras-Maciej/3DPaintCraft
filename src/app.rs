@@ -988,7 +988,11 @@ impl PaintcraftApp {
         self.brush_engine.last_hit_normal = None;
         self.brush_engine.last_uv = None;
 
-        for sample in &samples {
+        let stroke_style = self.brush_engine.settings.path_tool.stroke_style;
+        let decal_type = self.brush_engine.settings.path_tool.decal_type;
+        let heat_tint = self.brush_engine.settings.path_tool.heat_tint;
+
+        for (i, sample) in samples.iter().enumerate() {
             self.brush_engine.settings.radius = (orig_radius * sample.radius_scale).clamp(1.0, 300.0);
             if self.brush_engine.settings.path_tool.follow_tangent {
                 self.brush_engine.follow_path_angle = sample.tangent_angle;
@@ -996,7 +1000,40 @@ impl PaintcraftApp {
 
             let world_rad = (self.brush_engine.settings.radius / (doc_w as f32).max(1.0)) * 2.0;
             let layer = &mut self.project.layers[act_idx];
-            self.brush_engine.paint_stroke_3d(layer, &mesh, sample.position_3d, sample.normal, world_rad.max(0.005));
+
+            if stroke_style == crate::brush::PathStrokeStyle::Continuous {
+                self.brush_engine.paint_stroke_3d(layer, &mesh, sample.position_3d, sample.normal, world_rad.max(0.005));
+            } else {
+                let next_idx = if i + 1 < samples.len() { i + 1 } else { i };
+                let prev_idx = if i > 0 { i - 1 } else { i };
+                let tan_3d = if next_idx != prev_idx {
+                    samples[next_idx].position_3d - samples[prev_idx].position_3d
+                } else if i + 1 < samples.len() {
+                    samples[i + 1].position_3d - sample.position_3d
+                } else if i > 0 {
+                    sample.position_3d - samples[i - 1].position_3d
+                } else {
+                    glam::Vec3::X
+                };
+
+                self.brush_engine.stamp_3d_decal(
+                    layer,
+                    &mesh,
+                    sample.position_3d,
+                    sample.normal,
+                    tan_3d,
+                    world_rad.max(0.005),
+                    stroke_style,
+                    decal_type,
+                    heat_tint,
+                    sample.arc_length,
+                );
+            }
+        }
+
+        if stroke_style != crate::brush::PathStrokeStyle::Continuous {
+            let layer = &mut self.project.layers[act_idx];
+            layer.update_normal_from_height(1.0);
         }
 
         self.brush_engine.settings.radius = orig_radius;
@@ -1006,7 +1043,8 @@ impl PaintcraftApp {
         self.brush_engine.last_hit_normal = None;
         self.brush_engine.last_uv = None;
 
-        let desc = format!("Vector Path ({} stamps)", samples.len());
+        let style_label = stroke_style.name();
+        let desc = format!("{} Path ({} stamps)", style_label, samples.len());
         if let Some(layer) = self.project.layers.get_mut(act_idx) {
             if let Some(action) = layer.finish_stroke_delta(act_idx, &desc) {
                 self.history.push(&desc, action);
@@ -1029,7 +1067,7 @@ impl PaintcraftApp {
 
         self.brush_engine.settings.path_tool.clear();
         self.project.is_dirty = true;
-        self.status_message = format!("Path committed: {} stamps applied", samples.len());
+        self.status_message = format!("{}: {} stamps committed", style_label, samples.len());
         ctx.request_repaint();
     }
 
@@ -4331,21 +4369,66 @@ impl eframe::App for PaintcraftApp {
                                 self.status_message = "Path cleared".to_string();
                             }
                             ui.separator();
-                            ui.checkbox(&mut self.brush_engine.settings.path_tool.closed, "Closed Loop");
-                            ui.checkbox(&mut self.brush_engine.settings.path_tool.follow_tangent, "Follow Tangent");
 
-                            ui.label("Spacing:");
-                            ui.add_sized([55.0, 18.0], egui::Slider::new(&mut self.brush_engine.settings.path_tool.spacing_ratio, 0.05..=1.5).text(""));
+                            let cur_style = self.brush_engine.settings.path_tool.stroke_style;
+                            egui::ComboBox::from_id_source("top_bar_path_stroke_style")
+                                .selected_text(cur_style.name())
+                                .width(120.0)
+                                .show_ui(ui, |ui| {
+                                    for style in &[
+                                        crate::brush::PathStrokeStyle::Continuous,
+                                        crate::brush::PathStrokeStyle::WeldSeam,
+                                        crate::brush::PathStrokeStyle::RopeBraid,
+                                        crate::brush::PathStrokeStyle::StitchSeam,
+                                        crate::brush::PathStrokeStyle::ChainLinks,
+                                        crate::brush::PathStrokeStyle::SmartDecal,
+                                    ] {
+                                        ui.selectable_value(&mut self.brush_engine.settings.path_tool.stroke_style, *style, style.name());
+                                    }
+                                });
 
-                            ui.label("Taper Start:");
-                            ui.add_sized([50.0, 18.0], egui::Slider::new(&mut self.brush_engine.settings.path_tool.taper_start, 0.0..=1.0).text(""));
+                            if self.brush_engine.settings.path_tool.stroke_style == crate::brush::PathStrokeStyle::SmartDecal {
+                                let cur_decal = self.brush_engine.settings.path_tool.decal_type;
+                                egui::ComboBox::from_id_source("top_bar_path_decal_type")
+                                    .selected_text(cur_decal.name())
+                                    .width(135.0)
+                                    .show_ui(ui, |ui| {
+                                        for decal in &[
+                                            crate::brush::SmartDecalType::ButtonHole,
+                                            crate::brush::SmartDecalType::PhillipsScrew,
+                                            crate::brush::SmartDecalType::FlatheadScrew,
+                                            crate::brush::SmartDecalType::TorxScrew,
+                                            crate::brush::SmartDecalType::HexBolt,
+                                            crate::brush::SmartDecalType::DomedRivet,
+                                            crate::brush::SmartDecalType::GrommetEyelet,
+                                            crate::brush::SmartDecalType::AirVentLouver,
+                                        ] {
+                                            ui.selectable_value(&mut self.brush_engine.settings.path_tool.decal_type, *decal, decal.name());
+                                        }
+                                    });
 
-                            ui.label("End:");
-                            ui.add_sized([50.0, 18.0], egui::Slider::new(&mut self.brush_engine.settings.path_tool.taper_end, 0.0..=1.0).text(""));
+                                ui.label("Spacing:");
+                                ui.add_sized([50.0, 18.0], egui::Slider::new(&mut self.brush_engine.settings.path_tool.decal_spacing, 0.4..=3.0).text("x"));
+                            } else if self.brush_engine.settings.path_tool.stroke_style == crate::brush::PathStrokeStyle::WeldSeam {
+                                ui.checkbox(&mut self.brush_engine.settings.path_tool.heat_tint, "HAZ Tint");
+                            }
+
+                            ui.separator();
+                            ui.checkbox(&mut self.brush_engine.settings.path_tool.closed, "Loop");
+                            ui.checkbox(&mut self.brush_engine.settings.path_tool.follow_tangent, "Tangent");
+
+                            if self.brush_engine.settings.path_tool.stroke_style == crate::brush::PathStrokeStyle::Continuous {
+                                ui.label("Spacing:");
+                                ui.add_sized([50.0, 18.0], egui::Slider::new(&mut self.brush_engine.settings.path_tool.spacing_ratio, 0.05..=1.5).text(""));
+                            }
+
+                            ui.label("Taper:");
+                            ui.add_sized([45.0, 18.0], egui::Slider::new(&mut self.brush_engine.settings.path_tool.taper_start, 0.0..=1.0).text("S"));
+                            ui.add_sized([45.0, 18.0], egui::Slider::new(&mut self.brush_engine.settings.path_tool.taper_end, 0.0..=1.0).text("E"));
 
                             ui.separator();
                             ui.label("Radius:");
-                            ui.add_sized([60.0, 18.0], egui::Slider::new(&mut self.brush_engine.settings.radius, 1.0..=100.0).text("px"));
+                            ui.add_sized([55.0, 18.0], egui::Slider::new(&mut self.brush_engine.settings.radius, 1.0..=100.0).text("px"));
                         }
                     }
 
@@ -7354,7 +7437,10 @@ impl PaintcraftApp {
                             egui::Stroke::new(2.5_f32, egui::Color32::from_rgb(243, 94, 24)),
                         );
                     }
-                    let r = (2.2 * sample.radius_scale).clamp(1.2, 7.0);
+                    let r = match self.brush_engine.settings.path_tool.stroke_style {
+                        crate::brush::PathStrokeStyle::SmartDecal => (3.5 * sample.radius_scale).clamp(2.5, 9.0),
+                        _ => (2.2 * sample.radius_scale).clamp(1.2, 7.0),
+                    };
                     ui.painter().circle_filled(cur_screen_pt, r, egui::Color32::from_rgb(255, 205, 110));
                     prev_screen_pt = Some(cur_screen_pt);
                 } else {
@@ -8185,7 +8271,10 @@ impl PaintcraftApp {
                             egui::Stroke::new(2.5_f32, egui::Color32::from_rgb(243, 94, 24)),
                         );
                     }
-                    let r = (2.2 * sample.radius_scale).clamp(1.2, 7.0);
+                    let r = match self.brush_engine.settings.path_tool.stroke_style {
+                        crate::brush::PathStrokeStyle::SmartDecal => (3.5 * sample.radius_scale).clamp(2.5, 9.0),
+                        _ => (2.2 * sample.radius_scale).clamp(1.2, 7.0),
+                    };
                     ui.painter().circle_filled(cur_2d_pt, r, egui::Color32::from_rgb(255, 205, 110));
                     prev_2d_pt = Some(cur_2d_pt);
                 }
@@ -8389,6 +8478,7 @@ impl PaintcraftApp {
             (crate::shelf::ShelfCategory::SmartMasks, "Mask"),
             (crate::shelf::ShelfCategory::Generators, "Noise"),
             (crate::shelf::ShelfCategory::Alphas, "Alpha"),
+            (crate::shelf::ShelfCategory::Decals, "Decal"),
             (crate::shelf::ShelfCategory::Environments, "HDRI"),
         ];
 
@@ -9395,6 +9485,12 @@ impl PaintcraftApp {
                                     let center = preview_rect.center();
                                     ui.painter().circle_filled(center, 11.0, egui::Color32::WHITE);
                                 }
+                                crate::shelf::ShelfCategory::Decals => {
+                                    let center = preview_rect.center();
+                                    ui.painter().circle_stroke(center, 9.0, egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(255, 140, 70)));
+                                    ui.painter().line_segment([egui::pos2(center.x - 5.0, center.y), egui::pos2(center.x + 5.0, center.y)], egui::Stroke::new(1.5_f32, egui::Color32::WHITE));
+                                    ui.painter().line_segment([egui::pos2(center.x, center.y - 5.0), egui::pos2(center.x, center.y + 5.0)], egui::Stroke::new(1.5_f32, egui::Color32::WHITE));
+                                }
                                 _ => {
                                     ui.painter().rect_filled(preview_rect, 2.0, egui::Color32::from_rgb(60, 64, 72));
                                 }
@@ -9407,6 +9503,7 @@ impl PaintcraftApp {
                                 crate::shelf::ShelfCategory::SmartMasks => "MASK",
                                 crate::shelf::ShelfCategory::Generators => "NOISE",
                                 crate::shelf::ShelfCategory::Alphas => "ALPHA",
+                                crate::shelf::ShelfCategory::Decals => "DECAL",
                                 _ => "",
                             };
                             let badge_color = match asset.category {
@@ -9415,6 +9512,7 @@ impl PaintcraftApp {
                                 crate::shelf::ShelfCategory::SmartMasks => egui::Color32::from_rgb(180, 80, 255),
                                 crate::shelf::ShelfCategory::Generators => egui::Color32::from_rgb(46, 204, 113),
                                 crate::shelf::ShelfCategory::Alphas => egui::Color32::from_rgb(80, 210, 100),
+                                crate::shelf::ShelfCategory::Decals => egui::Color32::from_rgb(255, 120, 60),
                                 _ => egui::Color32::GRAY,
                             };
                             ui.painter().text(
@@ -9668,6 +9766,85 @@ impl PaintcraftApp {
                 }
                 self.brush_engine.update_cache();
                 self.status_message = format!("Selected Brush Alpha: {}", asset.name);
+            }
+            crate::shelf::ShelfCategory::Decals => {
+                self.brush_engine.settings.mode = crate::brush::ToolMode::Path;
+                // Enable multi-channel PBR painting
+                self.brush_engine.settings.channels.base_color = true;
+                self.brush_engine.settings.channels.roughness = true;
+                self.brush_engine.settings.channels.metallic = true;
+                self.brush_engine.settings.channels.height = true;
+                self.brush_engine.settings.channels.normal = true;
+
+                match asset.id {
+                    "weld_seam" => {
+                        self.brush_engine.settings.path_tool.stroke_style = crate::brush::PathStrokeStyle::WeldSeam;
+                        self.brush_engine.settings.path_tool.heat_tint = true;
+                        self.brush_engine.settings.radius = 24.0;
+                    }
+                    "rope_braid" => {
+                        self.brush_engine.settings.path_tool.stroke_style = crate::brush::PathStrokeStyle::RopeBraid;
+                        self.brush_engine.settings.radius = 32.0;
+                    }
+                    "stitch_seam" => {
+                        self.brush_engine.settings.path_tool.stroke_style = crate::brush::PathStrokeStyle::StitchSeam;
+                        self.brush_engine.settings.radius = 16.0;
+                    }
+                    "chain_links" => {
+                        self.brush_engine.settings.path_tool.stroke_style = crate::brush::PathStrokeStyle::ChainLinks;
+                        self.brush_engine.settings.radius = 36.0;
+                    }
+                    "decal_button_hole" => {
+                        self.brush_engine.settings.path_tool.stroke_style = crate::brush::PathStrokeStyle::SmartDecal;
+                        self.brush_engine.settings.path_tool.decal_type = crate::brush::SmartDecalType::ButtonHole;
+                        self.brush_engine.settings.path_tool.decal_spacing = 1.4;
+                        self.brush_engine.settings.radius = 28.0;
+                    }
+                    "decal_phillips_screw" => {
+                        self.brush_engine.settings.path_tool.stroke_style = crate::brush::PathStrokeStyle::SmartDecal;
+                        self.brush_engine.settings.path_tool.decal_type = crate::brush::SmartDecalType::PhillipsScrew;
+                        self.brush_engine.settings.path_tool.decal_spacing = 1.2;
+                        self.brush_engine.settings.radius = 24.0;
+                    }
+                    "decal_flathead_screw" => {
+                        self.brush_engine.settings.path_tool.stroke_style = crate::brush::PathStrokeStyle::SmartDecal;
+                        self.brush_engine.settings.path_tool.decal_type = crate::brush::SmartDecalType::FlatheadScrew;
+                        self.brush_engine.settings.path_tool.decal_spacing = 1.2;
+                        self.brush_engine.settings.radius = 24.0;
+                    }
+                    "decal_torx_screw" => {
+                        self.brush_engine.settings.path_tool.stroke_style = crate::brush::PathStrokeStyle::SmartDecal;
+                        self.brush_engine.settings.path_tool.decal_type = crate::brush::SmartDecalType::TorxScrew;
+                        self.brush_engine.settings.path_tool.decal_spacing = 1.2;
+                        self.brush_engine.settings.radius = 24.0;
+                    }
+                    "decal_hex_bolt" => {
+                        self.brush_engine.settings.path_tool.stroke_style = crate::brush::PathStrokeStyle::SmartDecal;
+                        self.brush_engine.settings.path_tool.decal_type = crate::brush::SmartDecalType::HexBolt;
+                        self.brush_engine.settings.path_tool.decal_spacing = 1.3;
+                        self.brush_engine.settings.radius = 28.0;
+                    }
+                    "decal_domed_rivet" => {
+                        self.brush_engine.settings.path_tool.stroke_style = crate::brush::PathStrokeStyle::SmartDecal;
+                        self.brush_engine.settings.path_tool.decal_type = crate::brush::SmartDecalType::DomedRivet;
+                        self.brush_engine.settings.path_tool.decal_spacing = 1.1;
+                        self.brush_engine.settings.radius = 20.0;
+                    }
+                    "decal_grommet" => {
+                        self.brush_engine.settings.path_tool.stroke_style = crate::brush::PathStrokeStyle::SmartDecal;
+                        self.brush_engine.settings.path_tool.decal_type = crate::brush::SmartDecalType::GrommetEyelet;
+                        self.brush_engine.settings.path_tool.decal_spacing = 1.3;
+                        self.brush_engine.settings.radius = 28.0;
+                    }
+                    "decal_air_vent" => {
+                        self.brush_engine.settings.path_tool.stroke_style = crate::brush::PathStrokeStyle::SmartDecal;
+                        self.brush_engine.settings.path_tool.decal_type = crate::brush::SmartDecalType::AirVentLouver;
+                        self.brush_engine.settings.path_tool.decal_spacing = 1.5;
+                        self.brush_engine.settings.radius = 36.0;
+                    }
+                    _ => {}
+                }
+                self.status_message = format!("Selected Path Tool Decal Preset: {}", asset.name);
             }
             crate::shelf::ShelfCategory::Environments => {}
             _ => {}

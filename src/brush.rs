@@ -49,6 +49,449 @@ fn default_radius_scale() -> f32 {
     1.0
 }
 
+/// Stroke generation style for the Substance 3D Painter-style Vector Path Tool
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PathStrokeStyle {
+    Continuous, // Standard continuous brush stamps
+    WeldSeam,   // Industrial TIG/MIG weld puddle ripple beads with temper heat tint
+    RopeBraid,  // Multi-strand twisted helical cord / rope
+    StitchSeam, // Alternating textile thread stitches with puncture holes
+    ChainLinks, // Interlocking chain links
+    SmartDecal, // Discrete hardware decal stamps (uses SmartDecalType)
+}
+
+impl Default for PathStrokeStyle {
+    fn default() -> Self {
+        Self::Continuous
+    }
+}
+
+impl PathStrokeStyle {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Continuous => "Standard Brush",
+            Self::WeldSeam => "TIG Weld Seam",
+            Self::RopeBraid => "Twisted Rope",
+            Self::StitchSeam => "Stitch Seam",
+            Self::ChainLinks => "Chain Links",
+            Self::SmartDecal => "Smart Decal Stamp",
+        }
+    }
+}
+
+/// Specialized hardware decal and fastener stamp types
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SmartDecalType {
+    ButtonHole,    // Tailored fabric button slit with perimeter bar-tack embroidery
+    PhillipsScrew, // Machine screw with 4-point cross (+) drive recess
+    FlatheadScrew, // Slotted machine screw head (-)
+    TorxScrew,     // 6-point star drive recess screw
+    HexBolt,       // Industrial hexagonal bolt head
+    DomedRivet,    // Hemispherical structural aircraft rivet with compression ring
+    GrommetEyelet, // Metallic ring with center fabric cutout hole
+    AirVentLouver, // Mechanical cooling ventilation slats
+}
+
+impl Default for SmartDecalType {
+    fn default() -> Self {
+        Self::PhillipsScrew
+    }
+}
+
+impl SmartDecalType {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::ButtonHole => "Button Hole & Bar-Tack",
+            Self::PhillipsScrew => "Phillips Machine Screw",
+            Self::FlatheadScrew => "Flathead Slotted Screw",
+            Self::TorxScrew => "Torx Star Screw",
+            Self::HexBolt => "Hexagonal Bolt Head",
+            Self::DomedRivet => "Structural Domed Rivet",
+            Self::GrommetEyelet => "Metal Grommet Eyelet",
+            Self::AirVentLouver => "Air Vent Louver",
+        }
+    }
+}
+
+/// Evaluated PBR material properties for a procedural decal or path stroke style
+#[derive(Clone, Copy, Debug)]
+pub struct DecalPixel {
+    pub color: Vec4,
+    pub height: f32,
+    pub roughness: f32,
+    pub metallic: f32,
+    pub opacity: f32,
+    pub alpha: f32, // Footprint weight (0.0 to 1.0)
+}
+
+/// Evaluates multi-channel PBR material properties for a procedural decal or path stroke style
+pub fn evaluate_decal_pixel(
+    style: PathStrokeStyle,
+    decal: SmartDecalType,
+    u: f32, // Along tangent (-1.0 to 1.0)
+    v: f32, // Across bitangent (-1.0 to 1.0)
+    base_color: Vec4,
+    heat_tint: bool,
+    arc_length: f32,
+    world_radius: f32,
+) -> DecalPixel {
+    let r2 = u * u + v * v;
+    if r2 > 1.05 {
+        return DecalPixel {
+            color: base_color,
+            height: 0.5,
+            roughness: 0.5,
+            metallic: 0.0,
+            opacity: 1.0,
+            alpha: 0.0,
+        };
+    }
+    let r = r2.sqrt();
+
+    match style {
+        PathStrokeStyle::Continuous => {
+            let edge = (1.0 - r).clamp(0.0, 1.0);
+            let alpha = edge * edge * (3.0 - 2.0 * edge);
+            DecalPixel {
+                color: base_color,
+                height: 0.5 + 0.3 * (1.0 - r * r).max(0.0).sqrt(),
+                roughness: 0.35,
+                metallic: 0.0,
+                opacity: 1.0,
+                alpha,
+            }
+        }
+        PathStrokeStyle::WeldSeam => {
+            // Overlapping scalloped weld puddle ripple beads
+            let bead_scale = (world_radius * 0.45).max(0.01);
+            let bead_phase = (arc_length / bead_scale + u * 1.8) * std::f32::consts::PI * 2.0;
+            let ripple = (1.0 - (v / 0.85).powi(2)).max(0.0).sqrt() * (0.8 + 0.32 * bead_phase.cos());
+            let h = (0.5 + 0.38 * ripple).clamp(0.0, 1.0);
+
+            // Thermal oxidation colors across distance from center bead
+            let abs_v = v.abs();
+            let (col, rough, metal) = if !heat_tint || abs_v < 0.40 {
+                // Molten metallic steel center puddle
+                (Vec4::new(0.80, 0.82, 0.85, 1.0), 0.22, 0.95)
+            } else if abs_v < 0.60 {
+                // Straw yellow temper band
+                let t = (abs_v - 0.40) / 0.20;
+                let c = Vec4::new(0.80, 0.82, 0.85, 1.0).lerp(Vec4::new(0.88, 0.74, 0.32, 1.0), t);
+                (c, 0.35, 0.85)
+            } else if abs_v < 0.80 {
+                // Purple / Magenta temper band
+                let t = (abs_v - 0.60) / 0.20;
+                let c = Vec4::new(0.88, 0.74, 0.32, 1.0).lerp(Vec4::new(0.62, 0.24, 0.62, 1.0), t);
+                (c, 0.48, 0.70)
+            } else {
+                // Iridescent dark blue temper fringe
+                let t = ((abs_v - 0.80) / 0.20).clamp(0.0, 1.0);
+                let c = Vec4::new(0.62, 0.24, 0.62, 1.0).lerp(Vec4::new(0.20, 0.38, 0.82, 1.0), t);
+                (c, 0.65, 0.55)
+            };
+
+            let edge_falloff = ((1.0 - abs_v) / 0.20).clamp(0.0, 1.0);
+            let u_falloff = ((1.0 - u.abs()) / 0.25).clamp(0.0, 1.0);
+            let alpha = (edge_falloff * u_falloff).clamp(0.0, 1.0);
+
+            DecalPixel {
+                color: col,
+                height: h,
+                roughness: rough,
+                metallic: metal,
+                opacity: 1.0,
+                alpha,
+            }
+        }
+        PathStrokeStyle::RopeBraid => {
+            // 3-strand helical twisted rope / cord
+            let twist_rate = (world_radius * 0.75).max(0.01);
+            let phi = (arc_length / twist_rate) * std::f32::consts::PI * 2.0 + u * 1.5;
+            let v0 = 0.42 * phi.sin();
+            let v1 = 0.42 * (phi + 2.094395).sin();
+            let v2 = 0.42 * (phi + 4.188790).sin();
+
+            let d0 = (v - v0).abs() / 0.42;
+            let d1 = (v - v1).abs() / 0.42;
+            let d2 = (v - v2).abs() / 0.42;
+
+            let h0 = (1.0 - d0 * d0).max(0.0).sqrt();
+            let h1 = (1.0 - d1 * d1).max(0.0).sqrt();
+            let h2 = (1.0 - d2 * d2).max(0.0).sqrt();
+            let max_h = h0.max(h1).max(h2);
+
+            let h = (0.42 + 0.44 * max_h).clamp(0.0, 1.0);
+            let cord_col = Vec4::new(0.72, 0.62, 0.48, 1.0).lerp(base_color, 0.25);
+            let edge_falloff = ((1.0 - v.abs() / 0.90) / 0.15).clamp(0.0, 1.0);
+            let u_falloff = ((1.0 - u.abs() / 0.95) / 0.15).clamp(0.0, 1.0);
+            let alpha = (max_h.min(1.0) * edge_falloff * u_falloff).clamp(0.0, 1.0);
+
+            DecalPixel {
+                color: cord_col,
+                height: h,
+                roughness: 0.88,
+                metallic: 0.0,
+                opacity: 1.0,
+                alpha,
+            }
+        }
+        PathStrokeStyle::StitchSeam => {
+            // Alternating textile thread stitches with puncture holes
+            let stitch_scale = (world_radius * 1.3).max(0.01);
+            let cycle = (arc_length / stitch_scale).rem_euclid(1.0);
+
+            if cycle >= 0.12 && cycle <= 0.88 {
+                let t_thread = (cycle - 0.5) / 0.38;
+                let v_thread = v / 0.35;
+                let h_profile = (1.0 - v_thread * v_thread).max(0.0).sqrt() * (1.0 - t_thread * t_thread).max(0.0).sqrt();
+                let h = 0.5 + 0.34 * h_profile;
+                let alpha = (h_profile * 2.0).clamp(0.0, 1.0);
+                DecalPixel {
+                    color: base_color,
+                    height: h,
+                    roughness: 0.82,
+                    metallic: 0.0,
+                    opacity: 1.0,
+                    alpha,
+                }
+            } else {
+                let hole_dist = (v * v + (u * 2.0).powi(2)).sqrt();
+                let h = 0.5 - 0.35 * (1.0 - hole_dist / 0.35).max(0.0);
+                let alpha = (1.0 - hole_dist / 0.35).max(0.0);
+                DecalPixel {
+                    color: Vec4::new(0.12, 0.12, 0.14, 1.0),
+                    height: h,
+                    roughness: 0.95,
+                    metallic: 0.0,
+                    opacity: 1.0,
+                    alpha,
+                }
+            }
+        }
+        PathStrokeStyle::ChainLinks => {
+            let chain_scale = (world_radius * 1.5).max(0.01);
+            let cycle = (arc_length / chain_scale).rem_euclid(2.0);
+            if cycle < 1.0 {
+                let u_ring = (cycle - 0.5) / 0.45;
+                let v_ring = v / 0.55;
+                let d_ring = ((u_ring * u_ring + v_ring * v_ring).sqrt() - 0.70).abs() / 0.30;
+                let h_ring = (1.0 - d_ring * d_ring).max(0.0).sqrt();
+                let alpha = (h_ring * 2.5).clamp(0.0, 1.0);
+                DecalPixel {
+                    color: Vec4::new(0.78, 0.79, 0.82, 1.0),
+                    height: 0.5 + 0.30 * h_ring,
+                    roughness: 0.28,
+                    metallic: 0.94,
+                    opacity: 1.0,
+                    alpha,
+                }
+            } else {
+                let v_bar = v / 0.28;
+                let h_bar = (1.0 - v_bar * v_bar).max(0.0).sqrt();
+                let alpha = (h_bar * 2.5).clamp(0.0, 1.0);
+                DecalPixel {
+                    color: Vec4::new(0.78, 0.79, 0.82, 1.0),
+                    height: 0.5 + 0.42 * h_bar,
+                    roughness: 0.28,
+                    metallic: 0.94,
+                    opacity: 1.0,
+                    alpha,
+                }
+            }
+        }
+        PathStrokeStyle::SmartDecal => {
+            match decal {
+                SmartDecalType::ButtonHole => {
+                    let inside_slit = u.abs() < 0.65 && v.abs() < 0.08;
+                    if inside_slit {
+                        DecalPixel {
+                            color: Vec4::new(0.08, 0.08, 0.09, 1.0),
+                            height: 0.12,
+                            roughness: 0.95,
+                            metallic: 0.0,
+                            opacity: 1.0,
+                            alpha: 1.0,
+                        }
+                    } else if u.abs() <= 0.82 && v.abs() <= 0.36 {
+                        let zigzag = (u * 32.0).sin() * 0.14;
+                        let h_edge = (1.0 - (v / 0.36).powi(2)).max(0.0).sqrt();
+                        let h = 0.5 + 0.26 * h_edge + zigzag;
+                        let alpha = ((1.0 - u.abs() / 0.82) * 4.0).clamp(0.0, 1.0).min(h_edge * 2.0);
+                        DecalPixel {
+                            color: base_color,
+                            height: h,
+                            roughness: 0.85,
+                            metallic: 0.0,
+                            opacity: 1.0,
+                            alpha,
+                        }
+                    } else {
+                        DecalPixel {
+                            color: base_color,
+                            height: 0.5,
+                            roughness: 0.5,
+                            metallic: 0.0,
+                            opacity: 1.0,
+                            alpha: 0.0,
+                        }
+                    }
+                }
+                SmartDecalType::PhillipsScrew => {
+                    if r > 0.94 {
+                        return DecalPixel { color: base_color, height: 0.5, roughness: 0.5, metallic: 0.0, opacity: 1.0, alpha: 0.0 };
+                    }
+                    let h_head = 0.5 + 0.32 * (1.0 - (r / 0.94).powi(2)).max(0.0).sqrt();
+                    let is_cross = (u.abs() < 0.11 && v.abs() < 0.52) || (v.abs() < 0.11 && u.abs() < 0.52);
+                    let (col, h, r_val, m_val) = if is_cross {
+                        (Vec4::new(0.18, 0.18, 0.20, 1.0), 0.18, 0.55, 0.85)
+                    } else {
+                        (Vec4::new(0.82, 0.83, 0.86, 1.0), h_head, 0.24, 0.95)
+                    };
+                    let alpha = ((0.94 - r) / 0.06).clamp(0.0, 1.0);
+                    DecalPixel {
+                        color: col,
+                        height: h,
+                        roughness: r_val,
+                        metallic: m_val,
+                        opacity: 1.0,
+                        alpha,
+                    }
+                }
+                SmartDecalType::FlatheadScrew => {
+                    if r > 0.94 {
+                        return DecalPixel { color: base_color, height: 0.5, roughness: 0.5, metallic: 0.0, opacity: 1.0, alpha: 0.0 };
+                    }
+                    let h_head = 0.5 + 0.32 * (1.0 - (r / 0.94).powi(2)).max(0.0).sqrt();
+                    let is_slot = v.abs() < 0.11 && u.abs() < 0.72;
+                    let (col, h, r_val, m_val) = if is_slot {
+                        (Vec4::new(0.18, 0.18, 0.20, 1.0), 0.18, 0.55, 0.85)
+                    } else {
+                        (Vec4::new(0.82, 0.83, 0.86, 1.0), h_head, 0.24, 0.95)
+                    };
+                    let alpha = ((0.94 - r) / 0.06).clamp(0.0, 1.0);
+                    DecalPixel {
+                        color: col,
+                        height: h,
+                        roughness: r_val,
+                        metallic: m_val,
+                        opacity: 1.0,
+                        alpha,
+                    }
+                }
+                SmartDecalType::TorxScrew => {
+                    if r > 0.94 {
+                        return DecalPixel { color: base_color, height: 0.5, roughness: 0.5, metallic: 0.0, opacity: 1.0, alpha: 0.0 };
+                    }
+                    let h_head = 0.5 + 0.32 * (1.0 - (r / 0.94).powi(2)).max(0.0).sqrt();
+                    let theta = v.atan2(u);
+                    let r_star = 0.36 + 0.12 * (6.0 * theta).cos();
+                    let is_star = r < r_star;
+                    let (col, h, r_val, m_val) = if is_star {
+                        (Vec4::new(0.18, 0.18, 0.20, 1.0), 0.18, 0.55, 0.85)
+                    } else {
+                        (Vec4::new(0.82, 0.83, 0.86, 1.0), h_head, 0.24, 0.95)
+                    };
+                    let alpha = ((0.94 - r) / 0.06).clamp(0.0, 1.0);
+                    DecalPixel {
+                        color: col,
+                        height: h,
+                        roughness: r_val,
+                        metallic: m_val,
+                        opacity: 1.0,
+                        alpha,
+                    }
+                }
+                SmartDecalType::HexBolt => {
+                    let theta = v.atan2(u);
+                    let pi_div_3 = std::f32::consts::PI / 3.0;
+                    let hex_angle = (theta.rem_euclid(pi_div_3) - std::f32::consts::PI / 6.0).cos().max(0.01);
+                    let r_hex = 0.82 / hex_angle;
+
+                    if r > r_hex + 0.06 {
+                        return DecalPixel { color: base_color, height: 0.5, roughness: 0.5, metallic: 0.0, opacity: 1.0, alpha: 0.0 };
+                    }
+                    let h_base = 0.5 + 0.35 * (1.0 - (r / r_hex).min(1.0) * 0.35);
+                    let h = if r < 0.32 { h_base - 0.12 } else { h_base };
+                    let alpha = ((r_hex + 0.06 - r) / 0.06).clamp(0.0, 1.0);
+                    DecalPixel {
+                        color: Vec4::new(0.76, 0.77, 0.80, 1.0),
+                        height: h,
+                        roughness: 0.26,
+                        metallic: 0.95,
+                        opacity: 1.0,
+                        alpha,
+                    }
+                }
+                SmartDecalType::DomedRivet => {
+                    if r > 0.96 {
+                        return DecalPixel { color: base_color, height: 0.5, roughness: 0.5, metallic: 0.0, opacity: 1.0, alpha: 0.0 };
+                    }
+                    let (h, col, m_val, r_val) = if r <= 0.82 {
+                        let dome_h = 0.5 + 0.42 * (1.0 - (r / 0.82).powi(2)).max(0.0).sqrt();
+                        (dome_h, Vec4::new(0.78, 0.80, 0.83, 1.0), 0.92, 0.28)
+                    } else {
+                        (0.40, Vec4::new(0.45, 0.47, 0.50, 1.0), 0.75, 0.55)
+                    };
+                    let alpha = ((0.96 - r) / 0.08).clamp(0.0, 1.0);
+                    DecalPixel {
+                        color: col,
+                        height: h,
+                        roughness: r_val,
+                        metallic: m_val,
+                        opacity: 1.0,
+                        alpha,
+                    }
+                }
+                SmartDecalType::GrommetEyelet => {
+                    if r > 0.94 {
+                        return DecalPixel { color: base_color, height: 0.5, roughness: 0.5, metallic: 0.0, opacity: 1.0, alpha: 0.0 };
+                    }
+                    let (h, col, m_val, r_val, opac) = if r <= 0.38 {
+                        (0.12, Vec4::new(0.06, 0.06, 0.08, 1.0), 0.0, 0.95, 0.0)
+                    } else {
+                        let ring_d = ((r - 0.65) / 0.27).abs();
+                        let ring_h = 0.5 + 0.36 * (1.0 - ring_d * ring_d).max(0.0).sqrt();
+                        let brass_col = Vec4::new(0.86, 0.74, 0.40, 1.0);
+                        (ring_h, brass_col, 0.95, 0.22, 1.0)
+                    };
+                    let alpha = ((0.94 - r) / 0.06).clamp(0.0, 1.0);
+                    DecalPixel {
+                        color: col,
+                        height: h,
+                        roughness: r_val,
+                        metallic: m_val,
+                        opacity: opac,
+                        alpha,
+                    }
+                }
+                SmartDecalType::AirVentLouver => {
+                    if u.abs() > 0.88 || v.abs() > 0.88 {
+                        return DecalPixel { color: base_color, height: 0.5, roughness: 0.5, metallic: 0.0, opacity: 1.0, alpha: 0.0 };
+                    }
+                    let slat_v = (v * 2.5 + 10.0).rem_euclid(1.0);
+                    let (h, col, r_val) = if slat_v < 0.82 {
+                        let ramp_h = 0.5 + 0.32 * slat_v;
+                        (ramp_h, Vec4::new(0.72, 0.74, 0.77, 1.0), 0.32)
+                    } else {
+                        (0.20, Vec4::new(0.12, 0.12, 0.14, 1.0), 0.85)
+                    };
+                    let border_u = ((0.88 - u.abs()) / 0.08).clamp(0.0, 1.0);
+                    let border_v = ((0.88 - v.abs()) / 0.08).clamp(0.0, 1.0);
+                    let alpha = border_u * border_v;
+                    DecalPixel {
+                        color: col,
+                        height: h,
+                        roughness: r_val,
+                        metallic: 0.88,
+                        opacity: 1.0,
+                        alpha,
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// A continuous stamp position along the evaluated path curve
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PathSample {
@@ -57,6 +500,8 @@ pub struct PathSample {
     pub uv: Vec2,
     pub tangent_angle: f32, // in radians
     pub radius_scale: f32,
+    #[serde(default)]
+    pub arc_length: f32,
 }
 
 /// State of the Substance 3D Painter-style Vector Path Tool
@@ -70,6 +515,22 @@ pub struct PathToolState {
     pub taper_end: f32, // Taper at end of path (0.0 to 1.0, default 1.0)
     pub selected_point: Option<usize>,
     pub is_dragging: bool,
+    #[serde(default)]
+    pub stroke_style: PathStrokeStyle,
+    #[serde(default)]
+    pub decal_type: SmartDecalType,
+    #[serde(default = "default_decal_spacing")]
+    pub decal_spacing: f32,
+    #[serde(default = "default_heat_tint")]
+    pub heat_tint: bool,
+}
+
+fn default_decal_spacing() -> f32 {
+    1.2
+}
+
+fn default_heat_tint() -> bool {
+    true
 }
 
 impl Default for PathToolState {
@@ -83,6 +544,10 @@ impl Default for PathToolState {
             taper_end: 1.0,
             selected_point: None,
             is_dragging: false,
+            stroke_style: PathStrokeStyle::Continuous,
+            decal_type: SmartDecalType::PhillipsScrew,
+            decal_spacing: 1.2,
+            heat_tint: true,
         }
     }
 }
@@ -109,6 +574,7 @@ impl PathToolState {
                 uv: pt.uv,
                 tangent_angle: 0.0,
                 radius_scale: pt.radius_scale * self.taper_start,
+                arc_length: 0.0,
             }];
         }
 
@@ -201,10 +667,18 @@ impl PathToolState {
                 uv,
                 tangent_angle: ang,
                 radius_scale: r * self.taper_start,
+                arc_length: 0.0,
             }];
         }
 
-        let step_dist = (brush_radius * self.spacing_ratio.max(0.05)).max(0.005);
+        let step_dist = match self.stroke_style {
+            PathStrokeStyle::SmartDecal => (brush_radius * self.decal_spacing.max(0.25) * 2.0).max(0.01),
+            PathStrokeStyle::WeldSeam => (brush_radius * 0.22).max(0.005),
+            PathStrokeStyle::RopeBraid => (brush_radius * 0.15).max(0.005),
+            PathStrokeStyle::StitchSeam => (brush_radius * 0.25).max(0.005),
+            PathStrokeStyle::ChainLinks => (brush_radius * 0.35).max(0.005),
+            PathStrokeStyle::Continuous => (brush_radius * self.spacing_ratio.max(0.05)).max(0.005),
+        };
         let mut samples = Vec::new();
         let mut cur_dist = 0.0f32;
         let mut dense_idx = 0;
@@ -253,6 +727,7 @@ impl PathToolState {
                 uv,
                 tangent_angle: angle,
                 radius_scale: base_r * taper,
+                arc_length: cur_dist,
             });
 
             cur_dist += step_dist;
@@ -1523,6 +1998,416 @@ pub fn barycentric_3d(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> (f32, f32, f32) {
         }
     }
 
+    /// Stamps a multi-channel procedural decal, weld seam, rope, stitch, or hardware fastener in 3D world space
+    pub fn stamp_3d_decal(
+        &mut self,
+        layer: &mut Layer,
+        mesh: &crate::mesh::Mesh,
+        hit_pos: Vec3,
+        hit_normal: Vec3,
+        tangent: Vec3,
+        world_radius: f32,
+        style: PathStrokeStyle,
+        decal: SmartDecalType,
+        heat_tint: bool,
+        arc_length: f32,
+    ) {
+        let triangles = mesh.query_sphere(hit_pos, world_radius);
+        if triangles.is_empty() {
+            return;
+        }
+
+        let w = layer.base_color_buf.width as i32;
+        let h = layer.base_color_buf.height as i32;
+        let w_f = w as f32;
+        let h_f = h as f32;
+        let buf_w = w as usize;
+        let world_radius_sq = world_radius * world_radius;
+
+        layer.ensure_allocated_for_paint(PaintTarget::Material, self.settings.channels, false);
+
+        // Orthonormal tangent space frame on surface: Normal, Tangent, Bitangent
+        let n = hit_normal.normalize_or_zero();
+        let tan_proj = tangent - n * n.dot(tangent);
+        let t_axis = if tan_proj.length_squared() > 1e-6 {
+            tan_proj.normalize()
+        } else {
+            let up = if n.y.abs() < 0.95 { Vec3::Y } else { Vec3::X };
+            n.cross(up).normalize()
+        };
+        let b_axis = n.cross(t_axis).normalize();
+
+        let base_col_target = self.settings.paint_color;
+        let do_color = self.settings.channels.base_color;
+        let do_r = self.settings.channels.roughness;
+        let do_m = self.settings.channels.metallic;
+        let do_h = self.settings.channels.height;
+        let do_opac = self.settings.channels.opacity;
+
+        let mut overall_min_x = i32::MAX;
+        let mut overall_min_y = i32::MAX;
+        let mut overall_max_x = i32::MIN;
+        let mut overall_max_y = i32::MIN;
+
+        for tri_idx in triangles {
+            let i0 = mesh.indices[tri_idx as usize * 3] as usize;
+            let i1 = mesh.indices[tri_idx as usize * 3 + 1] as usize;
+            let i2 = mesh.indices[tri_idx as usize * 3 + 2] as usize;
+
+            let v0 = &mesh.vertices[i0];
+            let v1 = &mesh.vertices[i1];
+            let v2 = &mesh.vertices[i2];
+
+            let edge1 = v1.position - v0.position;
+            let edge2 = v2.position - v0.position;
+            let tri_normal = edge1.cross(edge2);
+            let normal_len = tri_normal.length();
+            if normal_len < 1e-7 {
+                continue;
+            }
+            let tri_normal = tri_normal / normal_len;
+
+            let diff = hit_pos - v0.position;
+            let dist_to_plane = diff.dot(tri_normal);
+            if dist_to_plane.abs() > world_radius {
+                continue;
+            }
+
+            let normal_dot = tri_normal.dot(hit_normal);
+            if normal_dot < -0.2 {
+                continue;
+            }
+            let t_norm = ((normal_dot - (-0.2)) / (0.25 - (-0.2))).clamp(0.0, 1.0);
+            let angle_weight = t_norm * t_norm * (3.0 - 2.0 * t_norm);
+
+            let mut u0 = v0.uv.x;
+            let mut v0_y = v0.uv.y;
+            let mut u1 = v1.uv.x;
+            let mut v1_y = v1.uv.y;
+            let mut u2 = v2.uv.x;
+            let mut v2_y = v2.uv.y;
+
+            if (u1 - u0) > 0.5 { u1 -= 1.0; } else if (u1 - u0) < -0.5 { u1 += 1.0; }
+            if (u2 - u0) > 0.5 { u2 -= 1.0; } else if (u2 - u0) < -0.5 { u2 += 1.0; }
+            if (v1_y - v0_y) > 0.5 { v1_y -= 1.0; } else if (v1_y - v0_y) < -0.5 { v1_y += 1.0; }
+            if (v2_y - v0_y) > 0.5 { v2_y -= 1.0; } else if (v2_y - v0_y) < -0.5 { v2_y += 1.0; }
+
+            let shift_u = u0.floor();
+            let shift_v = v0_y.floor();
+            u0 -= shift_u; u1 -= shift_u; u2 -= shift_u;
+            v0_y -= shift_v; v1_y -= shift_v; v2_y -= shift_v;
+
+            let p0_uv = Vec2::new(u0 * w_f, v0_y * h_f);
+            let p1_uv = Vec2::new(u1 * w_f, v1_y * h_f);
+            let p2_uv = Vec2::new(u2 * w_f, v2_y * h_f);
+
+            let det = (p1_uv.y - p2_uv.y) * (p0_uv.x - p2_uv.x) + (p2_uv.x - p1_uv.x) * (p0_uv.y - p2_uv.y);
+            if det.abs() < 1e-6 {
+                continue;
+            }
+            let inv_det = 1.0 / det;
+
+            let tri_min_x = p0_uv.x.min(p1_uv.x).min(p2_uv.x).floor() as i32;
+            let tri_max_x = p0_uv.x.max(p1_uv.x).max(p2_uv.x).ceil() as i32;
+            let tri_min_y = p0_uv.y.min(p1_uv.y).min(p2_uv.y).floor() as i32;
+            let tri_max_y = p0_uv.y.max(p1_uv.y).max(p2_uv.y).ceil() as i32;
+
+            let (min_x, max_x, min_y, max_y) = if (tri_max_x - tri_min_x) > 128 || (tri_max_y - tri_min_y) > 128 {
+                let e1_3d = (v1.position - v0.position).length().max(1e-5);
+                let e2_3d = (v2.position - v0.position).length().max(1e-5);
+                let e3_3d = (v2.position - v1.position).length().max(1e-5);
+                let e1_uv = (p1_uv - p0_uv).length();
+                let e2_uv = (p2_uv - p0_uv).length();
+                let e3_uv = (p2_uv - p1_uv).length();
+                let max_uv_rate = (e1_uv / e1_3d).max(e2_uv / e2_3d).max(e3_uv / e3_3d);
+
+                let plane_rad = (world_radius_sq - dist_to_plane * dist_to_plane).max(0.0).sqrt();
+                let uv_brush_radius = (plane_rad * max_uv_rate * 2.0).ceil() as i32 + 8;
+
+                let proj_pt = hit_pos - tri_normal * dist_to_plane;
+                let (bc_u, bc_v, bc_w) = Self::barycentric_3d(proj_pt, v0.position, v1.position, v2.position);
+                let center_uv = p0_uv * bc_u + p1_uv * bc_v + p2_uv * bc_w;
+
+                (
+                    tri_min_x.max((center_uv.x - uv_brush_radius as f32).floor() as i32).clamp(0, w - 1),
+                    tri_max_x.min((center_uv.x + uv_brush_radius as f32).ceil() as i32).clamp(0, w - 1),
+                    tri_min_y.max((center_uv.y - uv_brush_radius as f32).floor() as i32).clamp(0, h - 1),
+                    tri_max_y.min((center_uv.y + uv_brush_radius as f32).ceil() as i32).clamp(0, h - 1),
+                )
+            } else {
+                (
+                    tri_min_x.clamp(0, w - 1),
+                    tri_max_x.clamp(0, w - 1),
+                    tri_min_y.clamp(0, h - 1),
+                    tri_max_y.clamp(0, h - 1),
+                )
+            };
+
+            if min_x > max_x || min_y > max_y {
+                continue;
+            }
+
+            layer.record_tiles_for_rect(min_x as u32, min_y as u32, max_x as u32, max_y as u32);
+
+            let dw0_dx = (p1_uv.y - p2_uv.y) * inv_det;
+            let dw1_dx = (p2_uv.y - p0_uv.y) * inv_det;
+            let dw0_dy = (p2_uv.x - p1_uv.x) * inv_det;
+            let dw1_dy = (p0_uv.x - p2_uv.x) * inv_det;
+
+            let start_x_f = min_x as f32 + 0.5;
+            let start_y_f = min_y as f32 + 0.5;
+            let mut row_w0 = ((p1_uv.y - p2_uv.y) * (start_x_f - p2_uv.x) + (p2_uv.x - p1_uv.x) * (start_y_f - p2_uv.y)) * inv_det;
+            let mut row_w1 = ((p2_uv.y - p0_uv.y) * (start_x_f - p2_uv.x) + (p0_uv.x - p2_uv.x) * (start_y_f - p2_uv.y)) * inv_det;
+
+            for py in min_y..=max_y {
+                let wrap_y = py as usize;
+                let buf_y_offset = wrap_y * buf_w;
+
+                let mut w0 = row_w0;
+                let mut w1 = row_w1;
+
+                for px in min_x..=max_x {
+                    let w2 = 1.0 - w0 - w1;
+
+                    if w0 >= -0.01 && w1 >= -0.01 && w2 >= -0.01 {
+                        let p3d = v0.position * w0.clamp(0.0, 1.0)
+                            + v1.position * w1.clamp(0.0, 1.0)
+                            + v2.position * w2.clamp(0.0, 1.0);
+
+                        let offset = p3d - hit_pos;
+                        let dist_sq = offset.length_squared();
+                        if dist_sq <= world_radius_sq * 1.05 {
+                            let u_coord = offset.dot(t_axis) / world_radius;
+                            let v_coord = offset.dot(b_axis) / world_radius;
+
+                            let decal_px = evaluate_decal_pixel(
+                                style,
+                                decal,
+                                u_coord,
+                                v_coord,
+                                base_col_target,
+                                heat_tint,
+                                arc_length,
+                                world_radius,
+                            );
+
+                            let weight = (decal_px.alpha * angle_weight).clamp(0.0, 1.0);
+                            if weight > 1e-4 {
+                                let wrap_x = px as usize;
+                                overall_min_x = overall_min_x.min(wrap_x as i32);
+                                overall_max_x = overall_max_x.max(wrap_x as i32);
+                                overall_min_y = overall_min_y.min(wrap_y as i32);
+                                overall_max_y = overall_max_y.max(wrap_y as i32);
+
+                                let idx = buf_y_offset + wrap_x;
+
+                                unsafe {
+                                    let cur_col = *layer.base_color_buf.data.get_unchecked(idx);
+                                    let alpha = (cur_col.w + weight * (1.0 - cur_col.w)).clamp(0.0, 1.0);
+                                    if do_color {
+                                        let blended = if cur_col.w <= 1e-4 {
+                                            decal_px.color.truncate()
+                                        } else {
+                                            cur_col.truncate().lerp(decal_px.color.truncate(), (weight / alpha).clamp(0.0, 1.0))
+                                        };
+                                        *layer.base_color_buf.data.get_unchecked_mut(idx) = Vec4::new(blended.x, blended.y, blended.z, alpha);
+                                    } else {
+                                        layer.base_color_buf.data.get_unchecked_mut(idx).w = alpha;
+                                    }
+
+                                    if do_r {
+                                        let cur_r = *layer.roughness_buf.data.get_unchecked(idx);
+                                        *layer.roughness_buf.data.get_unchecked_mut(idx) = cur_r * (1.0 - weight) + decal_px.roughness * weight;
+                                    }
+                                    if do_m {
+                                        let cur_m = *layer.metallic_buf.data.get_unchecked(idx);
+                                        *layer.metallic_buf.data.get_unchecked_mut(idx) = cur_m * (1.0 - weight) + decal_px.metallic * weight;
+                                    }
+                                    if do_h {
+                                        let cur_h = *layer.height_buf.data.get_unchecked(idx);
+                                        *layer.height_buf.data.get_unchecked_mut(idx) = cur_h * (1.0 - weight) + decal_px.height * weight;
+                                    }
+                                    if do_opac {
+                                        let cur_o = *layer.opacity_buf.data.get_unchecked(idx);
+                                        *layer.opacity_buf.data.get_unchecked_mut(idx) = cur_o * (1.0 - weight) + decal_px.opacity * weight;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    w0 += dw0_dx;
+                    w1 += dw1_dx;
+                }
+                row_w0 += dw0_dy;
+                row_w1 += dw1_dy;
+            }
+        }
+
+        if overall_min_x <= overall_max_x && overall_min_y <= overall_max_y {
+            let r_min_x = overall_min_x as u32;
+            let r_max_x = overall_max_x as u32;
+            let r_min_y = overall_min_y as u32;
+            let r_max_y = overall_max_y as u32;
+
+            if do_h {
+                layer.update_normal_from_height_rect(r_min_x, r_min_y, r_max_x, r_max_y, 4.0);
+            }
+
+            if do_color { layer.dirty_flags.color = true; }
+            if do_r { layer.dirty_flags.roughness = true; }
+            if do_m { layer.dirty_flags.metallic = true; }
+            if do_h || self.settings.channels.normal { layer.dirty_flags.normal = true; }
+
+            if let Some((dx0, dy0, dx1, dy1)) = layer.dirty_rect {
+                layer.dirty_rect = Some((
+                    dx0.min(r_min_x),
+                    dy0.min(r_min_y),
+                    dx1.max(r_max_x),
+                    dy1.max(r_max_y),
+                ));
+            } else {
+                layer.dirty_rect = Some((r_min_x, r_min_y, r_max_x, r_max_y));
+            }
+        }
+    }
+
+    /// Stamps a multi-channel procedural decal or path stroke style on a 2D UV canvas
+    #[allow(dead_code)]
+    pub fn stamp_uv_decal(
+        &mut self,
+        layer: &mut Layer,
+        center_uv: Vec2,
+        tangent_angle: f32,
+        uv_radius: f32,
+        style: PathStrokeStyle,
+        decal: SmartDecalType,
+        heat_tint: bool,
+        arc_length: f32,
+    ) {
+        let w = layer.base_color_buf.width as i32;
+        let h = layer.base_color_buf.height as i32;
+        let w_f = w as f32;
+        let h_f = h as f32;
+        let buf_w = w as usize;
+
+        layer.ensure_allocated_for_paint(PaintTarget::Material, self.settings.channels, false);
+
+        let cx = center_uv.x * w_f;
+        let cy = center_uv.y * h_f;
+        let r_px = uv_radius * w_f;
+        let r_px_sq = r_px * r_px;
+
+        let min_x = ((cx - r_px).floor() as i32).clamp(0, w - 1);
+        let max_x = ((cx + r_px).ceil() as i32).clamp(0, w - 1);
+        let min_y = ((cy - r_px).floor() as i32).clamp(0, h - 1);
+        let max_y = ((cy + r_px).ceil() as i32).clamp(0, h - 1);
+
+        if min_x > max_x || min_y > max_y {
+            return;
+        }
+
+        layer.record_tiles_for_rect(min_x as u32, min_y as u32, max_x as u32, max_y as u32);
+
+        let cos_a = tangent_angle.cos();
+        let sin_a = tangent_angle.sin();
+
+        let base_col_target = self.settings.paint_color;
+        let do_color = self.settings.channels.base_color;
+        let do_r = self.settings.channels.roughness;
+        let do_m = self.settings.channels.metallic;
+        let do_h = self.settings.channels.height;
+        let do_opac = self.settings.channels.opacity;
+
+        for py in min_y..=max_y {
+            let dy = py as f32 + 0.5 - cy;
+            let row_offset = py as usize * buf_w;
+
+            for px in min_x..=max_x {
+                let dx = px as f32 + 0.5 - cx;
+                let d2 = dx * dx + dy * dy;
+                if d2 <= r_px_sq {
+                    let norm_dx = dx / r_px;
+                    let norm_dy = dy / r_px;
+
+                    let u = norm_dx * cos_a + norm_dy * sin_a;
+                    let v = -norm_dx * sin_a + norm_dy * cos_a;
+
+                    let decal_px = evaluate_decal_pixel(
+                        style,
+                        decal,
+                        u,
+                        v,
+                        base_col_target,
+                        heat_tint,
+                        arc_length,
+                        uv_radius,
+                    );
+
+                    let weight = decal_px.alpha.clamp(0.0, 1.0);
+                    if weight > 1e-4 {
+                        let idx = row_offset + px as usize;
+                        unsafe {
+                            let cur_col = *layer.base_color_buf.data.get_unchecked(idx);
+                            let alpha = (cur_col.w + weight * (1.0 - cur_col.w)).clamp(0.0, 1.0);
+                            if do_color {
+                                let blended = if cur_col.w <= 1e-4 {
+                                    decal_px.color.truncate()
+                                } else {
+                                    cur_col.truncate().lerp(decal_px.color.truncate(), (weight / alpha).clamp(0.0, 1.0))
+                                };
+                                *layer.base_color_buf.data.get_unchecked_mut(idx) = Vec4::new(blended.x, blended.y, blended.z, alpha);
+                            } else {
+                                layer.base_color_buf.data.get_unchecked_mut(idx).w = alpha;
+                            }
+
+                            if do_r {
+                                let cur_r = *layer.roughness_buf.data.get_unchecked(idx);
+                                *layer.roughness_buf.data.get_unchecked_mut(idx) = cur_r * (1.0 - weight) + decal_px.roughness * weight;
+                            }
+                            if do_m {
+                                let cur_m = *layer.metallic_buf.data.get_unchecked(idx);
+                                *layer.metallic_buf.data.get_unchecked_mut(idx) = cur_m * (1.0 - weight) + decal_px.metallic * weight;
+                            }
+                            if do_h {
+                                let cur_h = *layer.height_buf.data.get_unchecked(idx);
+                                *layer.height_buf.data.get_unchecked_mut(idx) = cur_h * (1.0 - weight) + decal_px.height * weight;
+                            }
+                            if do_opac {
+                                let cur_o = *layer.opacity_buf.data.get_unchecked(idx);
+                                *layer.opacity_buf.data.get_unchecked_mut(idx) = cur_o * (1.0 - weight) + decal_px.opacity * weight;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let r_min_x = min_x as u32;
+        let r_max_x = max_x as u32;
+        let r_min_y = min_y as u32;
+        let r_max_y = max_y as u32;
+
+        if do_h {
+            layer.update_normal_from_height_rect(r_min_x, r_min_y, r_max_x, r_max_y, 4.0);
+        }
+
+        if do_color { layer.dirty_flags.color = true; }
+        if do_r { layer.dirty_flags.roughness = true; }
+        if do_m { layer.dirty_flags.metallic = true; }
+        if do_h || self.settings.channels.normal { layer.dirty_flags.normal = true; }
+
+        if let Some((dx0, dy0, dx1, dy1)) = layer.dirty_rect {
+            layer.dirty_rect = Some((
+                dx0.min(r_min_x),
+                dy0.min(r_min_y),
+                dx1.max(r_max_x),
+                dy1.max(r_max_y),
+            ));
+        } else {
+            layer.dirty_rect = Some((r_min_x, r_min_y, r_max_x, r_max_y));
+        }
+    }
+
     /// Paint continuous stroke in 3D world space across triangles & UV islands
     pub fn paint_stroke_3d(
         &mut self,
@@ -2342,5 +3227,132 @@ mod tests {
         path.closed = true;
         let closed_samples = path.sample_path(0.1);
         assert!(closed_samples.len() > samples.len(), "Closed loop path should generate samples for return segment");
+    }
+
+    #[test]
+    fn test_decal_pixel_evaluation() {
+        let base_col = Vec4::new(0.5, 0.5, 0.5, 1.0);
+
+        // Test all PathStrokeStyle variants
+        for style in &[
+            PathStrokeStyle::Continuous,
+            PathStrokeStyle::WeldSeam,
+            PathStrokeStyle::RopeBraid,
+            PathStrokeStyle::StitchSeam,
+            PathStrokeStyle::ChainLinks,
+        ] {
+            let px = evaluate_decal_pixel(*style, SmartDecalType::PhillipsScrew, 0.0, 0.0, base_col, true, 0.5, 0.1);
+            assert!(px.alpha > 0.0, "Center alpha should be non-zero for style {:?}", style);
+            assert!(px.height >= 0.0 && px.height <= 1.0, "Height should be normalized for style {:?}", style);
+            assert!(px.roughness >= 0.0 && px.roughness <= 1.0, "Roughness should be normalized for style {:?}", style);
+            assert!(px.metallic >= 0.0 && px.metallic <= 1.0, "Metallic should be normalized for style {:?}", style);
+            assert!(px.opacity >= 0.0 && px.opacity <= 1.0, "Opacity should be normalized for style {:?}", style);
+        }
+
+        // Test all SmartDecalType variants
+        for decal in &[
+            SmartDecalType::ButtonHole,
+            SmartDecalType::PhillipsScrew,
+            SmartDecalType::FlatheadScrew,
+            SmartDecalType::TorxScrew,
+            SmartDecalType::HexBolt,
+            SmartDecalType::DomedRivet,
+            SmartDecalType::GrommetEyelet,
+            SmartDecalType::AirVentLouver,
+        ] {
+            let px = evaluate_decal_pixel(PathStrokeStyle::SmartDecal, *decal, 0.0, 0.0, base_col, true, 0.0, 0.1);
+            assert!(px.alpha > 0.0, "Center alpha should be non-zero for decal {:?}", decal);
+            assert!(px.height >= 0.0 && px.height <= 1.0, "Height should be normalized for decal {:?}", decal);
+            assert!(px.roughness >= 0.0 && px.roughness <= 1.0, "Roughness should be normalized for decal {:?}", decal);
+            assert!(px.metallic >= 0.0 && px.metallic <= 1.0, "Metallic should be normalized for decal {:?}", decal);
+            assert!(px.opacity >= 0.0 && px.opacity <= 1.0, "Opacity should be normalized for decal {:?}", decal);
+        }
+
+        // Test outside boundary
+        let outside_px = evaluate_decal_pixel(PathStrokeStyle::SmartDecal, SmartDecalType::PhillipsScrew, 1.5, 1.5, base_col, true, 0.0, 0.1);
+        assert_eq!(outside_px.alpha, 0.0, "Outside boundary alpha must be zero");
+    }
+
+    #[test]
+    fn test_path_tool_styles_and_decals_sampling() {
+        let mut path = PathToolState::default();
+        path.points.push(PathControlPoint {
+            position_3d: Vec3::new(0.0, 0.0, 0.0),
+            normal: Vec3::Y,
+            uv: Vec2::new(0.0, 0.5),
+            radius_scale: 1.0,
+        });
+        path.points.push(PathControlPoint {
+            position_3d: Vec3::new(1.0, 0.0, 0.0),
+            normal: Vec3::Y,
+            uv: Vec2::new(0.5, 0.5),
+            radius_scale: 1.0,
+        });
+        path.points.push(PathControlPoint {
+            position_3d: Vec3::new(2.0, 0.0, 0.0),
+            normal: Vec3::Y,
+            uv: Vec2::new(1.0, 0.5),
+            radius_scale: 1.0,
+        });
+
+        // Test WeldSeam style sampling
+        path.stroke_style = PathStrokeStyle::WeldSeam;
+        let weld_samples = path.sample_path(0.1);
+        assert!(!weld_samples.is_empty());
+        for i in 1..weld_samples.len() {
+            assert!(weld_samples[i].arc_length > weld_samples[i - 1].arc_length, "Arc length must be strictly monotonic");
+        }
+
+        // Test SmartDecal style spacing
+        path.stroke_style = PathStrokeStyle::SmartDecal;
+        path.decal_spacing = 2.0;
+        let decal_samples = path.sample_path(0.1);
+        assert!(!decal_samples.is_empty());
+        assert!(decal_samples.len() < weld_samples.len(), "Decals with 2.0 spacing should have fewer samples than continuous weld ripple beads");
+    }
+
+    #[test]
+    fn test_stamp_uv_and_3d_decal() {
+        let mut engine = BrushEngine::new();
+        engine.settings.channels.base_color = true;
+        engine.settings.channels.roughness = true;
+        engine.settings.channels.metallic = true;
+        engine.settings.channels.height = true;
+
+        let mut layer = Layer::new_paint_layer(1, "Test Layer".to_string(), 64, 64);
+
+        // Test 2D UV decal stamping
+        engine.stamp_uv_decal(
+            &mut layer,
+            Vec2::new(0.5, 0.5),
+            0.0,
+            0.25,
+            PathStrokeStyle::SmartDecal,
+            SmartDecalType::PhillipsScrew,
+            true,
+            0.0,
+        );
+
+        assert!(layer.dirty_rect.is_some(), "Dirty rect should be populated after stamping");
+        let center_idx = 32 * 64 + 32;
+        assert!(layer.base_color_buf.data[center_idx].w > 0.0, "Center pixel should have painted alpha");
+        assert!(layer.metallic_buf.data[center_idx] > 0.5, "Screw center should have metallic response");
+
+        // Test 3D decal stamping onto a unit cube mesh
+        let mesh = crate::mesh::Mesh::create_cube_mesh("Cube", 2.0);
+        engine.stamp_3d_decal(
+            &mut layer,
+            &mesh,
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::Y,
+            Vec3::X,
+            0.4,
+            PathStrokeStyle::WeldSeam,
+            SmartDecalType::PhillipsScrew,
+            true,
+            0.5,
+        );
+        assert!(layer.dirty_flags.color);
+        assert!(layer.dirty_flags.normal);
     }
 }

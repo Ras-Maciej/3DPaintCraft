@@ -12,6 +12,7 @@ pub enum ShelfCategory {
     SmartMasks,
     Generators,
     Alphas,
+    Decals,
     Environments,
 }
 
@@ -27,6 +28,7 @@ impl ShelfCategory {
             Self::SmartMasks => "Smart Masks",
             Self::Generators => "Noises",
             Self::Alphas => "Alphas",
+            Self::Decals => "Decals & Hardware",
             Self::Environments => "Environments (HDRIs)",
         }
     }
@@ -585,6 +587,116 @@ pub static SHELF_ASSETS: &[ShelfAsset] = &[
             preview_roughness: 0.5,
             description: "Substance-style connected component flood fill segmentation with per-island variation and gradients",
         },
+
+        // --- 7. PATH STROKE PRESETS & SMART DECALS ---
+        ShelfAsset {
+            id: "weld_seam",
+            name: "TIG Weld Seam",
+            category: ShelfCategory::Decals,
+            preview_color: [180, 185, 195],
+            preview_metallic: 0.95,
+            preview_roughness: 0.22,
+            description: "Industrial overlapping scalloped weld puddle ripple beads with thermal oxidation heat tint fringe",
+        },
+        ShelfAsset {
+            id: "rope_braid",
+            name: "Twisted Rope Cord",
+            category: ShelfCategory::Decals,
+            preview_color: [185, 155, 110],
+            preview_metallic: 0.0,
+            preview_roughness: 0.85,
+            description: "3-ply twisted helical cord rope with deep strand grooves and fiber roughness",
+        },
+        ShelfAsset {
+            id: "stitch_seam",
+            name: "Fabric Stitch Seam",
+            category: ShelfCategory::Decals,
+            preview_color: [225, 220, 210],
+            preview_metallic: 0.0,
+            preview_roughness: 0.75,
+            description: "Substance-style tailored textile thread stitches with realistic needle puncture holes",
+        },
+        ShelfAsset {
+            id: "chain_links",
+            name: "Interlocking Chain",
+            category: ShelfCategory::Decals,
+            preview_color: [160, 165, 175],
+            preview_metallic: 0.92,
+            preview_roughness: 0.28,
+            description: "Alternating horizontal and vertical interlocking metal chain links",
+        },
+        ShelfAsset {
+            id: "decal_button_hole",
+            name: "Button Hole & Bar-Tack",
+            category: ShelfCategory::Decals,
+            preview_color: [60, 60, 65],
+            preview_metallic: 0.0,
+            preview_roughness: 0.80,
+            description: "Tailored fabric button slit with surrounding dense embroidered bar-tack zig-zag stitches",
+        },
+        ShelfAsset {
+            id: "decal_phillips_screw",
+            name: "Phillips Machine Screw",
+            category: ShelfCategory::Decals,
+            preview_color: [200, 205, 215],
+            preview_metallic: 0.95,
+            preview_roughness: 0.22,
+            description: "Precision machine screw head with 4-point cross (+) drive recess",
+        },
+        ShelfAsset {
+            id: "decal_flathead_screw",
+            name: "Flathead Slotted Screw",
+            category: ShelfCategory::Decals,
+            preview_color: [195, 200, 210],
+            preview_metallic: 0.95,
+            preview_roughness: 0.25,
+            description: "Countersunk machine screw head with straight single slotted drive (-)",
+        },
+        ShelfAsset {
+            id: "decal_torx_screw",
+            name: "Torx Star Screw",
+            category: ShelfCategory::Decals,
+            preview_color: [205, 210, 220],
+            preview_metallic: 0.95,
+            preview_roughness: 0.24,
+            description: "Automotive/aerospace 6-point hexalobular star drive security screw head",
+        },
+        ShelfAsset {
+            id: "decal_hex_bolt",
+            name: "Hexagonal Bolt Head",
+            category: ShelfCategory::Decals,
+            preview_color: [190, 195, 205],
+            preview_metallic: 0.95,
+            preview_roughness: 0.26,
+            description: "Structural metric hexagonal bolt head with center indent depression",
+        },
+        ShelfAsset {
+            id: "decal_domed_rivet",
+            name: "Domed Aircraft Rivet",
+            category: ShelfCategory::Decals,
+            preview_color: [195, 200, 210],
+            preview_metallic: 0.92,
+            preview_roughness: 0.28,
+            description: "Solid round domed rivet with perimeter sheet metal compression depression",
+        },
+        ShelfAsset {
+            id: "decal_grommet",
+            name: "Metal Grommet Eyelet",
+            category: ShelfCategory::Decals,
+            preview_color: [220, 190, 100],
+            preview_metallic: 0.95,
+            preview_roughness: 0.22,
+            description: "Brass/chrome eyelet ring with transparent hollow center cutout hole",
+        },
+        ShelfAsset {
+            id: "decal_air_vent",
+            name: "Air Vent Louvers",
+            category: ShelfCategory::Decals,
+            preview_color: [180, 185, 195],
+            preview_metallic: 0.88,
+            preview_roughness: 0.32,
+            description: "Slotted ventilation cooling intake louvers with relief depth",
+        },
 ];
 
 pub fn get_shelf_assets() -> &'static [ShelfAsset] {
@@ -605,12 +717,27 @@ mod tests {
         let has_smart_masks = assets.iter().any(|a| a.category == ShelfCategory::SmartMasks);
         let has_generators = assets.iter().any(|a| a.category == ShelfCategory::Generators);
         let has_alphas = assets.iter().any(|a| a.category == ShelfCategory::Alphas);
+        let has_decals = assets.iter().any(|a| a.category == ShelfCategory::Decals);
 
         assert!(!has_materials, "Built-in static materials should be cleared for user-created materials");
         assert!(has_smart_materials, "Should have smart material assets");
         assert!(has_smart_masks, "Should have smart mask assets");
         assert!(has_generators, "Should have procedural generator noise assets");
         assert!(has_alphas, "Should have brush alpha assets");
+        assert!(has_decals, "Should have path presets and decal assets");
+
+        // Verify key decals are present
+        let decal_ids: Vec<&str> = assets
+            .iter()
+            .filter(|a| a.category == ShelfCategory::Decals)
+            .map(|a| a.id)
+            .collect();
+        assert!(decal_ids.contains(&"weld_seam"));
+        assert!(decal_ids.contains(&"rope_braid"));
+        assert!(decal_ids.contains(&"stitch_seam"));
+        assert!(decal_ids.contains(&"chain_links"));
+        assert!(decal_ids.contains(&"decal_phillips_screw"));
+        assert!(decal_ids.contains(&"decal_button_hole"));
 
         // Verify specific key procedural noise generators are present
         let generator_ids: Vec<&str> = assets
@@ -655,6 +782,7 @@ mod tests {
         assert_eq!(ShelfCategory::SmartMasks.name(), "Smart Masks");
         assert_eq!(ShelfCategory::Generators.name(), "Noises");
         assert_eq!(ShelfCategory::Alphas.name(), "Alphas");
+        assert_eq!(ShelfCategory::Decals.name(), "Decals & Hardware");
         assert_eq!(ShelfCategory::Environments.name(), "Environments (HDRIs)");
     }
 }
