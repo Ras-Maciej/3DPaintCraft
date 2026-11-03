@@ -477,25 +477,13 @@ impl Project {
     }
 
     pub fn delete_layer(&mut self, idx: usize) -> Option<Layer> {
-        if idx < self.layers.len() {
-            if self.layers.len() > 1 {
-                let removed = self.layers.remove(idx);
-                if self.active_layer_idx >= self.layers.len() {
-                    self.active_layer_idx = self.layers.len().saturating_sub(1);
-                }
-                self.rebuild_composite();
-                Some(removed)
-            } else {
-                // If it's the only layer left, replace with a fresh empty paint layer so document remains valid
-                let removed = self.layers.remove(0);
-                let w = self.texture_width;
-                let h = self.texture_height;
-                let fresh_layer = Layer::new_paint_layer(1, "Paint 1".to_string(), w, h);
-                self.layers.push(fresh_layer);
-                self.active_layer_idx = 0;
-                self.rebuild_composite();
-                Some(removed)
+        if idx < self.layers.len() && self.layers.len() > 1 {
+            let removed = self.layers.remove(idx);
+            if self.active_layer_idx >= self.layers.len() {
+                self.active_layer_idx = self.layers.len().saturating_sub(1);
             }
+            self.rebuild_composite();
+            Some(removed)
         } else {
             None
         }

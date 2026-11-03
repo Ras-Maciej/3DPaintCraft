@@ -293,6 +293,7 @@ pub struct PaintcraftApp {
     pub dragged_layer_idx: Option<usize>,
     pub renaming_layer_idx: Option<usize>,
     pub rename_buffer: String,
+    pub delete_key_held: bool,
 
     // Shader & Viewport Settings State
     pub shader_settings: crate::wgpu_renderer::ShaderSettings,
@@ -656,6 +657,7 @@ impl PaintcraftApp {
             dragged_layer_idx: None,
             renaming_layer_idx: None,
             rename_buffer: String::new(),
+            delete_key_held: false,
             shader_settings: crate::wgpu_renderer::ShaderSettings::default(),
             viewport_bg_color: [0.086, 0.090, 0.102],
             camera_orbit_speed: 1.0,
@@ -836,6 +838,10 @@ impl PaintcraftApp {
 
     /// Delete currently selected layer with undo history and GPU synchronization
     pub fn delete_selected_layer(&mut self, ctx: &egui::Context) {
+        if self.project.layers.len() <= 1 {
+            self.status_message = "Cannot delete the only remaining layer in the project".to_string();
+            return;
+        }
         let act_idx = self.project.active_layer_idx;
         if act_idx < self.project.layers.len() {
             let prev_active = self.project.active_layer_idx;
@@ -3335,6 +3341,10 @@ impl eframe::App for PaintcraftApp {
         let has_cmd = input.modifiers.command || input.modifiers.ctrl || input.modifiers.mac_cmd;
         let has_alt = input.modifiers.alt;
 
+        let is_delete_down = input.key_down(egui::Key::Delete) || input.key_down(egui::Key::Backspace);
+        let delete_pressed = is_delete_down && !self.delete_key_held;
+        self.delete_key_held = is_delete_down;
+
         // When user is typing into text edits or modals, bypass single-key shortcuts so inputs never clash
         if !ctx.wants_keyboard_input() {
             // Substance 3D Painter Standard Viewport Shortcuts (F1: Split, F2: 3D, F3: 2D)
@@ -3387,8 +3397,12 @@ impl eframe::App for PaintcraftApp {
                 }
             }
 
-            // Delete selected layer: Delete or Backspace key
-            if input.key_pressed(egui::Key::Delete) || input.key_pressed(egui::Key::Backspace) {
+            // Delete selected layer: Delete or Backspace key (edge-triggered debounce, single layer delete)
+            if self.renaming_layer_idx.is_none() && delete_pressed {
+                ctx.input_mut(|i| {
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::Delete);
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::Backspace);
+                });
                 self.delete_selected_layer(ctx);
             }
 
@@ -10917,18 +10931,14 @@ mod tests {
     }
 
     #[test]
-    fn test_delete_layer_resets_single_remaining_layer() {
+    fn test_delete_layer_protects_single_remaining_layer() {
         let mut proj = Project::new_default(64, 64);
         assert_eq!(proj.layers.len(), 1);
-        let orig_name = proj.layers[0].name.clone();
 
-        // Deleting the only remaining layer must succeed and reset document to a clean Paint 1 layer
+        // Deleting the only remaining layer must be rejected (return None) to protect the document
         let removed = proj.delete_layer(0);
-        assert!(removed.is_some());
-        assert_eq!(removed.unwrap().name, orig_name);
+        assert!(removed.is_none());
         assert_eq!(proj.layers.len(), 1);
-        assert_eq!(proj.layers[0].name, "Paint 1");
-        assert_eq!(proj.active_layer_idx, 0);
 
         // Adding another layer and deleting one leaves the other
         proj.add_paint_layer(Some("Paint 2".to_string()));
@@ -10937,6 +10947,46 @@ mod tests {
         assert!(removed2.is_some());
         assert_eq!(removed2.unwrap().name, "Paint 2");
         assert_eq!(proj.layers.len(), 1);
+
+        // Deleting the single remaining layer again returns None
+        let removed3 = proj.delete_layer(0);
+        assert!(removed3.is_none());
+        assert_eq!(proj.layers.len(), 1);
+    }
+
+    #[test]
+    fn test_delete_key_debounce_logic() {
+        let mut delete_key_held = false;
+
+        // Frame 1: User presses delete key down
+        let is_delete_down = true;
+        let delete_pressed = is_delete_down && !delete_key_held;
+        delete_key_held = is_delete_down;
+        assert!(delete_pressed, "Should trigger on initial press");
+
+        // Frame 2: Key remains held down (OS repeat or human hold)
+        let is_delete_down = true;
+        let delete_pressed = is_delete_down && !delete_key_held;
+        delete_key_held = is_delete_down;
+        assert!(!delete_pressed, "Should NOT trigger while key is continuously held");
+
+        // Frame 3: Key remains held down
+        let is_delete_down = true;
+        let delete_pressed = is_delete_down && !delete_key_held;
+        delete_key_held = is_delete_down;
+        assert!(!delete_pressed, "Should NOT trigger while key is continuously held");
+
+        // Frame 4: User releases key
+        let is_delete_down = false;
+        let delete_pressed = is_delete_down && !delete_key_held;
+        delete_key_held = is_delete_down;
+        assert!(!delete_pressed, "Should not trigger on key release");
+
+        // Frame 5: User presses key again
+        let is_delete_down = true;
+        let delete_pressed = is_delete_down && !delete_key_held;
+        delete_key_held = is_delete_down;
+        assert!(delete_pressed, "Should trigger again on new key press");
     }
 }
 
@@ -11161,9 +11211,6 @@ impl PaintcraftApp {
     
                         // Layer Stack Toolbar
                         let mut delete_layer_requested = false;
-                        if self.renaming_layer_idx.is_none() && (ui.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace))) {
-                            delete_layer_requested = true;
-                        }
 
                         #[derive(Clone, Copy)]
                         enum MaskAddAction {
