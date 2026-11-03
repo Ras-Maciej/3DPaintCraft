@@ -1179,6 +1179,7 @@ impl Layer {
             if channels.roughness { self.roughness_buf.ensure_allocated(); }
             if channels.metallic { self.metallic_buf.ensure_allocated(); }
             if channels.height { self.height_buf.ensure_allocated(); }
+            if channels.normal { self.normal_buf.ensure_allocated(); }
             if channels.emission { self.emissive_buf.ensure_allocated(); }
             if channels.opacity { self.opacity_buf.ensure_allocated(); }
             if channels.clearcoat { self.clearcoat_buf.ensure_allocated(); }

@@ -17,6 +17,7 @@ pub enum ToolMode {
     Clone,      // Clone (6)
     Eyedropper, // Material Picker / Eyedropper (P / I)
     Path,       // Vector Path Tool (7 / T)
+    Stamp,      // Decal Stamp Tool (8 / D)
 }
 
 impl ToolMode {
@@ -31,6 +32,7 @@ impl ToolMode {
             Self::Clone => "Clone [6]",
             Self::Eyedropper => "Material Picker [P/I]",
             Self::Path => "Path Tool [7/T]",
+            Self::Stamp => "Stamp Tool [8/D]",
         }
     }
 }
@@ -121,6 +123,7 @@ pub struct DecalPixel {
     pub roughness: f32,
     pub metallic: f32,
     pub opacity: f32,
+    pub normal: Vec3, // Tangent-space analytical normal vector
     pub alpha: f32, // Footprint weight (0.0 to 1.0)
 }
 
@@ -134,6 +137,7 @@ pub fn evaluate_decal_pixel(
     heat_tint: bool,
     arc_length: f32,
     world_radius: f32,
+    height_depth: f32,
 ) -> DecalPixel {
     let r2 = u * u + v * v;
     if r2 > 1.05 {
@@ -143,30 +147,33 @@ pub fn evaluate_decal_pixel(
             roughness: 0.5,
             metallic: 0.0,
             opacity: 1.0,
+            normal: Vec3::Z,
             alpha: 0.0,
         };
     }
     let r = r2.sqrt();
+    let theta = v.atan2(u);
 
-    match style {
+    let (col, raw_h, rough, metal, opac, raw_n, alpha) = match style {
         PathStrokeStyle::Continuous => {
             let edge = (1.0 - r).clamp(0.0, 1.0);
             let alpha = edge * edge * (3.0 - 2.0 * edge);
-            DecalPixel {
-                color: base_color,
-                height: 0.5 + 0.3 * (1.0 - r * r).max(0.0).sqrt(),
-                roughness: 0.35,
-                metallic: 0.0,
-                opacity: 1.0,
-                alpha,
-            }
+            let h = 0.5 + 0.3 * (1.0 - r * r).max(0.0).sqrt();
+            let norm = Vec3::new(-u * 0.75, -v * 0.75, (1.0 - r * r).max(0.04).sqrt()).normalize();
+            (base_color, h, 0.35, 0.0, 1.0, norm, alpha)
         }
         PathStrokeStyle::WeldSeam => {
             // Overlapping scalloped weld puddle ripple beads
             let bead_scale = (world_radius * 0.45).max(0.01);
             let bead_phase = (arc_length / bead_scale + u * 1.8) * std::f32::consts::PI * 2.0;
-            let ripple = (1.0 - (v / 0.85).powi(2)).max(0.0).sqrt() * (0.8 + 0.32 * bead_phase.cos());
+            let v_norm = (v / 0.85).clamp(-1.0, 1.0);
+            let ripple_prof = (1.0 - v_norm * v_norm).max(0.0).sqrt();
+            let ripple = ripple_prof * (0.8 + 0.32 * bead_phase.cos());
             let h = (0.5 + 0.38 * ripple).clamp(0.0, 1.0);
+
+            let dh_dv = -0.38 * v_norm * (0.8 + 0.32 * bead_phase.cos());
+            let dh_du = -0.38 * ripple_prof * 0.32 * bead_phase.sin() * 1.8 * std::f32::consts::PI * 2.0;
+            let norm = Vec3::new(-dh_du * 0.4, -dh_dv * 0.5, 1.0).normalize();
 
             // Thermal oxidation colors across distance from center bead
             let abs_v = v.abs();
@@ -194,14 +201,7 @@ pub fn evaluate_decal_pixel(
             let u_falloff = ((1.0 - u.abs()) / 0.25).clamp(0.0, 1.0);
             let alpha = (edge_falloff * u_falloff).clamp(0.0, 1.0);
 
-            DecalPixel {
-                color: col,
-                height: h,
-                roughness: rough,
-                metallic: metal,
-                opacity: 1.0,
-                alpha,
-            }
+            (col, h, rough, metal, 1.0, norm, alpha)
         }
         PathStrokeStyle::RopeBraid => {
             // 3-strand helical twisted rope / cord
@@ -213,7 +213,15 @@ pub fn evaluate_decal_pixel(
 
             let d0 = (v - v0).abs() / 0.42;
             let d1 = (v - v1).abs() / 0.42;
-            let d2 = (v - v2).abs() / 0.42;
+            let d2 = (v - d2_v_calc(v2)).abs() / 0.42;
+
+            let (closest_strand, min_d, v_center) = if d0 <= d1 && d0 <= d2 {
+                (0, d0, v0)
+            } else if d1 <= d2 {
+                (1, d1, v1)
+            } else {
+                (2, d2, v2)
+            };
 
             let h0 = (1.0 - d0 * d0).max(0.0).sqrt();
             let h1 = (1.0 - d1 * d1).max(0.0).sqrt();
@@ -226,14 +234,16 @@ pub fn evaluate_decal_pixel(
             let u_falloff = ((1.0 - u.abs() / 0.95) / 0.15).clamp(0.0, 1.0);
             let alpha = (max_h.min(1.0) * edge_falloff * u_falloff).clamp(0.0, 1.0);
 
-            DecalPixel {
-                color: cord_col,
-                height: h,
-                roughness: 0.88,
-                metallic: 0.0,
-                opacity: 1.0,
-                alpha,
-            }
+            let dv = (v - v_center) / 0.42;
+            let strand_phi = phi + match closest_strand {
+                0 => 0.0,
+                1 => 2.094395,
+                _ => 4.188790,
+            };
+            let du = -0.42 * strand_phi.cos() * 1.5;
+            let norm = Vec3::new(-du * dv * 0.5, -dv * 0.85, (1.0 - min_d * min_d).max(0.04).sqrt()).normalize();
+
+            (cord_col, h, 0.88, 0.0, 1.0, norm, alpha)
         }
         PathStrokeStyle::StitchSeam => {
             // Alternating textile thread stitches with puncture holes
@@ -246,26 +256,14 @@ pub fn evaluate_decal_pixel(
                 let h_profile = (1.0 - v_thread * v_thread).max(0.0).sqrt() * (1.0 - t_thread * t_thread).max(0.0).sqrt();
                 let h = 0.5 + 0.34 * h_profile;
                 let alpha = (h_profile * 2.0).clamp(0.0, 1.0);
-                DecalPixel {
-                    color: base_color,
-                    height: h,
-                    roughness: 0.82,
-                    metallic: 0.0,
-                    opacity: 1.0,
-                    alpha,
-                }
+                let norm = Vec3::new(-t_thread * 0.5, -v_thread * 0.85, (1.0 - v_thread * v_thread).max(0.04).sqrt()).normalize();
+                (base_color, h, 0.82, 0.0, 1.0, norm, alpha)
             } else {
                 let hole_dist = (v * v + (u * 2.0).powi(2)).sqrt();
                 let h = 0.5 - 0.35 * (1.0 - hole_dist / 0.35).max(0.0);
                 let alpha = (1.0 - hole_dist / 0.35).max(0.0);
-                DecalPixel {
-                    color: Vec4::new(0.12, 0.12, 0.14, 1.0),
-                    height: h,
-                    roughness: 0.95,
-                    metallic: 0.0,
-                    opacity: 1.0,
-                    alpha,
-                }
+                let norm = Vec3::new(u * 2.2, v * 2.2, 1.0).normalize();
+                (Vec4::new(0.12, 0.12, 0.14, 1.0), h, 0.95, 0.0, 1.0, norm, alpha)
             }
         }
         PathStrokeStyle::ChainLinks => {
@@ -274,29 +272,18 @@ pub fn evaluate_decal_pixel(
             if cycle < 1.0 {
                 let u_ring = (cycle - 0.5) / 0.45;
                 let v_ring = v / 0.55;
-                let d_ring = ((u_ring * u_ring + v_ring * v_ring).sqrt() - 0.70).abs() / 0.30;
+                let r_ring = (u_ring * u_ring + v_ring * v_ring).sqrt().max(1e-4);
+                let d_ring = ((r_ring - 0.70) / 0.30).abs();
                 let h_ring = (1.0 - d_ring * d_ring).max(0.0).sqrt();
                 let alpha = (h_ring * 2.5).clamp(0.0, 1.0);
-                DecalPixel {
-                    color: Vec4::new(0.78, 0.79, 0.82, 1.0),
-                    height: 0.5 + 0.30 * h_ring,
-                    roughness: 0.28,
-                    metallic: 0.94,
-                    opacity: 1.0,
-                    alpha,
-                }
+                let norm = Vec3::new(-(u_ring / r_ring) * d_ring * 0.85, -(v_ring / r_ring) * d_ring * 0.85, (1.0 - d_ring * d_ring).max(0.04).sqrt()).normalize();
+                (Vec4::new(0.78, 0.79, 0.82, 1.0), 0.5 + 0.30 * h_ring, 0.28, 0.94, 1.0, norm, alpha)
             } else {
                 let v_bar = v / 0.28;
                 let h_bar = (1.0 - v_bar * v_bar).max(0.0).sqrt();
                 let alpha = (h_bar * 2.5).clamp(0.0, 1.0);
-                DecalPixel {
-                    color: Vec4::new(0.78, 0.79, 0.82, 1.0),
-                    height: 0.5 + 0.42 * h_bar,
-                    roughness: 0.28,
-                    metallic: 0.94,
-                    opacity: 1.0,
-                    alpha,
-                }
+                let norm = Vec3::new(0.0, -v_bar * 0.85, (1.0 - v_bar * v_bar).max(0.04).sqrt()).normalize();
+                (Vec4::new(0.78, 0.79, 0.82, 1.0), 0.5 + 0.42 * h_bar, 0.28, 0.94, 1.0, norm, alpha)
             }
         }
         PathStrokeStyle::SmartDecal => {
@@ -304,192 +291,178 @@ pub fn evaluate_decal_pixel(
                 SmartDecalType::ButtonHole => {
                     let inside_slit = u.abs() < 0.65 && v.abs() < 0.08;
                     if inside_slit {
-                        DecalPixel {
-                            color: Vec4::new(0.08, 0.08, 0.09, 1.0),
-                            height: 0.12,
-                            roughness: 0.95,
-                            metallic: 0.0,
-                            opacity: 1.0,
-                            alpha: 1.0,
-                        }
+                        let v_slit = (v / 0.08).clamp(-1.0, 1.0);
+                        let norm = Vec3::new(0.0, -v_slit * 0.90, 0.43).normalize();
+                        (Vec4::new(0.08, 0.08, 0.09, 1.0), 0.12, 0.95, 0.0, 1.0, norm, 1.0)
                     } else if u.abs() <= 0.82 && v.abs() <= 0.36 {
                         let zigzag = (u * 32.0).sin() * 0.14;
                         let h_edge = (1.0 - (v / 0.36).powi(2)).max(0.0).sqrt();
                         let h = 0.5 + 0.26 * h_edge + zigzag;
                         let alpha = ((1.0 - u.abs() / 0.82) * 4.0).clamp(0.0, 1.0).min(h_edge * 2.0);
-                        DecalPixel {
-                            color: base_color,
-                            height: h,
-                            roughness: 0.85,
-                            metallic: 0.0,
-                            opacity: 1.0,
-                            alpha,
-                        }
+                        let v_stitch = (v / 0.36).clamp(-1.0, 1.0);
+                        let u_stitch = (u * 32.0).cos() * 0.35;
+                        let norm = Vec3::new(-u_stitch, -v_stitch * 0.80, 0.8).normalize();
+                        (base_color, h, 0.85, 0.0, 1.0, norm, alpha)
                     } else {
-                        DecalPixel {
-                            color: base_color,
-                            height: 0.5,
-                            roughness: 0.5,
-                            metallic: 0.0,
-                            opacity: 1.0,
-                            alpha: 0.0,
-                        }
+                        (base_color, 0.5, 0.5, 0.0, 1.0, Vec3::Z, 0.0)
                     }
                 }
                 SmartDecalType::PhillipsScrew => {
                     if r > 0.94 {
-                        return DecalPixel { color: base_color, height: 0.5, roughness: 0.5, metallic: 0.0, opacity: 1.0, alpha: 0.0 };
-                    }
-                    let h_head = 0.5 + 0.32 * (1.0 - (r / 0.94).powi(2)).max(0.0).sqrt();
-                    let is_cross = (u.abs() < 0.11 && v.abs() < 0.52) || (v.abs() < 0.11 && u.abs() < 0.52);
-                    let (col, h, r_val, m_val) = if is_cross {
-                        (Vec4::new(0.18, 0.18, 0.20, 1.0), 0.18, 0.55, 0.85)
+                        (base_color, 0.5, 0.5, 0.0, 1.0, Vec3::Z, 0.0)
                     } else {
-                        (Vec4::new(0.82, 0.83, 0.86, 1.0), h_head, 0.24, 0.95)
-                    };
-                    let alpha = ((0.94 - r) / 0.06).clamp(0.0, 1.0);
-                    DecalPixel {
-                        color: col,
-                        height: h,
-                        roughness: r_val,
-                        metallic: m_val,
-                        opacity: 1.0,
-                        alpha,
+                        let h_head = 0.5 + 0.32 * (1.0 - (r / 0.94).powi(2)).max(0.0).sqrt();
+                        let is_cross = (u.abs() < 0.11 && v.abs() < 0.52) || (v.abs() < 0.11 && u.abs() < 0.52);
+                        let (col, h, r_val, m_val, norm) = if is_cross {
+                            let n = if u.abs() < 0.11 && v.abs() < 0.52 {
+                                let s = if u >= 0.0 { 1.0 } else { -1.0 };
+                                Vec3::new(-s * 0.88, 0.0, 0.47).normalize()
+                            } else if v.abs() < 0.11 && u.abs() < 0.52 {
+                                let s = if v >= 0.0 { 1.0 } else { -1.0 };
+                                Vec3::new(0.0, -s * 0.88, 0.47).normalize()
+                            } else {
+                                Vec3::Z
+                            };
+                            (Vec4::new(0.18, 0.18, 0.20, 1.0), 0.18, 0.55, 0.85, n)
+                        } else {
+                            let n = Vec3::new(-u / 0.94, -v / 0.94, (1.0 - (r / 0.94).powi(2)).max(0.04).sqrt()).normalize();
+                            (Vec4::new(0.82, 0.83, 0.86, 1.0), h_head, 0.24, 0.95, n)
+                        };
+                        let alpha = ((0.94 - r) / 0.06).clamp(0.0, 1.0);
+                        (col, h, r_val, m_val, 1.0, norm, alpha)
                     }
                 }
                 SmartDecalType::FlatheadScrew => {
                     if r > 0.94 {
-                        return DecalPixel { color: base_color, height: 0.5, roughness: 0.5, metallic: 0.0, opacity: 1.0, alpha: 0.0 };
-                    }
-                    let h_head = 0.5 + 0.32 * (1.0 - (r / 0.94).powi(2)).max(0.0).sqrt();
-                    let is_slot = v.abs() < 0.11 && u.abs() < 0.72;
-                    let (col, h, r_val, m_val) = if is_slot {
-                        (Vec4::new(0.18, 0.18, 0.20, 1.0), 0.18, 0.55, 0.85)
+                        (base_color, 0.5, 0.5, 0.0, 1.0, Vec3::Z, 0.0)
                     } else {
-                        (Vec4::new(0.82, 0.83, 0.86, 1.0), h_head, 0.24, 0.95)
-                    };
-                    let alpha = ((0.94 - r) / 0.06).clamp(0.0, 1.0);
-                    DecalPixel {
-                        color: col,
-                        height: h,
-                        roughness: r_val,
-                        metallic: m_val,
-                        opacity: 1.0,
-                        alpha,
+                        let h_head = 0.5 + 0.32 * (1.0 - (r / 0.94).powi(2)).max(0.0).sqrt();
+                        let is_slot = v.abs() < 0.11 && u.abs() < 0.72;
+                        let (col, h, r_val, m_val, norm) = if is_slot {
+                            let s = if v >= 0.0 { 1.0 } else { -1.0 };
+                            let n = Vec3::new(0.0, -s * 0.90, 0.43).normalize();
+                            (Vec4::new(0.18, 0.18, 0.20, 1.0), 0.18, 0.55, 0.85, n)
+                        } else {
+                            let n = Vec3::new(-u / 0.94, -v / 0.94, (1.0 - (r / 0.94).powi(2)).max(0.04).sqrt()).normalize();
+                            (Vec4::new(0.82, 0.83, 0.86, 1.0), h_head, 0.24, 0.95, n)
+                        };
+                        let alpha = ((0.94 - r) / 0.06).clamp(0.0, 1.0);
+                        (col, h, r_val, m_val, 1.0, norm, alpha)
                     }
                 }
                 SmartDecalType::TorxScrew => {
                     if r > 0.94 {
-                        return DecalPixel { color: base_color, height: 0.5, roughness: 0.5, metallic: 0.0, opacity: 1.0, alpha: 0.0 };
-                    }
-                    let h_head = 0.5 + 0.32 * (1.0 - (r / 0.94).powi(2)).max(0.0).sqrt();
-                    let theta = v.atan2(u);
-                    let r_star = 0.36 + 0.12 * (6.0 * theta).cos();
-                    let is_star = r < r_star;
-                    let (col, h, r_val, m_val) = if is_star {
-                        (Vec4::new(0.18, 0.18, 0.20, 1.0), 0.18, 0.55, 0.85)
+                        (base_color, 0.5, 0.5, 0.0, 1.0, Vec3::Z, 0.0)
                     } else {
-                        (Vec4::new(0.82, 0.83, 0.86, 1.0), h_head, 0.24, 0.95)
-                    };
-                    let alpha = ((0.94 - r) / 0.06).clamp(0.0, 1.0);
-                    DecalPixel {
-                        color: col,
-                        height: h,
-                        roughness: r_val,
-                        metallic: m_val,
-                        opacity: 1.0,
-                        alpha,
+                        let h_head = 0.5 + 0.32 * (1.0 - (r / 0.94).powi(2)).max(0.0).sqrt();
+                        let r_star = 0.36 + 0.12 * (6.0 * theta).cos();
+                        let is_star = r < r_star;
+                        let (col, h, r_val, m_val, norm) = if is_star {
+                            let n = Vec3::new(-theta.cos() * 0.88, -theta.sin() * 0.88, 0.47).normalize();
+                            (Vec4::new(0.18, 0.18, 0.20, 1.0), 0.18, 0.55, 0.85, n)
+                        } else {
+                            let n = Vec3::new(-u / 0.94, -v / 0.94, (1.0 - (r / 0.94).powi(2)).max(0.04).sqrt()).normalize();
+                            (Vec4::new(0.82, 0.83, 0.86, 1.0), h_head, 0.24, 0.95, n)
+                        };
+                        let alpha = ((0.94 - r) / 0.06).clamp(0.0, 1.0);
+                        (col, h, r_val, m_val, 1.0, norm, alpha)
                     }
                 }
                 SmartDecalType::HexBolt => {
-                    let theta = v.atan2(u);
                     let pi_div_3 = std::f32::consts::PI / 3.0;
                     let hex_angle = (theta.rem_euclid(pi_div_3) - std::f32::consts::PI / 6.0).cos().max(0.01);
                     let r_hex = 0.82 / hex_angle;
 
                     if r > r_hex + 0.06 {
-                        return DecalPixel { color: base_color, height: 0.5, roughness: 0.5, metallic: 0.0, opacity: 1.0, alpha: 0.0 };
-                    }
-                    let h_base = 0.5 + 0.35 * (1.0 - (r / r_hex).min(1.0) * 0.35);
-                    let h = if r < 0.32 { h_base - 0.12 } else { h_base };
-                    let alpha = ((r_hex + 0.06 - r) / 0.06).clamp(0.0, 1.0);
-                    DecalPixel {
-                        color: Vec4::new(0.76, 0.77, 0.80, 1.0),
-                        height: h,
-                        roughness: 0.26,
-                        metallic: 0.95,
-                        opacity: 1.0,
-                        alpha,
+                        (base_color, 0.5, 0.5, 0.0, 1.0, Vec3::Z, 0.0)
+                    } else {
+                        let h_base = 0.5 + 0.35 * (1.0 - (r / r_hex).min(1.0) * 0.35);
+                        let h = if r < 0.32 { h_base - 0.12 } else { h_base };
+                        let norm = if r > r_hex * 0.65 {
+                            Vec3::new(-theta.cos() * 0.707, -theta.sin() * 0.707, 0.707).normalize()
+                        } else if r < 0.32 {
+                            Vec3::new(theta.cos() * 0.6, theta.sin() * 0.6, 0.8).normalize()
+                        } else {
+                            Vec3::Z
+                        };
+                        let alpha = ((r_hex + 0.06 - r) / 0.06).clamp(0.0, 1.0);
+                        (Vec4::new(0.76, 0.77, 0.80, 1.0), h, 0.26, 0.95, 1.0, norm, alpha)
                     }
                 }
                 SmartDecalType::DomedRivet => {
                     if r > 0.96 {
-                        return DecalPixel { color: base_color, height: 0.5, roughness: 0.5, metallic: 0.0, opacity: 1.0, alpha: 0.0 };
-                    }
-                    let (h, col, m_val, r_val) = if r <= 0.82 {
-                        let dome_h = 0.5 + 0.42 * (1.0 - (r / 0.82).powi(2)).max(0.0).sqrt();
-                        (dome_h, Vec4::new(0.78, 0.80, 0.83, 1.0), 0.92, 0.28)
+                        (base_color, 0.5, 0.5, 0.0, 1.0, Vec3::Z, 0.0)
                     } else {
-                        (0.40, Vec4::new(0.45, 0.47, 0.50, 1.0), 0.75, 0.55)
-                    };
-                    let alpha = ((0.96 - r) / 0.08).clamp(0.0, 1.0);
-                    DecalPixel {
-                        color: col,
-                        height: h,
-                        roughness: r_val,
-                        metallic: m_val,
-                        opacity: 1.0,
-                        alpha,
+                        let (h, col, m_val, r_val, norm) = if r <= 0.82 {
+                            let dome_h = 0.5 + 0.42 * (1.0 - (r / 0.82).powi(2)).max(0.0).sqrt();
+                            let n = Vec3::new(-u / 0.82, -v / 0.82, (1.0 - (r / 0.82).powi(2)).max(0.04).sqrt()).normalize();
+                            (dome_h, Vec4::new(0.78, 0.80, 0.83, 1.0), 0.92, 0.28, n)
+                        } else {
+                            let n = Vec3::new(theta.cos() * 0.35, theta.sin() * 0.35, 0.9).normalize();
+                            (0.40, Vec4::new(0.45, 0.47, 0.50, 1.0), 0.75, 0.55, n)
+                        };
+                        let alpha = ((0.96 - r) / 0.08).clamp(0.0, 1.0);
+                        (col, h, r_val, m_val, 1.0, norm, alpha)
                     }
                 }
                 SmartDecalType::GrommetEyelet => {
                     if r > 0.94 {
-                        return DecalPixel { color: base_color, height: 0.5, roughness: 0.5, metallic: 0.0, opacity: 1.0, alpha: 0.0 };
-                    }
-                    let (h, col, m_val, r_val, opac) = if r <= 0.38 {
-                        (0.12, Vec4::new(0.06, 0.06, 0.08, 1.0), 0.0, 0.95, 0.0)
+                        (base_color, 0.5, 0.5, 0.0, 1.0, Vec3::Z, 0.0)
                     } else {
-                        let ring_d = ((r - 0.65) / 0.27).abs();
-                        let ring_h = 0.5 + 0.36 * (1.0 - ring_d * ring_d).max(0.0).sqrt();
-                        let brass_col = Vec4::new(0.86, 0.74, 0.40, 1.0);
-                        (ring_h, brass_col, 0.95, 0.22, 1.0)
-                    };
-                    let alpha = ((0.94 - r) / 0.06).clamp(0.0, 1.0);
-                    DecalPixel {
-                        color: col,
-                        height: h,
-                        roughness: r_val,
-                        metallic: m_val,
-                        opacity: opac,
-                        alpha,
+                        let (h, col, m_val, r_val, opac, norm) = if r <= 0.38 {
+                            (0.12, Vec4::new(0.06, 0.06, 0.08, 1.0), 0.0, 0.95, 0.0, Vec3::Z)
+                        } else {
+                            let ring_d = ((r - 0.65) / 0.27).clamp(-1.0, 1.0);
+                            let ring_h = 0.5 + 0.36 * (1.0 - ring_d * ring_d).max(0.0).sqrt();
+                            let n = Vec3::new(-theta.cos() * ring_d * 0.85, -theta.sin() * ring_d * 0.85, (1.0 - ring_d * ring_d).max(0.04).sqrt()).normalize();
+                            let brass_col = Vec4::new(0.86, 0.74, 0.40, 1.0);
+                            (ring_h, brass_col, 0.95, 0.22, 1.0, n)
+                        };
+                        let alpha = ((0.94 - r) / 0.06).clamp(0.0, 1.0);
+                        (col, h, r_val, m_val, opac, norm, alpha)
                     }
                 }
                 SmartDecalType::AirVentLouver => {
                     if u.abs() > 0.88 || v.abs() > 0.88 {
-                        return DecalPixel { color: base_color, height: 0.5, roughness: 0.5, metallic: 0.0, opacity: 1.0, alpha: 0.0 };
-                    }
-                    let slat_v = (v * 2.5 + 10.0).rem_euclid(1.0);
-                    let (h, col, r_val) = if slat_v < 0.82 {
-                        let ramp_h = 0.5 + 0.32 * slat_v;
-                        (ramp_h, Vec4::new(0.72, 0.74, 0.77, 1.0), 0.32)
+                        (base_color, 0.5, 0.5, 0.0, 1.0, Vec3::Z, 0.0)
                     } else {
-                        (0.20, Vec4::new(0.12, 0.12, 0.14, 1.0), 0.85)
-                    };
-                    let border_u = ((0.88 - u.abs()) / 0.08).clamp(0.0, 1.0);
-                    let border_v = ((0.88 - v.abs()) / 0.08).clamp(0.0, 1.0);
-                    let alpha = border_u * border_v;
-                    DecalPixel {
-                        color: col,
-                        height: h,
-                        roughness: r_val,
-                        metallic: 0.88,
-                        opacity: 1.0,
-                        alpha,
+                        let slat_v = (v * 2.5 + 10.0).rem_euclid(1.0);
+                        let (h, col, r_val, norm) = if slat_v < 0.82 {
+                            let ramp_h = 0.5 + 0.32 * slat_v;
+                            let n = Vec3::new(0.0, -0.574, 0.819).normalize();
+                            (ramp_h, Vec4::new(0.72, 0.74, 0.77, 1.0), 0.32, n)
+                        } else {
+                            let n = Vec3::new(0.0, 0.85, 0.52).normalize();
+                            (0.20, Vec4::new(0.12, 0.12, 0.14, 1.0), 0.85, n)
+                        };
+                        let border_u = ((0.88 - u.abs()) / 0.08).clamp(0.0, 1.0);
+                        let border_v = ((0.88 - v.abs()) / 0.08).clamp(0.0, 1.0);
+                        let alpha = border_u * border_v;
+                        (col, h, r_val, 0.88, 1.0, norm, alpha)
                     }
                 }
             }
         }
+    };
+
+    let final_h = (0.5 + (raw_h - 0.5) * height_depth).clamp(0.0, 1.0);
+    let final_n = Vec3::new(raw_n.x * height_depth, raw_n.y * height_depth, raw_n.z).normalize_or_zero();
+    let norm_res = if final_n.length_squared() > 1e-4 { final_n } else { Vec3::Z };
+
+    DecalPixel {
+        color: col,
+        height: final_h,
+        roughness: rough,
+        metallic: metal,
+        opacity: opac,
+        normal: norm_res,
+        alpha,
     }
+}
+
+#[inline(always)]
+fn d2_v_calc(v2: f32) -> f32 {
+    v2
 }
 
 /// A continuous stamp position along the evaluated path curve
@@ -525,6 +498,12 @@ pub struct PathToolState {
     pub decal_spacing: f32,
     #[serde(default = "default_heat_tint")]
     pub heat_tint: bool,
+    #[serde(default = "default_surface_offset")]
+    pub surface_offset: f32,
+    #[serde(default = "default_height_depth")]
+    pub height_depth: f32,
+    #[serde(default = "default_snap_to_surface")]
+    pub snap_to_surface: bool,
 }
 
 fn default_decal_spacing() -> f32 {
@@ -532,6 +511,18 @@ fn default_decal_spacing() -> f32 {
 }
 
 fn default_heat_tint() -> bool {
+    true
+}
+
+fn default_surface_offset() -> f32 {
+    0.003
+}
+
+fn default_height_depth() -> f32 {
+    1.0
+}
+
+fn default_snap_to_surface() -> bool {
     true
 }
 
@@ -551,6 +542,37 @@ impl Default for PathToolState {
             decal_type: SmartDecalType::PhillipsScrew,
             decal_spacing: 1.2,
             heat_tint: true,
+            surface_offset: 0.003,
+            height_depth: 1.0,
+            snap_to_surface: true,
+        }
+    }
+}
+
+/// State of the Substance 3D Painter-style Decal Stamp Tool
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StampToolState {
+    pub stroke_style: PathStrokeStyle,
+    pub decal_type: SmartDecalType,
+    pub rotation_angle: f32, // Degrees 0.0 to 360.0
+    pub randomize_rotation: bool,
+    pub height_depth: f32,
+    pub heat_tint: bool,
+    pub surface_offset: f32,
+    pub selected_preset_id: Option<String>,
+}
+
+impl Default for StampToolState {
+    fn default() -> Self {
+        Self {
+            stroke_style: PathStrokeStyle::SmartDecal,
+            decal_type: SmartDecalType::PhillipsScrew,
+            rotation_angle: 0.0,
+            randomize_rotation: false,
+            height_depth: 1.0,
+            heat_tint: true,
+            surface_offset: 0.003,
+            selected_preset_id: None,
         }
     }
 }
@@ -561,6 +583,26 @@ impl PathToolState {
         self.selected_point = None;
         self.is_dragging = false;
         self.is_sketching = false;
+    }
+
+    /// Project spline samples onto the true 3D mesh surface so chords never dip inside curved geometry
+    pub fn project_samples_to_mesh(samples: &mut [PathSample], mesh: &crate::mesh::Mesh, world_radius: f32, offset: f32) {
+        for sample in samples.iter_mut() {
+            let ray_dist = (world_radius * 4.0).max(0.20);
+            let ray = crate::mesh::Ray {
+                origin: sample.position_3d + sample.normal * ray_dist,
+                direction: -sample.normal,
+            };
+            if let Some(hit) = mesh.raycast(&ray) {
+                sample.position_3d = hit.point + hit.normal * offset;
+                sample.normal = hit.normal;
+            } else if let Some((p, n)) = mesh.uv_to_3d_point(sample.uv) {
+                sample.position_3d = p + n * offset;
+                sample.normal = n;
+            } else {
+                sample.position_3d += sample.normal * offset;
+            }
+        }
     }
 
     /// Evaluates smooth Catmull-Rom spline curves across control points and returns
@@ -936,6 +978,10 @@ pub struct BrushSettings {
     // Vector Path Tool Settings
     #[serde(default)]
     pub path_tool: PathToolState,
+
+    // Decal Stamp Tool Settings
+    #[serde(default)]
+    pub stamp_tool: StampToolState,
 }
 
 fn default_smudge_strength() -> f32 {
@@ -1055,6 +1101,7 @@ impl Default for BrushSettings {
             smudge_strength: 0.5,
             clone_source_uv: None,
             path_tool: PathToolState::default(),
+            stamp_tool: StampToolState::default(),
         }
     }
 }
@@ -2060,6 +2107,7 @@ pub fn barycentric_3d(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> (f32, f32, f32) {
         decal: SmartDecalType,
         heat_tint: bool,
         arc_length: f32,
+        height_depth: f32,
     ) {
         let triangles = mesh.query_sphere(hit_pos, world_radius);
         if triangles.is_empty() {
@@ -2074,6 +2122,10 @@ pub fn barycentric_3d(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> (f32, f32, f32) {
         let world_radius_sq = world_radius * world_radius;
 
         layer.ensure_allocated_for_paint(PaintTarget::Material, self.settings.channels, false);
+        if self.settings.channels.normal || self.settings.channels.height {
+            layer.normal_buf.ensure_allocated();
+            layer.height_buf.ensure_allocated();
+        }
 
         // Orthonormal tangent space frame on surface: Normal, Tangent, Bitangent
         let n = hit_normal.normalize_or_zero();
@@ -2238,6 +2290,7 @@ pub fn barycentric_3d(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> (f32, f32, f32) {
                                 heat_tint,
                                 arc_length,
                                 world_radius,
+                                height_depth,
                             );
 
                             let weight = (decal_px.alpha * angle_weight).clamp(0.0, 1.0);
@@ -2275,6 +2328,22 @@ pub fn barycentric_3d(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> (f32, f32, f32) {
                                     if do_h {
                                         let cur_h = *layer.height_buf.data.get_unchecked(idx);
                                         *layer.height_buf.data.get_unchecked_mut(idx) = cur_h * (1.0 - weight) + decal_px.height * weight;
+                                    }
+                                    if self.settings.channels.normal || do_h {
+                                        let cur_packed = *layer.normal_buf.data.get_unchecked(idx);
+                                        let cur_n = Vec3::new(cur_packed.x * 2.0 - 1.0, cur_packed.y * 2.0 - 1.0, cur_packed.z * 2.0 - 1.0);
+                                        let blended_n = Vec3::new(
+                                            cur_n.x + decal_px.normal.x * weight,
+                                            cur_n.y + decal_px.normal.y * weight,
+                                            cur_n.z * decal_px.normal.z,
+                                        ).normalize_or_zero();
+                                        let final_n = if blended_n.length_squared() > 1e-4 { blended_n } else { Vec3::Z };
+                                        *layer.normal_buf.data.get_unchecked_mut(idx) = Vec4::new(
+                                            final_n.x * 0.5 + 0.5,
+                                            final_n.y * 0.5 + 0.5,
+                                            final_n.z * 0.5 + 0.5,
+                                            *layer.height_buf.data.get_unchecked(idx),
+                                        );
                                     }
                                     if do_opac {
                                         let cur_o = *layer.opacity_buf.data.get_unchecked(idx);
@@ -2332,6 +2401,7 @@ pub fn barycentric_3d(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> (f32, f32, f32) {
         decal: SmartDecalType,
         heat_tint: bool,
         arc_length: f32,
+        height_depth: f32,
     ) {
         let w = layer.base_color_buf.width as i32;
         let h = layer.base_color_buf.height as i32;
@@ -2340,6 +2410,10 @@ pub fn barycentric_3d(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> (f32, f32, f32) {
         let buf_w = w as usize;
 
         layer.ensure_allocated_for_paint(PaintTarget::Material, self.settings.channels, false);
+        if self.settings.channels.normal || self.settings.channels.height {
+            layer.normal_buf.ensure_allocated();
+            layer.height_buf.ensure_allocated();
+        }
 
         let cx = center_uv.x * w_f;
         let cy = center_uv.y * h_f;
@@ -2390,6 +2464,7 @@ pub fn barycentric_3d(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> (f32, f32, f32) {
                         heat_tint,
                         arc_length,
                         uv_radius,
+                        height_depth,
                     );
 
                     let weight = decal_px.alpha.clamp(0.0, 1.0);
@@ -2420,6 +2495,24 @@ pub fn barycentric_3d(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> (f32, f32, f32) {
                             if do_h {
                                 let cur_h = *layer.height_buf.data.get_unchecked(idx);
                                 *layer.height_buf.data.get_unchecked_mut(idx) = cur_h * (1.0 - weight) + decal_px.height * weight;
+                            }
+                            if self.settings.channels.normal || do_h {
+                                let cur_packed = *layer.normal_buf.data.get_unchecked(idx);
+                                let cur_n = Vec3::new(cur_packed.x * 2.0 - 1.0, cur_packed.y * 2.0 - 1.0, cur_packed.z * 2.0 - 1.0);
+                                let rot_u = decal_px.normal.x * cos_a - decal_px.normal.y * sin_a;
+                                let rot_v = decal_px.normal.x * sin_a + decal_px.normal.y * cos_a;
+                                let blended_n = Vec3::new(
+                                    cur_n.x + rot_u * weight,
+                                    cur_n.y + rot_v * weight,
+                                    cur_n.z * decal_px.normal.z,
+                                ).normalize_or_zero();
+                                let final_n = if blended_n.length_squared() > 1e-4 { blended_n } else { Vec3::Z };
+                                *layer.normal_buf.data.get_unchecked_mut(idx) = Vec4::new(
+                                    final_n.x * 0.5 + 0.5,
+                                    final_n.y * 0.5 + 0.5,
+                                    final_n.z * 0.5 + 0.5,
+                                    *layer.height_buf.data.get_unchecked(idx),
+                                );
                             }
                             if do_opac {
                                 let cur_o = *layer.opacity_buf.data.get_unchecked(idx);
@@ -3290,12 +3383,13 @@ mod tests {
             PathStrokeStyle::StitchSeam,
             PathStrokeStyle::ChainLinks,
         ] {
-            let px = evaluate_decal_pixel(*style, SmartDecalType::PhillipsScrew, 0.0, 0.0, base_col, true, 0.5, 0.1);
+            let px = evaluate_decal_pixel(*style, SmartDecalType::PhillipsScrew, 0.0, 0.0, base_col, true, 0.5, 0.1, 1.0);
             assert!(px.alpha > 0.0, "Center alpha should be non-zero for style {:?}", style);
             assert!(px.height >= 0.0 && px.height <= 1.0, "Height should be normalized for style {:?}", style);
             assert!(px.roughness >= 0.0 && px.roughness <= 1.0, "Roughness should be normalized for style {:?}", style);
             assert!(px.metallic >= 0.0 && px.metallic <= 1.0, "Metallic should be normalized for style {:?}", style);
             assert!(px.opacity >= 0.0 && px.opacity <= 1.0, "Opacity should be normalized for style {:?}", style);
+            assert!((px.normal.length() - 1.0).abs() < 1e-3, "Normal must be normalized for style {:?}", style);
         }
 
         // Test all SmartDecalType variants
@@ -3309,16 +3403,17 @@ mod tests {
             SmartDecalType::GrommetEyelet,
             SmartDecalType::AirVentLouver,
         ] {
-            let px = evaluate_decal_pixel(PathStrokeStyle::SmartDecal, *decal, 0.0, 0.0, base_col, true, 0.0, 0.1);
+            let px = evaluate_decal_pixel(PathStrokeStyle::SmartDecal, *decal, 0.0, 0.0, base_col, true, 0.0, 0.1, 1.0);
             assert!(px.alpha > 0.0, "Center alpha should be non-zero for decal {:?}", decal);
             assert!(px.height >= 0.0 && px.height <= 1.0, "Height should be normalized for decal {:?}", decal);
             assert!(px.roughness >= 0.0 && px.roughness <= 1.0, "Roughness should be normalized for decal {:?}", decal);
             assert!(px.metallic >= 0.0 && px.metallic <= 1.0, "Metallic should be normalized for decal {:?}", decal);
             assert!(px.opacity >= 0.0 && px.opacity <= 1.0, "Opacity should be normalized for decal {:?}", decal);
+            assert!((px.normal.length() - 1.0).abs() < 1e-3, "Normal must be normalized for decal {:?}", decal);
         }
 
         // Test outside boundary
-        let outside_px = evaluate_decal_pixel(PathStrokeStyle::SmartDecal, SmartDecalType::PhillipsScrew, 1.5, 1.5, base_col, true, 0.0, 0.1);
+        let outside_px = evaluate_decal_pixel(PathStrokeStyle::SmartDecal, SmartDecalType::PhillipsScrew, 1.5, 1.5, base_col, true, 0.0, 0.1, 1.0);
         assert_eq!(outside_px.alpha, 0.0, "Outside boundary alpha must be zero");
     }
 
@@ -3380,6 +3475,7 @@ mod tests {
             SmartDecalType::PhillipsScrew,
             true,
             0.0,
+            1.0,
         );
 
         assert!(layer.dirty_rect.is_some(), "Dirty rect should be populated after stamping");
@@ -3400,6 +3496,7 @@ mod tests {
             SmartDecalType::PhillipsScrew,
             true,
             0.5,
+            1.0,
         );
         assert!(layer.dirty_flags.color);
         assert!(layer.dirty_flags.normal);

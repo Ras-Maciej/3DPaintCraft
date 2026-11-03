@@ -48,6 +48,28 @@ pub struct CustomMaterialEntry {
     pub anisotropy: f32,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CustomDecalPreset {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    #[serde(skip)]
+    pub path: PathBuf,
+    #[serde(skip)]
+    pub file_name: String,
+    pub stroke_style: crate::brush::PathStrokeStyle,
+    pub decal_type: crate::brush::SmartDecalType,
+    pub radius: f32,
+    pub spacing_ratio: f32,
+    pub decal_spacing: f32,
+    pub height_depth: f32,
+    pub base_color: [f32; 4],
+    pub roughness: f32,
+    pub metallic: f32,
+    pub heat_tint: bool,
+    pub surface_offset: f32,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AssetPaths {
     pub root_dir: PathBuf,
@@ -55,6 +77,7 @@ pub struct AssetPaths {
     pub alphas_dir: PathBuf,
     pub materials_dir: PathBuf,
     pub smart_materials_dir: PathBuf,
+    pub decals_dir: PathBuf,
     pub custom_dirs: Vec<PathBuf>,
 }
 
@@ -98,6 +121,7 @@ impl Default for AssetPaths {
             alphas_dir: base.join("alphas"),
             materials_dir: base.join("materials"),
             smart_materials_dir: base.join("smart_materials"),
+            decals_dir: base.join("decals"),
             root_dir: base,
             custom_dirs: Vec::new(),
         }
@@ -109,6 +133,7 @@ pub struct AssetManager {
     pub hdris: Vec<HdriAssetEntry>,
     pub active_hdri_index: usize,
     pub materials: Vec<CustomMaterialEntry>,
+    pub decals: Vec<CustomDecalPreset>,
 }
 
 impl Default for AssetManager {
@@ -125,6 +150,7 @@ impl AssetManager {
             hdris: Vec::new(),
             active_hdri_index: 0,
             materials: Vec::new(),
+            decals: Vec::new(),
         };
         manager.init();
         manager
@@ -136,6 +162,7 @@ impl AssetManager {
         self.ensure_builtin_hdris();
         self.refresh_hdris();
         self.refresh_materials();
+        self.refresh_decals();
     }
 
     /// Ensure all asset folders exist on disk
@@ -145,6 +172,7 @@ impl AssetManager {
         let _ = fs::create_dir_all(&self.paths.alphas_dir);
         let _ = fs::create_dir_all(&self.paths.materials_dir);
         let _ = fs::create_dir_all(&self.paths.smart_materials_dir);
+        let _ = fs::create_dir_all(&self.paths.decals_dir);
         for custom in &self.paths.custom_dirs {
             let _ = fs::create_dir_all(custom);
         }
@@ -436,6 +464,106 @@ impl AssetManager {
             Err("Unsupported OS for folder open".to_string())
         }
     }
+
+    /// Rescan the decals folder for all .decal and .json decal definitions
+    pub fn refresh_decals(&mut self) {
+        let mut found = Vec::new();
+        let mut scan_dirs = vec![self.paths.decals_dir.clone()];
+        scan_dirs.extend(self.paths.custom_dirs.clone());
+
+        for dir in scan_dirs {
+            if let Ok(entries) = fs::read_dir(&dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_file() {
+                        if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
+                            let ext_lower = ext.to_lowercase();
+                            if ext_lower == "decal" || ext_lower == "json" {
+                                if let Ok(content) = fs::read_to_string(&path) {
+                                    if let Ok(mut decal) = serde_json::from_str::<CustomDecalPreset>(&content) {
+                                        decal.path = path.clone();
+                                        decal.file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("").to_string();
+                                        found.push(decal);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        found.sort_by(|a, b| a.name.cmp(&b.name));
+        self.decals = found;
+    }
+
+    /// Save a user custom decal or path preset to the decals folder as a .decal JSON file
+    pub fn save_decal(&mut self, decal: &CustomDecalPreset) -> Result<PathBuf, String> {
+        let clean_stem = if !decal.id.is_empty() {
+            decal.id.trim().replace(' ', "_").to_lowercase()
+        } else {
+            decal.name.trim().replace(' ', "_").to_lowercase()
+        };
+        let file_name = format!("{}.decal", clean_stem);
+        let path = self.paths.decals_dir.join(&file_name);
+        let mut entry = decal.clone();
+        entry.id = clean_stem;
+        entry.path = path.clone();
+        entry.file_name = file_name;
+
+        let json = serde_json::to_string_pretty(&entry).map_err(|e| e.to_string())?;
+        fs::write(&path, json).map_err(|e| format!("Failed to save decal to {:?}: {}", path, e))?;
+        self.refresh_decals();
+        Ok(path)
+    }
+
+    /// Delete a user custom decal preset from disk
+    pub fn delete_decal(&mut self, id: &str) -> Result<(), String> {
+        if let Some(entry) = self.decals.iter().find(|d| d.id == id).cloned() {
+            if entry.path.exists() {
+                fs::remove_file(&entry.path).map_err(|e| format!("Failed to delete decal {:?}: {}", entry.path, e))?;
+            }
+        }
+        self.refresh_decals();
+        Ok(())
+    }
+
+    /// Open decals asset folder in Desktop file manager
+    pub fn open_decals_folder(&self) -> Result<(), String> {
+        let path = &self.paths.decals_dir;
+        if !path.exists() {
+            let _ = fs::create_dir_all(path);
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            std::process::Command::new("explorer")
+                .arg(path)
+                .spawn()
+                .map_err(|e| format!("Failed to open folder via explorer: {}", e))?;
+            Ok(())
+        }
+        #[cfg(target_os = "linux")]
+        {
+            std::process::Command::new("xdg-open")
+                .arg(path)
+                .spawn()
+                .map_err(|e| format!("Failed to open folder via xdg-open: {}", e))?;
+            Ok(())
+        }
+        #[cfg(target_os = "macos")]
+        {
+            std::process::Command::new("open")
+                .arg(path)
+                .spawn()
+                .map_err(|e| format!("Failed to open folder via open: {}", e))?;
+            Ok(())
+        }
+        #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
+        {
+            Err("Unsupported OS for folder open".to_string())
+        }
+    }
 }
 
 #[cfg(test)]
@@ -498,5 +626,48 @@ mod tests {
         assert!(del_res.is_ok());
         assert!(!saved_path.exists());
         assert!(manager.materials.iter().all(|m| m.id != "test_cyber_metal"));
+    }
+
+    #[test]
+    fn test_custom_decals_lifecycle() {
+        let mut manager = AssetManager::new();
+        let test_decal = CustomDecalPreset {
+            id: "test_custom_bolt".to_string(),
+            name: "Custom Heavy Bolt".to_string(),
+            description: "High-strength structural bolt with chamfer".to_string(),
+            path: PathBuf::new(),
+            file_name: String::new(),
+            stroke_style: crate::brush::PathStrokeStyle::SmartDecal,
+            decal_type: crate::brush::SmartDecalType::HexBolt,
+            radius: 32.0,
+            spacing_ratio: 0.35,
+            decal_spacing: 1.5,
+            height_depth: 0.8,
+            base_color: [0.85, 0.86, 0.90, 1.0],
+            roughness: 0.25,
+            metallic: 0.95,
+            heat_tint: false,
+            surface_offset: 0.005,
+        };
+
+        let save_res = manager.save_decal(&test_decal);
+        assert!(save_res.is_ok(), "Saving custom decal should succeed");
+        let saved_path = save_res.unwrap();
+        assert!(saved_path.exists());
+
+        // Refresh and verify decal is present
+        manager.refresh_decals();
+        let found = manager.decals.iter().find(|d| d.id == "test_custom_bolt");
+        assert!(found.is_some(), "Saved custom decal must be found in decals list");
+        let loaded = found.unwrap();
+        assert_eq!(loaded.name, "Custom Heavy Bolt");
+        assert_eq!(loaded.metallic, 0.95);
+        assert_eq!(loaded.height_depth, 0.8);
+
+        // Delete and verify cleanup
+        let del_res = manager.delete_decal("test_custom_bolt");
+        assert!(del_res.is_ok());
+        assert!(!saved_path.exists());
+        assert!(manager.decals.iter().all(|d| d.id != "test_custom_bolt"));
     }
 }
