@@ -3,7 +3,7 @@
 
 use glam::{Vec2, Vec3, Vec4};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -1107,11 +1107,12 @@ impl Mesh {
         }
     }
 
-    /// Load 3D model from file (auto-detects .obj, .gltf, .glb, .ply, .stl)
+    /// Load 3D model from file (auto-detects .fbx, .obj, .gltf, .glb, .ply, .stl)
     pub fn load_file(path: &std::path::Path) -> Result<Self, String> {
         let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
         let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("Model");
         match ext.as_str() {
+            "fbx" => Self::from_fbx_file(path),
             "obj" => {
                 let content = std::fs::read_to_string(path).map_err(|e| format!("Failed to read OBJ file: {}", e))?;
                 Self::from_obj_str(&content, name)
@@ -1127,6 +1128,9 @@ impl Mesh {
             }
             _ => {
                 if let Ok(bytes) = std::fs::read(path) {
+                    if bytes.starts_with(b"Kaydara FBX Binary") || bytes.starts_with(b"; FBX") {
+                        return Self::from_fbx_bytes(&bytes, name);
+                    }
                     if bytes.starts_with(b"glTF") {
                         return Self::from_gltf_or_glb_file(path);
                     }
@@ -1586,6 +1590,198 @@ impl Mesh {
         mesh.rebuild_bvh();
 
         Ok(mesh)
+    }
+
+    /// Load 3D model from Autodesk FBX format (.fbx - binary and ASCII)
+    pub fn from_fbx_bytes(bytes: &[u8], name: &str) -> Result<Self, String> {
+        let mut opts = ufbx::LoadOpts::default();
+        opts.target_axes = ufbx::axes_right_handed_y_up();
+        opts.generate_missing_normals = true;
+
+        let scene = ufbx::load_memory(bytes, opts)
+            .map_err(|e| format!("Failed to parse FBX: {:?}", e))?;
+
+        let mut vertices: Vec<Vertex> = Vec::new();
+        let mut material_groups: Vec<(String, Vec<u32>)> = Vec::new();
+        let mut mat_map: HashMap<String, usize> = HashMap::new();
+        let mut vert_dedup: HashMap<(usize, u32, u32, u32, u32), u32> = HashMap::new();
+
+        let nodes_with_meshes: Vec<_> = scene.nodes.iter().enumerate().filter(|(_, n)| n.mesh.is_some()).collect();
+        let identity = ufbx::identity_matrix();
+
+        let mesh_instances: Vec<(usize, &ufbx::Mesh, &ufbx::Matrix, &ufbx::RefList<ufbx::Material>)> = if !nodes_with_meshes.is_empty() {
+            nodes_with_meshes
+                .into_iter()
+                .map(|(node_idx, n)| {
+                    let m = n.mesh.as_ref().unwrap();
+                    (node_idx, m.as_ref(), &n.geometry_to_world, &n.materials)
+                })
+                .collect()
+        } else {
+            scene.meshes
+                .iter()
+                .enumerate()
+                .map(|(mesh_idx, m)| (mesh_idx, m.as_ref(), &identity, &m.materials))
+                .collect()
+        };
+
+        for (inst_idx, mesh, transform, node_materials) in mesh_instances {
+            if mesh.faces.is_empty() {
+                continue;
+            }
+            let mut tri_indices = vec![0u32; mesh.max_face_triangles * 3];
+
+            for (face_idx, face) in mesh.faces.iter().enumerate() {
+                if face.num_indices < 3 {
+                    continue;
+                }
+                let mat_idx = if face_idx < mesh.face_material.len() {
+                    mesh.face_material[face_idx]
+                } else {
+                    0
+                };
+
+                let opt_mat = if (mat_idx as usize) < node_materials.count {
+                    Some(&node_materials[mat_idx as usize])
+                } else if (mat_idx as usize) < mesh.materials.count {
+                    Some(&mesh.materials[mat_idx as usize])
+                } else {
+                    None
+                };
+
+                let mat_name = if mat_idx != u32::MAX {
+                    opt_mat
+                        .map(|m| {
+                            let raw: &str = &m.element.name;
+                            let clean = raw.strip_prefix("Material::").unwrap_or(raw).trim();
+                            if clean.is_empty() { "Material".to_string() } else { clean.to_string() }
+                        })
+                        .unwrap_or_else(|| {
+                            if mat_idx == 0 {
+                                "Material".to_string()
+                            } else {
+                                format!("Material_{}", mat_idx)
+                            }
+                        })
+                } else {
+                    "Material".to_string()
+                };
+
+                let group_idx = *mat_map.entry(mat_name.clone()).or_insert_with(|| {
+                    let idx = material_groups.len();
+                    material_groups.push((mat_name, Vec::new()));
+                    idx
+                });
+
+                let num_tris = ufbx::triangulate_face(&mut tri_indices, mesh, *face);
+                for t in 0..num_tris as usize {
+                    for corner in 0..3 {
+                        let stream_idx = tri_indices[t * 3 + corner];
+
+                        let pos_idx = if mesh.vertex_position.exists && (stream_idx as usize) < mesh.vertex_position.indices.len() {
+                            mesh.vertex_position.indices[stream_idx as usize]
+                        } else {
+                            stream_idx
+                        };
+                        let norm_idx = if mesh.vertex_normal.exists && (stream_idx as usize) < mesh.vertex_normal.indices.len() {
+                            mesh.vertex_normal.indices[stream_idx as usize]
+                        } else {
+                            0
+                        };
+                        let uv_idx = if mesh.vertex_uv.exists && (stream_idx as usize) < mesh.vertex_uv.indices.len() {
+                            mesh.vertex_uv.indices[stream_idx as usize]
+                        } else {
+                            0
+                        };
+
+                        let dedup_key = (inst_idx, mat_idx, pos_idx, norm_idx, uv_idx);
+                        let v_idx = if let Some(&cached_idx) = vert_dedup.get(&dedup_key) {
+                            cached_idx
+                        } else {
+                            let p = mesh.vertex_position[stream_idx as usize];
+                            let pos = ufbx::transform_position(transform, p);
+                            let position = Vec3::new(pos.x as f32, pos.y as f32, pos.z as f32);
+
+                            let normal = if mesh.vertex_normal.exists {
+                                let n = mesh.vertex_normal[stream_idx as usize];
+                                let norm = ufbx::transform_direction(transform, n);
+                                Vec3::new(norm.x as f32, norm.y as f32, norm.z as f32).normalize_or_zero()
+                            } else {
+                                Vec3::Y
+                            };
+
+                            let uv = if mesh.vertex_uv.exists {
+                                let u = mesh.vertex_uv[stream_idx as usize];
+                                Vec2::new(u.x as f32, u.y as f32)
+                            } else {
+                                Vec2::ZERO
+                            };
+
+                            let tangent = if mesh.vertex_tangent.exists {
+                                let t = mesh.vertex_tangent[stream_idx as usize];
+                                let tan = ufbx::transform_direction(transform, t);
+                                Vec4::new(tan.x as f32, tan.y as f32, tan.z as f32, 1.0)
+                            } else {
+                                Vec4::ZERO
+                            };
+
+                            let new_idx = vertices.len() as u32;
+                            vertices.push(Vertex {
+                                position,
+                                normal,
+                                tangent,
+                                uv,
+                            });
+                            vert_dedup.insert(dedup_key, new_idx);
+                            new_idx
+                        };
+
+                        material_groups[group_idx].1.push(v_idx);
+                    }
+                }
+            }
+        }
+
+        let mut indices: Vec<u32> = Vec::new();
+        let mut submeshes: Vec<SubMeshRange> = Vec::new();
+
+        for (mat_name, mat_indices) in material_groups {
+            if mat_indices.is_empty() {
+                continue;
+            }
+            let start_index = indices.len();
+            let index_count = mat_indices.len();
+            indices.extend_from_slice(&mat_indices);
+            submeshes.push(SubMeshRange {
+                material_name: mat_name,
+                start_index,
+                index_count,
+                visible: true,
+            });
+        }
+
+        if vertices.is_empty() || indices.is_empty() {
+            return Err("No polygon geometry found in FBX file".to_string());
+        }
+
+        let mut mesh = Self::new(name.to_string(), vertices, indices);
+        if !submeshes.is_empty() {
+            mesh.submeshes = submeshes;
+        }
+        mesh.generate_box_uvs_if_missing();
+        mesh.recompute_bounds();
+        mesh.normalize_to_unit_box();
+        mesh.ensure_tangents();
+        mesh.rebuild_bvh();
+
+        Ok(mesh)
+    }
+
+    /// Load 3D model from Autodesk FBX file path (.fbx)
+    pub fn from_fbx_file(path: &std::path::Path) -> Result<Self, String> {
+        let bytes = std::fs::read(path).map_err(|e| format!("Failed to read FBX file: {}", e))?;
+        let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("Model");
+        Self::from_fbx_bytes(&bytes, name)
     }
 
 fn decode_base64_simple(input: &str) -> Vec<u8> {
@@ -3093,6 +3289,81 @@ endsolid TestStl
         });
         let multi_tiles = cube.get_udim_tiles();
         assert_eq!(multi_tiles, vec![1001, 1002]);
+    }
+
+    #[test]
+    fn test_fbx_parsing() {
+        let fbx_ascii = br#"; FBX 7.4.0 project file
+
+Definitions: {
+	Version: 100
+	Count: 2
+	ObjectType: "Model" {
+		Count: 1
+	}
+	ObjectType: "Geometry" {
+		Count: 1
+	}
+}
+
+Objects: {
+	Geometry: 100, "Geometry::Mesh", "Mesh" {
+		Vertices: *9 {
+			a: -1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0
+		}
+		PolygonVertexIndex: *3 {
+			a: 0, 1, -3
+		}
+		LayerElementNormal: 0 {
+			Version: 101
+			Name: ""
+			MappingInformationType: "ByPolygonVertex"
+			ReferenceInformationType: "Direct"
+			Normals: *9 {
+				a: 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0
+			}
+		}
+		LayerElementUV: 0 {
+			Version: 101
+			Name: "UVMap"
+			MappingInformationType: "ByPolygonVertex"
+			ReferenceInformationType: "Direct"
+			UV: *6 {
+				a: 0.0, 0.0, 1.0, 0.0, 0.5, 1.0
+			}
+			UVIndex: *3 {
+				a: 0, 1, 2
+			}
+		}
+	}
+	Model: 200, "Model::TestFBXModel", "Mesh" {
+		Version: 232
+	}
+}
+
+Connections: {
+	C: "OO", 100, 200
+	C: "OO", 200, 0
+}
+"#;
+
+        let mesh = Mesh::from_fbx_bytes(fbx_ascii, "TestFBX").expect("ASCII FBX parsing failed");
+        assert_eq!(mesh.name, "TestFBX");
+        assert_eq!(mesh.vertices.len(), 3);
+        assert_eq!(mesh.indices.len(), 3);
+        assert_eq!(mesh.submeshes.len(), 1);
+        assert!(!mesh.submeshes[0].material_name.is_empty());
+        assert!(mesh.vertices.iter().all(|v| v.uv.is_finite()));
+        assert!(mesh.vertices.iter().all(|v| v.normal.is_finite()));
+
+        // Raycast test on FBX mesh
+        let ray = Ray::new(Vec3::new(0.0, 0.3, 2.0), -Vec3::Z);
+        let hit = mesh.raycast(&ray);
+        assert!(hit.is_some(), "Expected ray to hit FBX triangle");
+
+        // Invalid FBX bytes error handling
+        let err = Mesh::from_fbx_bytes(b"invalid data", "BadFBX");
+        assert!(err.is_err(), "Expected error on invalid FBX bytes");
     }
 }
 

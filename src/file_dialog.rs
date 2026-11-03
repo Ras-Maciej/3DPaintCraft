@@ -52,7 +52,7 @@ impl Default for FileExplorerDialog {
 impl FileExplorerDialog {
     pub fn new_open_model() -> Self {
         let mut d = Self::default();
-        d.title = "Open 3D Model (OBJ, glTF, GLB, PLY, STL)".to_string();
+        d.title = "Open 3D Model (FBX, OBJ, glTF, GLB, PLY, STL)".to_string();
         d.filter = FileFilter::MeshFiles;
         d.refresh_entries();
         d
@@ -122,7 +122,7 @@ impl FileExplorerDialog {
                 let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
                 let matches = match self.filter {
                     FileFilter::WavefrontObj => ext == "obj",
-                    FileFilter::MeshFiles => ext == "obj" || ext == "gltf" || ext == "glb" || ext == "ply" || ext == "stl",
+                    FileFilter::MeshFiles => ext == "fbx" || ext == "obj" || ext == "gltf" || ext == "glb" || ext == "ply" || ext == "stl",
                     FileFilter::PaintcraftProject => ext == "paintcraft",
                     FileFilter::AllFiles => true,
                 };

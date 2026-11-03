@@ -3532,8 +3532,29 @@ impl eframe::App for PaintcraftApp {
                     self.status_message = "Tool: Material Picker [P/I]".to_string();
                 }
 
-                // View Mode: M = Lit Material (PBR) and exit mask preview
-                if input.key_pressed(egui::Key::M) {
+                // Shift+M = Toggle Target between Layer Material and Mask
+                // M = View Mode: Lit Material (PBR) and exit mask preview
+                if input.modifiers.shift && input.key_pressed(egui::Key::M) {
+                    let act_idx = self.project.active_layer_idx;
+                    let layer_info = self.project.layers.get(act_idx).map(|l| (l.has_mask, l.name.clone()));
+                    if let Some((has_mask, layer_name)) = layer_info {
+                        if has_mask {
+                            if self.brush_engine.settings.target == PaintTarget::Mask {
+                                self.brush_engine.settings.target = PaintTarget::Material;
+                                if self.mask_preview_layer_id.is_some() {
+                                    self.exit_mask_preview(ctx);
+                                }
+                                self.status_message = format!("Target: Material (Layer '{}') [Shift+M]", layer_name);
+                            } else {
+                                self.brush_engine.settings.target = PaintTarget::Mask;
+                                self.status_message = format!("Target: Mask (Layer '{}') [Shift+M]", layer_name);
+                            }
+                            ctx.request_repaint();
+                        } else {
+                            self.status_message = format!("Layer '{}' does not have a mask", layer_name);
+                        }
+                    }
+                } else if input.key_pressed(egui::Key::M) {
                     if self.mask_preview_layer_id.is_some() {
                         self.exit_mask_preview(ctx);
                     }
@@ -4809,7 +4830,7 @@ impl eframe::App for PaintcraftApp {
         // --- VISUAL FILE EXPLORER MODAL (For opening 3D models or projects) ---
         if let Some(selected_path) = self.file_explorer.ui(ctx) {
             let ext = selected_path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
-            if ext == "obj" || ext == "gltf" || ext == "glb" || ext == "ply" || ext == "stl" {
+            if ext == "fbx" || ext == "obj" || ext == "gltf" || ext == "glb" || ext == "ply" || ext == "stl" {
                 let stem = selected_path.file_stem().and_then(|s| s.to_str()).unwrap_or("Model");
                 match Mesh::load_file(&selected_path) {
                     Ok(mesh) => {
@@ -5568,7 +5589,7 @@ impl eframe::App for PaintcraftApp {
                                 ui.add(egui::TextEdit::singleline(&mut self.new_proj_custom_path).hint_text("/path/to/model.obj").desired_width(320.0));
                                 if ui.button("Browse...").clicked() {
                                     if let Some(path) = rfd::FileDialog::new()
-                                        .add_filter("3D Models (OBJ, glTF, GLB, PLY, STL)", &["obj", "gltf", "glb", "ply", "stl"])
+                                        .add_filter("3D Models (FBX, OBJ, glTF, GLB, PLY, STL)", &["fbx", "obj", "gltf", "glb", "ply", "stl"])
                                         .set_title("Select 3D Mesh Model")
                                         .pick_file()
                                     {
@@ -9684,7 +9705,7 @@ impl PaintcraftApp {
                                             ui.horizontal(|ui| {
                                                 ui.text_edit_singleline(&mut self.bake_highpoly_path);
                                                 if ui.button("Browse...").clicked() {
-                                                    if let Some(path) = rfd::FileDialog::new().add_filter("3D Models (OBJ, glTF, GLB, PLY, STL)", &["obj", "gltf", "glb", "ply", "stl"]).pick_file() {
+                                                    if let Some(path) = rfd::FileDialog::new().add_filter("3D Models (FBX, OBJ, glTF, GLB, PLY, STL)", &["fbx", "obj", "gltf", "glb", "ply", "stl"]).pick_file() {
                                                         self.bake_highpoly_path = path.to_string_lossy().to_string();
                                                         if let Ok(mesh) = crate::mesh::Mesh::load_file(&path) {
                                                             self.project.high_poly_mesh = Some(mesh);
@@ -9778,7 +9799,7 @@ impl PaintcraftApp {
                                                     ui.horizontal(|ui| {
                                                         ui.text_edit_singleline(&mut self.bake_cage_path);
                                                         if ui.button("Browse...").clicked() {
-                                                             if let Some(path) = rfd::FileDialog::new().add_filter("OBJ Mesh (*.obj)", &["obj"]).pick_file() {
+                                                             if let Some(path) = rfd::FileDialog::new().add_filter("3D Models (FBX, OBJ, glTF, GLB, PLY, STL)", &["fbx", "obj", "gltf", "glb", "ply", "stl"]).pick_file() {
                                                                 self.bake_cage_path = path.to_string_lossy().to_string();
                                                             }
                                                         }
@@ -9786,7 +9807,7 @@ impl PaintcraftApp {
                                                             self.bake_cage_path.clear();
                                                         }
                                                     });
-                                                    ui.label(egui::RichText::new("Cage OBJ must have matching topology (identical vertex count and faces) as the low-poly mesh.").small().color(Color32::from_rgb(150, 155, 165)));
+                                                    ui.label(egui::RichText::new("Cage mesh must have matching topology (identical vertex count and faces) as the low-poly mesh.").small().color(Color32::from_rgb(150, 155, 165)));
                                                 }
                                             }
 
@@ -10986,6 +11007,7 @@ mod tests {
         let is_delete_down = true;
         let delete_pressed = is_delete_down && !delete_key_held;
         delete_key_held = is_delete_down;
+        let _ = delete_key_held;
         assert!(delete_pressed, "Should trigger again on new key press");
     }
 }
@@ -11662,6 +11684,12 @@ impl PaintcraftApp {
                                                 if mat_resp.on_hover_text("Target Material (Click to activate material editing)").clicked() {
                                                     self.project.active_layer_idx = i;
                                                     self.brush_engine.settings.target = PaintTarget::Material;
+                                                    if self.mask_preview_layer_id.is_some() {
+                                                        let ctx = ui.ctx().clone();
+                                                        self.exit_mask_preview(&ctx);
+                                                    }
+                                                    self.status_message = format!("Target: Material (Layer '{}')", layer.name);
+                                                    ui.ctx().request_repaint();
                                                 }
 
                                                 // 3b. Mask Swatch Thumbnail (if layer has mask)
@@ -11694,7 +11722,9 @@ impl PaintcraftApp {
                                                         } else {
                                                             self.project.active_layer_idx = i;
                                                             self.brush_engine.settings.target = PaintTarget::Mask;
+                                                            self.status_message = format!("Target: Mask (Layer '{}')", layer.name);
                                                         }
+                                                        ui.ctx().request_repaint();
                                                     }
                                                 } else {
                                                     // Elegant add-mask placeholder slot
@@ -11751,6 +11781,11 @@ impl PaintcraftApp {
                                                     if name_resp.clicked() {
                                                         self.project.active_layer_idx = i;
                                                         self.brush_engine.settings.target = PaintTarget::Material;
+                                                        if self.mask_preview_layer_id.is_some() {
+                                                            let ctx = ui.ctx().clone();
+                                                            self.exit_mask_preview(&ctx);
+                                                        }
+                                                        ui.ctx().request_repaint();
                                                     }
                                                     if name_resp.double_clicked() {
                                                         self.renaming_layer_idx = Some(i);
@@ -11776,17 +11811,20 @@ impl PaintcraftApp {
                                                         });
                                                     }
                                                 }
+
+                                                // 6. Fill remaining card width for selecting layer & dragging
+                                                let avail = ui.available_size_before_wrap();
+                                                if avail.x > 0.0 && avail.y > 0.0 {
+                                                    let (_, empty_resp) = ui.allocate_exact_size(avail, egui::Sense::click_and_drag());
+                                                    if empty_resp.clicked() {
+                                                        self.project.active_layer_idx = i;
+                                                    }
+                                                    if empty_resp.drag_started() {
+                                                        self.dragged_layer_idx = Some(i);
+                                                    }
+                                                }
                                             });
                                         });
-
-                                    // Clicking anywhere on card selects active layer, dragging starts reorder
-                                    let card_resp = card_response.response.interact(egui::Sense::click_and_drag());
-                                    if card_resp.clicked() {
-                                        self.project.active_layer_idx = i;
-                                    }
-                                    if card_resp.drag_started() {
-                                        self.dragged_layer_idx = Some(i);
-                                    }
 
                                     // Full Right-Click Layer Context Menu
                                     card_response.response.context_menu(|ui| {
@@ -11810,8 +11848,28 @@ impl PaintcraftApp {
                                         }
                                         ui.separator();
                                         if layer.has_mask {
+                                            let is_editing_mask = self.brush_engine.settings.target == PaintTarget::Mask && self.project.active_layer_idx == i;
+                                            if is_editing_mask {
+                                                if ui.button("Target: Edit Material (Shift+M)").clicked() {
+                                                    self.project.active_layer_idx = i;
+                                                    self.brush_engine.settings.target = PaintTarget::Material;
+                                                    if self.mask_preview_layer_id.is_some() {
+                                                        let ctx = ui.ctx().clone();
+                                                        self.exit_mask_preview(&ctx);
+                                                    }
+                                                    self.status_message = format!("Target: Material (Layer '{}')", layer.name);
+                                                    ui.close_menu();
+                                                }
+                                            } else {
+                                                if ui.button("Target: Edit Mask (Shift+M)").clicked() {
+                                                    self.project.active_layer_idx = i;
+                                                    self.brush_engine.settings.target = PaintTarget::Mask;
+                                                    self.status_message = format!("Target: Mask (Layer '{}')", layer.name);
+                                                    ui.close_menu();
+                                                }
+                                            }
                                             let is_prev = self.mask_preview_layer_id == Some(layer.id);
-                                            let preview_label = if is_prev { "Exit Mask Preview" } else { "Preview Mask (Unlit)" };
+                                            let preview_label = if is_prev { "Exit Mask Preview (Esc)" } else { "Preview Mask (Unlit)" };
                                             if ui.button(preview_label).clicked() {
                                                 toggle_mask_preview_id = Some(layer.id);
                                                 ui.close_menu();
@@ -11969,7 +12027,7 @@ impl PaintcraftApp {
                     let act_idx = self.project.active_layer_idx;
                     let is_mask_editing = self.brush_engine.settings.target == PaintTarget::Mask;
     
-                    let (has_layer, prop_title) = if let Some(layer) = self.project.layers.get(act_idx) {
+                    let (has_layer, has_mask, prop_title) = if let Some(layer) = self.project.layers.get(act_idx) {
                         let title = if is_mask_editing {
                             format!("Properties - Mask: {}", layer.name)
                         } else {
@@ -11979,9 +12037,9 @@ impl PaintcraftApp {
                                 LayerType::Folder => format!("Properties - Folder: {}", layer.name),
                             }
                         };
-                        (true, title)
+                        (true, layer.has_mask, title)
                     } else {
-                        (false, String::new())
+                        (false, false, String::new())
                     };
 
                     if has_layer {
@@ -11989,7 +12047,26 @@ impl PaintcraftApp {
                         let mut mask_changed = false;
                         let mut open_shelf_picker = None;
                         let mut import_to_shelf_and_assign = None;
-                        ui.heading(&prop_title);
+                        ui.horizontal(|ui| {
+                            ui.heading(&prop_title);
+                            if has_mask {
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    if ui.selectable_label(is_mask_editing, "Mask").on_hover_text("Target Layer Mask (Shift+M)").clicked() {
+                                        self.brush_engine.settings.target = PaintTarget::Mask;
+                                        ui.ctx().request_repaint();
+                                    }
+                                    if ui.selectable_label(!is_mask_editing, "Material").on_hover_text("Target Layer Material (Shift+M)").clicked() {
+                                        self.brush_engine.settings.target = PaintTarget::Material;
+                                        if self.mask_preview_layer_id.is_some() {
+                                            let ctx = ui.ctx().clone();
+                                            self.exit_mask_preview(&ctx);
+                                        }
+                                        ui.ctx().request_repaint();
+                                    }
+                                    ui.label(egui::RichText::new("Target:").strong().size(11.0));
+                                });
+                            }
+                        });
                         ui.add_space(2.0);
 
                         egui::ScrollArea::vertical()
