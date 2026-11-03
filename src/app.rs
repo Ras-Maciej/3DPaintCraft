@@ -938,7 +938,9 @@ impl PaintcraftApp {
             return;
         }
 
-        let samples = self.brush_engine.settings.path_tool.sample_path(self.brush_engine.settings.radius);
+        let doc_w = self.project.texture_width;
+        let world_rad = ((self.brush_engine.settings.radius / (doc_w as f32).max(1.0)) * 2.0).clamp(0.005, 0.5);
+        let samples = self.brush_engine.settings.path_tool.sample_path(world_rad);
         if samples.is_empty() {
             return;
         }
@@ -981,7 +983,6 @@ impl PaintcraftApp {
         }
 
         let mesh = self.project.mesh.clone();
-        let doc_w = self.project.texture_width;
         let doc_h = self.project.texture_height;
 
         self.brush_engine.last_hit_pos = None;
@@ -998,11 +999,11 @@ impl PaintcraftApp {
                 self.brush_engine.follow_path_angle = sample.tangent_angle;
             }
 
-            let world_rad = (self.brush_engine.settings.radius / (doc_w as f32).max(1.0)) * 2.0;
+            let sample_world_rad = ((self.brush_engine.settings.radius / (doc_w as f32).max(1.0)) * 2.0).max(0.005);
             let layer = &mut self.project.layers[act_idx];
 
             if stroke_style == crate::brush::PathStrokeStyle::Continuous {
-                self.brush_engine.paint_stroke_3d(layer, &mesh, sample.position_3d, sample.normal, world_rad.max(0.005));
+                self.brush_engine.paint_stroke_3d(layer, &mesh, sample.position_3d, sample.normal, sample_world_rad);
             } else {
                 let next_idx = if i + 1 < samples.len() { i + 1 } else { i };
                 let prev_idx = if i > 0 { i - 1 } else { i };
@@ -1022,7 +1023,7 @@ impl PaintcraftApp {
                     sample.position_3d,
                     sample.normal,
                     tan_3d,
-                    world_rad.max(0.005),
+                    sample_world_rad,
                     stroke_style,
                     decal_type,
                     heat_tint,
@@ -6732,20 +6733,56 @@ impl PaintcraftApp {
                     if let Some(idx) = hovered_pt_idx {
                         self.brush_engine.settings.path_tool.selected_point = Some(idx);
                         self.brush_engine.settings.path_tool.is_dragging = true;
+                    } else if let Some(hit) = hit_opt {
+                        // Start freehand path stroke sketching directly across 3D surface
+                        self.brush_engine.settings.path_tool.is_sketching = true;
+                        self.brush_engine.settings.path_tool.points.push(crate::brush::PathControlPoint {
+                            position_3d: hit.point,
+                            normal: hit.normal,
+                            uv: hit.uv,
+                            radius_scale: 1.0,
+                        });
+                        let new_idx = self.brush_engine.settings.path_tool.points.len() - 1;
+                        self.brush_engine.settings.path_tool.selected_point = Some(new_idx);
+                        ctx.request_repaint();
                     }
-                } else if response.dragged_by(egui::PointerButton::Primary) && self.brush_engine.settings.path_tool.is_dragging {
-                    if let Some(sel_idx) = self.brush_engine.settings.path_tool.selected_point {
+                } else if response.dragged_by(egui::PointerButton::Primary) {
+                    if self.brush_engine.settings.path_tool.is_dragging {
+                        if let Some(sel_idx) = self.brush_engine.settings.path_tool.selected_point {
+                            if let Some(hit) = hit_opt {
+                                if sel_idx < self.brush_engine.settings.path_tool.points.len() {
+                                    self.brush_engine.settings.path_tool.points[sel_idx].position_3d = hit.point;
+                                    self.brush_engine.settings.path_tool.points[sel_idx].normal = hit.normal;
+                                    self.brush_engine.settings.path_tool.points[sel_idx].uv = hit.uv;
+                                    ctx.request_repaint();
+                                }
+                            }
+                        }
+                    } else if self.brush_engine.settings.path_tool.is_sketching {
                         if let Some(hit) = hit_opt {
-                            if sel_idx < self.brush_engine.settings.path_tool.points.len() {
-                                self.brush_engine.settings.path_tool.points[sel_idx].position_3d = hit.point;
-                                self.brush_engine.settings.path_tool.points[sel_idx].normal = hit.normal;
-                                self.brush_engine.settings.path_tool.points[sel_idx].uv = hit.uv;
+                            let doc_w = self.project.texture_width;
+                            let world_rad = ((self.brush_engine.settings.radius / (doc_w as f32).max(1.0)) * 2.0).clamp(0.005, 0.5);
+                            let min_dist = (world_rad * 1.5).max(0.025);
+                            let can_add = self.brush_engine.settings.path_tool.points.last()
+                                .map(|last| (hit.point - last.position_3d).length() > min_dist)
+                                .unwrap_or(true);
+                            if can_add {
+                                self.brush_engine.settings.path_tool.points.push(crate::brush::PathControlPoint {
+                                    position_3d: hit.point,
+                                    normal: hit.normal,
+                                    uv: hit.uv,
+                                    radius_scale: 1.0,
+                                });
+                                let new_idx = self.brush_engine.settings.path_tool.points.len() - 1;
+                                self.brush_engine.settings.path_tool.selected_point = Some(new_idx);
+                                self.status_message = format!("Drawing path stroke ({} points)", self.brush_engine.settings.path_tool.points.len());
                                 ctx.request_repaint();
                             }
                         }
                     }
                 } else if response.drag_stopped() || !input.pointer.any_down() {
                     self.brush_engine.settings.path_tool.is_dragging = false;
+                    self.brush_engine.settings.path_tool.is_sketching = false;
                 }
             }
         }
@@ -7424,31 +7461,75 @@ impl PaintcraftApp {
 
         // --- 3D VECTOR PATH TOOL SPLINE & CONTROL POINTS OVERLAY ---
         if self.brush_engine.settings.mode == ToolMode::Path || !self.brush_engine.settings.path_tool.points.is_empty() {
-            let samples = self.brush_engine.settings.path_tool.sample_path(self.brush_engine.settings.radius);
+            let doc_w = self.project.texture_width;
+            let world_rad = ((self.brush_engine.settings.radius / (doc_w as f32).max(1.0)) * 2.0).clamp(0.005, 0.5);
 
-            // Draw smooth Catmull-Rom curve connecting projected samples
+            // 1. Interactive guide line from last point to cursor when hovering
+            if self.brush_engine.settings.mode == ToolMode::Path {
+                if let Some(mouse_pos) = input.pointer.hover_pos() {
+                    if let Some(last_pt) = self.brush_engine.settings.path_tool.points.last() {
+                        if !self.brush_engine.settings.path_tool.is_dragging {
+                            let local_x = mouse_pos.x - rect.min.x;
+                            let local_y = mouse_pos.y - rect.min.y;
+                            let ray = self.camera.screen_to_ray(local_x, local_y, vp_w, vp_h);
+                            if let Some(hit) = self.project.mesh.raycast(&ray) {
+                                if let (Some(s_last), Some(s_cur)) = (
+                                    self.camera.world_to_screen(last_pt.position_3d, vp_w, vp_h),
+                                    self.camera.world_to_screen(hit.point, vp_w, vp_h),
+                                ) {
+                                    let p_last = rect.min + egui::vec2(s_last.x, s_last.y);
+                                    let p_cur = rect.min + egui::vec2(s_cur.x, s_cur.y);
+                                    ui.painter().line_segment(
+                                        [p_last, p_cur],
+                                        egui::Stroke::new(1.8_f32, egui::Color32::from_rgba_unmultiplied(255, 180, 50, 200)),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 2. Draw high-resolution continuous Catmull-Rom spline curve line with drop shadow
+            let curve_points = self.brush_engine.settings.path_tool.evaluate_spline_curve(32);
             let mut prev_screen_pt: Option<egui::Pos2> = None;
-            for sample in &samples {
-                if let Some(s_pos) = self.camera.world_to_screen(sample.position_3d, vp_w, vp_h) {
+            for pt in &curve_points {
+                if let Some(s_pos) = self.camera.world_to_screen(pt.position_3d, vp_w, vp_h) {
                     let cur_screen_pt = rect.min + egui::vec2(s_pos.x, s_pos.y);
                     if let Some(prev) = prev_screen_pt {
+                        // Drop shadow / outline for high contrast against any geometry
                         ui.painter().line_segment(
                             [prev, cur_screen_pt],
-                            egui::Stroke::new(2.5_f32, egui::Color32::from_rgb(243, 94, 24)),
+                            egui::Stroke::new(4.5_f32, egui::Color32::from_rgba_unmultiplied(20, 22, 28, 220)),
+                        );
+                        // Main vector path line
+                        ui.painter().line_segment(
+                            [prev, cur_screen_pt],
+                            egui::Stroke::new(2.5_f32, egui::Color32::from_rgb(255, 115, 30)),
                         );
                     }
-                    let r = match self.brush_engine.settings.path_tool.stroke_style {
-                        crate::brush::PathStrokeStyle::SmartDecal => (3.5 * sample.radius_scale).clamp(2.5, 9.0),
-                        _ => (2.2 * sample.radius_scale).clamp(1.2, 7.0),
-                    };
-                    ui.painter().circle_filled(cur_screen_pt, r, egui::Color32::from_rgb(255, 205, 110));
                     prev_screen_pt = Some(cur_screen_pt);
                 } else {
                     prev_screen_pt = None;
                 }
             }
 
-            // Draw control point handle rings with index numbers
+            // 3. Draw discrete stamp indicators along the path line
+            let samples = self.brush_engine.settings.path_tool.sample_path(world_rad);
+            for sample in &samples {
+                if let Some(s_pos) = self.camera.world_to_screen(sample.position_3d, vp_w, vp_h) {
+                    let cur_screen_pt = rect.min + egui::vec2(s_pos.x, s_pos.y);
+                    let r = match self.brush_engine.settings.path_tool.stroke_style {
+                        crate::brush::PathStrokeStyle::SmartDecal => (4.0 * sample.radius_scale).clamp(3.0, 10.0),
+                        crate::brush::PathStrokeStyle::WeldSeam => (2.8 * sample.radius_scale).clamp(1.8, 8.0),
+                        _ => (2.2 * sample.radius_scale).clamp(1.2, 7.0),
+                    };
+                    ui.painter().circle_stroke(cur_screen_pt, r + 1.0, egui::Stroke::new(1.0_f32, egui::Color32::from_rgba_unmultiplied(20, 20, 25, 180)));
+                    ui.painter().circle_filled(cur_screen_pt, r, egui::Color32::from_rgb(255, 215, 120));
+                }
+            }
+
+            // 4. Draw control point handle rings with index numbers
             let sel_idx = self.brush_engine.settings.path_tool.selected_point;
             for (i, pt) in self.brush_engine.settings.path_tool.points.iter().enumerate() {
                 if let Some(s_pos) = self.camera.world_to_screen(pt.position_3d, vp_w, vp_h) {
@@ -7456,21 +7537,21 @@ impl PaintcraftApp {
                     let is_selected = sel_idx == Some(i);
 
                     if is_selected {
-                        ui.painter().circle_stroke(pt_screen, 8.0, egui::Stroke::new(2.5_f32, egui::Color32::from_rgb(255, 220, 50)));
-                        ui.painter().circle_filled(pt_screen, 4.5, egui::Color32::from_rgb(243, 94, 24));
+                        ui.painter().circle_stroke(pt_screen, 9.0, egui::Stroke::new(3.0_f32, egui::Color32::from_rgb(255, 230, 60)));
+                        ui.painter().circle_filled(pt_screen, 5.0, egui::Color32::from_rgb(243, 94, 24));
                     } else {
-                        ui.painter().circle_stroke(pt_screen, 6.5, egui::Stroke::new(1.8_f32, egui::Color32::WHITE));
-                        ui.painter().circle_filled(pt_screen, 3.5, egui::Color32::from_rgb(30, 30, 35));
+                        ui.painter().circle_stroke(pt_screen, 7.5, egui::Stroke::new(2.0_f32, egui::Color32::WHITE));
+                        ui.painter().circle_filled(pt_screen, 4.0, egui::Color32::from_rgb(30, 32, 40));
                     }
 
                     // Index label badge
-                    let badge_pos = pt_screen + egui::vec2(10.0, -10.0);
+                    let badge_pos = pt_screen + egui::vec2(12.0, -12.0);
                     ui.painter().text(
                         badge_pos,
                         egui::Align2::LEFT_CENTER,
                         format!("{}", i + 1),
-                        egui::FontId::monospace(11.0),
-                        if is_selected { egui::Color32::from_rgb(255, 220, 50) } else { egui::Color32::WHITE },
+                        egui::FontId::monospace(11.5),
+                        if is_selected { egui::Color32::from_rgb(255, 230, 60) } else { egui::Color32::WHITE },
                     );
                 }
             }
@@ -7878,21 +7959,61 @@ impl PaintcraftApp {
                             if let Some(idx) = hovered_pt_idx {
                                 self.brush_engine.settings.path_tool.selected_point = Some(idx);
                                 self.brush_engine.settings.path_tool.is_dragging = true;
+                            } else {
+                                // Start freehand path stroke sketching directly across 2D UV canvas
+                                let (pos_3d, norm_3d) = self.project.mesh.uv_to_3d_point(glam::Vec2::new(u, v)).unwrap_or((glam::Vec3::new(u, v, 0.0), glam::Vec3::Y));
+                                self.brush_engine.settings.path_tool.is_sketching = true;
+                                self.brush_engine.settings.path_tool.points.push(crate::brush::PathControlPoint {
+                                    position_3d: pos_3d,
+                                    normal: norm_3d,
+                                    uv: glam::Vec2::new(u, v),
+                                    radius_scale: 1.0,
+                                });
+                                let new_idx = self.brush_engine.settings.path_tool.points.len() - 1;
+                                self.brush_engine.settings.path_tool.selected_point = Some(new_idx);
+                                ctx.request_repaint();
                             }
-                        } else if response.dragged_by(egui::PointerButton::Primary) && self.brush_engine.settings.path_tool.is_dragging {
-                            if let Some(sel_idx) = self.brush_engine.settings.path_tool.selected_point {
-                                if sel_idx < self.brush_engine.settings.path_tool.points.len() {
+                        } else if response.dragged_by(egui::PointerButton::Primary) {
+                            if self.brush_engine.settings.path_tool.is_dragging {
+                                if let Some(sel_idx) = self.brush_engine.settings.path_tool.selected_point {
+                                    if sel_idx < self.brush_engine.settings.path_tool.points.len() {
+                                        let (pos_3d, norm_3d) = self.project.mesh.uv_to_3d_point(glam::Vec2::new(u, v)).unwrap_or((glam::Vec3::new(u, v, 0.0), glam::Vec3::Y));
+                                        self.brush_engine.settings.path_tool.points[sel_idx].position_3d = pos_3d;
+                                        self.brush_engine.settings.path_tool.points[sel_idx].normal = norm_3d;
+                                        self.brush_engine.settings.path_tool.points[sel_idx].uv = glam::Vec2::new(u, v);
+                                        ctx.request_repaint();
+                                    }
+                                }
+                            } else if self.brush_engine.settings.path_tool.is_sketching {
+                                let doc_w = self.project.texture_width;
+                                let uv_rad = (self.brush_engine.settings.radius / (doc_w as f32).max(1.0)).clamp(0.002, 0.25);
+                                let min_uv_dist = (uv_rad * 1.5).max(0.02);
+                                let can_add = self.brush_engine.settings.path_tool.points.last()
+                                    .map(|last| (glam::Vec2::new(u, v) - last.uv).length() > min_uv_dist)
+                                    .unwrap_or(true);
+                                if can_add {
                                     let (pos_3d, norm_3d) = self.project.mesh.uv_to_3d_point(glam::Vec2::new(u, v)).unwrap_or((glam::Vec3::new(u, v, 0.0), glam::Vec3::Y));
-                                    self.brush_engine.settings.path_tool.points[sel_idx].position_3d = pos_3d;
-                                    self.brush_engine.settings.path_tool.points[sel_idx].normal = norm_3d;
-                                    self.brush_engine.settings.path_tool.points[sel_idx].uv = glam::Vec2::new(u, v);
+                                    self.brush_engine.settings.path_tool.points.push(crate::brush::PathControlPoint {
+                                        position_3d: pos_3d,
+                                        normal: norm_3d,
+                                        uv: glam::Vec2::new(u, v),
+                                        radius_scale: 1.0,
+                                    });
+                                    let new_idx = self.brush_engine.settings.path_tool.points.len() - 1;
+                                    self.brush_engine.settings.path_tool.selected_point = Some(new_idx);
+                                    self.status_message = format!("Drawing UV path stroke ({} points)", self.brush_engine.settings.path_tool.points.len());
                                     ctx.request_repaint();
                                 }
                             }
                         } else if response.drag_stopped() || !ui.input(|i| i.pointer.any_down()) {
                             self.brush_engine.settings.path_tool.is_dragging = false;
+                            self.brush_engine.settings.path_tool.is_sketching = false;
                         }
                     }
+                }
+                if response.drag_stopped() || !ui.input(|i| i.pointer.any_down()) {
+                    self.brush_engine.settings.path_tool.is_dragging = false;
+                    self.brush_engine.settings.path_tool.is_sketching = false;
                 }
             }
             // 2D UV Painting and Tool Actions
@@ -8259,47 +8380,78 @@ impl PaintcraftApp {
 
             // --- 2D VECTOR PATH TOOL SPLINE & CONTROL POINTS OVERLAY ---
             if self.brush_engine.settings.mode == ToolMode::Path || !self.brush_engine.settings.path_tool.points.is_empty() {
-                let samples = self.brush_engine.settings.path_tool.sample_path(self.brush_engine.settings.radius);
+                let doc_w = self.project.texture_width;
+                let uv_rad = (self.brush_engine.settings.radius / (doc_w as f32).max(1.0)).clamp(0.002, 0.25);
 
-                // Draw 2D Catmull-Rom curve connecting samples
+                // 1. Interactive guide line from last point to cursor when hovering in Path mode
+                if self.brush_engine.settings.mode == ToolMode::Path {
+                    if let Some(mouse_pos) = ui.input(|i| i.pointer.hover_pos()) {
+                        if canvas_rect.contains(mouse_pos) && !self.brush_engine.settings.path_tool.is_dragging {
+                            if let Some(last_pt) = self.brush_engine.settings.path_tool.points.last() {
+                                let last_2d = cmin + egui::vec2(last_pt.uv.x * cw, last_pt.uv.y * ch);
+                                ui.painter().line_segment(
+                                    [last_2d, mouse_pos],
+                                    egui::Stroke::new(1.8_f32, egui::Color32::from_rgba_unmultiplied(255, 180, 50, 200)),
+                                );
+                            }
+                        }
+                    }
+                }
+
+                // 2. Draw high-resolution continuous Catmull-Rom spline curve line with drop shadow
+                let curve_points = self.brush_engine.settings.path_tool.evaluate_spline_curve(32);
                 let mut prev_2d_pt: Option<egui::Pos2> = None;
-                for sample in &samples {
-                    let cur_2d_pt = cmin + egui::vec2(sample.uv.x * cw, sample.uv.y * ch);
+                for pt in &curve_points {
+                    let cur_2d_pt = cmin + egui::vec2(pt.uv.x * cw, pt.uv.y * ch);
                     if let Some(prev) = prev_2d_pt {
+                        // Drop shadow outline for high contrast
                         ui.painter().line_segment(
                             [prev, cur_2d_pt],
-                            egui::Stroke::new(2.5_f32, egui::Color32::from_rgb(243, 94, 24)),
+                            egui::Stroke::new(4.5_f32, egui::Color32::from_rgba_unmultiplied(20, 22, 28, 220)),
+                        );
+                        // Main coral path stroke line
+                        ui.painter().line_segment(
+                            [prev, cur_2d_pt],
+                            egui::Stroke::new(2.5_f32, egui::Color32::from_rgb(255, 115, 30)),
                         );
                     }
-                    let r = match self.brush_engine.settings.path_tool.stroke_style {
-                        crate::brush::PathStrokeStyle::SmartDecal => (3.5 * sample.radius_scale).clamp(2.5, 9.0),
-                        _ => (2.2 * sample.radius_scale).clamp(1.2, 7.0),
-                    };
-                    ui.painter().circle_filled(cur_2d_pt, r, egui::Color32::from_rgb(255, 205, 110));
                     prev_2d_pt = Some(cur_2d_pt);
                 }
 
-                // Draw control point handles with index labels
+                // 3. Draw discrete stamp indicators along the path line
+                let samples = self.brush_engine.settings.path_tool.sample_path(uv_rad);
+                for sample in &samples {
+                    let cur_2d_pt = cmin + egui::vec2(sample.uv.x * cw, sample.uv.y * ch);
+                    let r = match self.brush_engine.settings.path_tool.stroke_style {
+                        crate::brush::PathStrokeStyle::SmartDecal => (4.0 * sample.radius_scale).clamp(3.0, 10.0),
+                        crate::brush::PathStrokeStyle::WeldSeam => (2.8 * sample.radius_scale).clamp(1.8, 8.0),
+                        _ => (2.2 * sample.radius_scale).clamp(1.2, 7.0),
+                    };
+                    ui.painter().circle_stroke(cur_2d_pt, r + 1.0, egui::Stroke::new(1.0_f32, egui::Color32::from_rgba_unmultiplied(20, 20, 25, 180)));
+                    ui.painter().circle_filled(cur_2d_pt, r, egui::Color32::from_rgb(255, 215, 120));
+                }
+
+                // 4. Draw control point handle rings with index numbers
                 let sel_idx = self.brush_engine.settings.path_tool.selected_point;
                 for (i, pt) in self.brush_engine.settings.path_tool.points.iter().enumerate() {
                     let pt_2d = cmin + egui::vec2(pt.uv.x * cw, pt.uv.y * ch);
                     let is_selected = sel_idx == Some(i);
 
                     if is_selected {
-                        ui.painter().circle_stroke(pt_2d, 8.0, egui::Stroke::new(2.5_f32, egui::Color32::from_rgb(255, 220, 50)));
-                        ui.painter().circle_filled(pt_2d, 4.5, egui::Color32::from_rgb(243, 94, 24));
+                        ui.painter().circle_stroke(pt_2d, 9.0, egui::Stroke::new(3.0_f32, egui::Color32::from_rgb(255, 230, 60)));
+                        ui.painter().circle_filled(pt_2d, 5.0, egui::Color32::from_rgb(243, 94, 24));
                     } else {
-                        ui.painter().circle_stroke(pt_2d, 6.5, egui::Stroke::new(1.8_f32, egui::Color32::WHITE));
-                        ui.painter().circle_filled(pt_2d, 3.5, egui::Color32::from_rgb(30, 30, 35));
+                        ui.painter().circle_stroke(pt_2d, 7.5, egui::Stroke::new(2.0_f32, egui::Color32::WHITE));
+                        ui.painter().circle_filled(pt_2d, 4.0, egui::Color32::from_rgb(30, 32, 40));
                     }
 
-                    let badge_pos = pt_2d + egui::vec2(10.0, -10.0);
+                    let badge_pos = pt_2d + egui::vec2(12.0, -12.0);
                     ui.painter().text(
                         badge_pos,
                         egui::Align2::LEFT_CENTER,
                         format!("{}", i + 1),
                         egui::FontId::monospace(11.0),
-                        if is_selected { egui::Color32::from_rgb(255, 220, 50) } else { egui::Color32::WHITE },
+                        if is_selected { egui::Color32::from_rgb(255, 230, 60) } else { egui::Color32::WHITE },
                     );
                 }
             }

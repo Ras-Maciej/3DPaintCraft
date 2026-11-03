@@ -516,6 +516,8 @@ pub struct PathToolState {
     pub selected_point: Option<usize>,
     pub is_dragging: bool,
     #[serde(default)]
+    pub is_sketching: bool,
+    #[serde(default)]
     pub stroke_style: PathStrokeStyle,
     #[serde(default)]
     pub decal_type: SmartDecalType,
@@ -544,6 +546,7 @@ impl Default for PathToolState {
             taper_end: 1.0,
             selected_point: None,
             is_dragging: false,
+            is_sketching: false,
             stroke_style: PathStrokeStyle::Continuous,
             decal_type: SmartDecalType::PhillipsScrew,
             decal_spacing: 1.2,
@@ -557,11 +560,12 @@ impl PathToolState {
         self.points.clear();
         self.selected_point = None;
         self.is_dragging = false;
+        self.is_sketching = false;
     }
 
     /// Evaluates smooth Catmull-Rom spline curves across control points and returns
-    /// sampled stroke points spaced evenly by (brush_radius * spacing_ratio).
-    pub fn sample_path(&self, brush_radius: f32) -> Vec<PathSample> {
+    /// a dense polyline sequence of curve points for rendering the vector line itself.
+    pub fn evaluate_spline_curve(&self, sub_steps_per_segment: usize) -> Vec<PathSample> {
         let n = self.points.len();
         if n == 0 {
             return Vec::new();
@@ -579,8 +583,10 @@ impl PathToolState {
         }
 
         let num_segments = if self.closed { n } else { n - 1 };
-        let mut dense_eval: Vec<(Vec3, Vec3, Vec2, f32, f32)> = Vec::new();
-        let sub_steps = 24usize;
+        let steps = sub_steps_per_segment.max(8);
+        let mut curve = Vec::with_capacity(num_segments * steps + 1);
+        let mut cur_dist = 0.0f32;
+        let mut prev_pos: Option<Vec3> = None;
 
         for seg in 0..num_segments {
             let p1 = &self.points[seg];
@@ -606,8 +612,8 @@ impl PathToolState {
                 &self.points[(seg + 2) % n]
             };
 
-            for step in 0..sub_steps {
-                let t = step as f32 / sub_steps as f32;
+            for step in 0..steps {
+                let t = step as f32 / steps as f32;
                 let t2 = t * t;
                 let t3 = t2 * t;
 
@@ -632,7 +638,19 @@ impl PathToolState {
 
                 let r_scale = p1.radius_scale * (1.0 - t) + p2.radius_scale * t;
 
-                dense_eval.push((pos, norm, uv, tangent_angle, r_scale));
+                if let Some(prev) = prev_pos {
+                    cur_dist += (pos - prev).length();
+                }
+                prev_pos = Some(pos);
+
+                curve.push(PathSample {
+                    position_3d: pos,
+                    normal: norm,
+                    uv,
+                    tangent_angle,
+                    radius_scale: r_scale,
+                    arc_length: cur_dist,
+                });
             }
         }
 
@@ -641,56 +659,87 @@ impl PathToolState {
             let last = &self.points[n - 1];
             let prev = &self.points[n - 2];
             let d_uv = last.uv - prev.uv;
-            dense_eval.push((last.position_3d, last.normal, last.uv, d_uv.y.atan2(d_uv.x), last.radius_scale));
+            if let Some(prev_p) = prev_pos {
+                cur_dist += (last.position_3d - prev_p).length();
+            }
+            curve.push(PathSample {
+                position_3d: last.position_3d,
+                normal: last.normal,
+                uv: last.uv,
+                tangent_angle: d_uv.y.atan2(d_uv.x),
+                radius_scale: last.radius_scale,
+                arc_length: cur_dist,
+            });
         }
 
+        curve
+    }
+
+    /// Evaluates smooth Catmull-Rom spline curves across control points and returns
+    /// sampled stroke points spaced evenly by (world_radius * spacing_ratio).
+    pub fn sample_path(&self, brush_radius: f32) -> Vec<PathSample> {
+        let n = self.points.len();
+        if n == 0 {
+            return Vec::new();
+        }
+        if n == 1 {
+            let pt = &self.points[0];
+            return vec![PathSample {
+                position_3d: pt.position_3d,
+                normal: pt.normal,
+                uv: pt.uv,
+                tangent_angle: 0.0,
+                radius_scale: pt.radius_scale * self.taper_start,
+                arc_length: 0.0,
+            }];
+        }
+
+        // Auto-scale radius if passed in pixel coordinates (> 1.0)
+        let eff_radius = if brush_radius > 1.0 {
+            (brush_radius / 1024.0) * 2.0
+        } else {
+            brush_radius
+        }.clamp(0.002, 1.0);
+
+        let dense_eval = self.evaluate_spline_curve(32);
         if dense_eval.is_empty() {
             return Vec::new();
         }
 
-        // Compute cumulative arc length across dense points
-        let mut cumulative_dist = Vec::with_capacity(dense_eval.len());
-        cumulative_dist.push(0.0f32);
-        let mut total_len = 0.0f32;
-
-        for i in 1..dense_eval.len() {
-            let seg_len = (dense_eval[i].0 - dense_eval[i - 1].0).length();
-            total_len += seg_len;
-            cumulative_dist.push(total_len);
-        }
-
+        let total_len = dense_eval.last().map(|s| s.arc_length).unwrap_or(0.0);
         if total_len < 1e-4 {
-            let (pos, norm, uv, ang, r) = dense_eval[0];
+            let s0 = &dense_eval[0];
             return vec![PathSample {
-                position_3d: pos,
-                normal: norm,
-                uv,
-                tangent_angle: ang,
-                radius_scale: r * self.taper_start,
+                position_3d: s0.position_3d,
+                normal: s0.normal,
+                uv: s0.uv,
+                tangent_angle: s0.tangent_angle,
+                radius_scale: s0.radius_scale * self.taper_start,
                 arc_length: 0.0,
             }];
         }
 
         let step_dist = match self.stroke_style {
-            PathStrokeStyle::SmartDecal => (brush_radius * self.decal_spacing.max(0.25) * 2.0).max(0.01),
-            PathStrokeStyle::WeldSeam => (brush_radius * 0.22).max(0.005),
-            PathStrokeStyle::RopeBraid => (brush_radius * 0.15).max(0.005),
-            PathStrokeStyle::StitchSeam => (brush_radius * 0.25).max(0.005),
-            PathStrokeStyle::ChainLinks => (brush_radius * 0.35).max(0.005),
-            PathStrokeStyle::Continuous => (brush_radius * self.spacing_ratio.max(0.05)).max(0.005),
+            PathStrokeStyle::SmartDecal => (eff_radius * self.decal_spacing.max(0.25) * 2.0).max(0.005),
+            PathStrokeStyle::WeldSeam => (eff_radius * 0.22).max(0.002),
+            PathStrokeStyle::RopeBraid => (eff_radius * 0.15).max(0.002),
+            PathStrokeStyle::StitchSeam => (eff_radius * 0.25).max(0.002),
+            PathStrokeStyle::ChainLinks => (eff_radius * 0.35).max(0.002),
+            PathStrokeStyle::Continuous => (eff_radius * self.spacing_ratio.max(0.05)).max(0.002),
         };
+
         let mut samples = Vec::new();
         let mut cur_dist = 0.0f32;
         let mut dense_idx = 0;
 
         while cur_dist <= total_len {
-            while dense_idx + 1 < cumulative_dist.len() && cumulative_dist[dense_idx + 1] < cur_dist {
+            while dense_idx + 1 < dense_eval.len() && dense_eval[dense_idx + 1].arc_length < cur_dist {
                 dense_idx += 1;
             }
 
             let (pos, norm, uv, angle, base_r) = if dense_idx + 1 < dense_eval.len() {
-                let d0 = cumulative_dist[dense_idx];
-                let d1 = cumulative_dist[dense_idx + 1];
+                let d0 = dense_eval[dense_idx].arc_length;
+                let d1 = dense_eval[dense_idx + 1].arc_length;
                 let frac = if (d1 - d0).abs() > 1e-5 {
                     ((cur_dist - d0) / (d1 - d0)).clamp(0.0, 1.0)
                 } else {
@@ -699,17 +748,17 @@ impl PathToolState {
                 let a = &dense_eval[dense_idx];
                 let b = &dense_eval[dense_idx + 1];
                 (
-                    a.0.lerp(b.0, frac),
-                    a.1.lerp(b.1, frac).normalize_or_zero(),
-                    a.2.lerp(b.2, frac),
-                    a.3,
-                    a.4 * (1.0 - frac) + b.4 * frac,
+                    a.position_3d.lerp(b.position_3d, frac),
+                    a.normal.lerp(b.normal, frac).normalize_or_zero(),
+                    a.uv.lerp(b.uv, frac),
+                    a.tangent_angle,
+                    a.radius_scale * (1.0 - frac) + b.radius_scale * frac,
                 )
             } else {
-                dense_eval[dense_eval.len() - 1]
+                let last = &dense_eval[dense_eval.len() - 1];
+                (last.position_3d, last.normal, last.uv, last.tangent_angle, last.radius_scale)
             };
 
-            // Calculate taper factor
             let norm_pos = (cur_dist / total_len).clamp(0.0, 1.0);
             let taper = if norm_pos < 0.25 {
                 let f = norm_pos / 0.25;
