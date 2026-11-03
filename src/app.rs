@@ -843,6 +843,9 @@ impl PaintcraftApp {
             if self.mask_preview_layer_id == Some(layer_id) {
                 self.mask_preview_layer_id = None;
                 self.uv_view_mask_mode = false;
+                if let Some(wgpu) = &mut self.wgpu_viewport {
+                    wgpu.mask_preview_layer_id = None;
+                }
             }
             if let Some(removed_layer) = self.project.delete_layer(act_idx) {
                 let layer_name = removed_layer.name.clone();
@@ -859,6 +862,7 @@ impl PaintcraftApp {
                 }
                 self.update_uv_texture(ctx);
                 self.status_message = format!("Deleted layer '{}'", layer_name);
+                ctx.request_repaint();
             }
         }
     }
@@ -869,16 +873,25 @@ impl PaintcraftApp {
             self.mask_preview_layer_id = None;
             self.uv_view_mask_mode = false;
             self.status_message = "Exited Mask Preview Mode".to_string();
+            if let Some(wgpu) = &mut self.wgpu_viewport {
+                wgpu.mask_preview_layer_id = None;
+                wgpu.sync_textures(&mut self.project);
+            }
         } else {
             self.mask_preview_layer_id = Some(layer_id);
             self.uv_view_mask_mode = true;
             self.brush_engine.settings.target = PaintTarget::Mask;
             let name = self.project.layers.iter().find(|l| l.id == layer_id).map(|l| l.name.clone()).unwrap_or_default();
-            self.status_message = format!("Mask Preview: '{}' [Alt+Click mask or press M to return to Material]", name);
+            self.status_message = format!("Mask Preview (Unlit): '{}' [Alt+Click mask or press M/Esc to return to Material]", name);
+            if let Some(wgpu) = &mut self.wgpu_viewport {
+                wgpu.mask_preview_layer_id = Some(layer_id);
+                wgpu.sync_mask_preview_full(&self.project, layer_id);
+            }
         }
         self.project.gpu_sync_needed = true;
         self.need_cpu_composite_sync = true;
         self.update_uv_texture(ctx);
+        ctx.request_repaint();
     }
 
     /// Exit mask preview mode and restore full material shading
@@ -889,17 +902,27 @@ impl PaintcraftApp {
             self.status_message = "Exited Mask Preview Mode".to_string();
             self.project.gpu_sync_needed = true;
             self.need_cpu_composite_sync = true;
+            if let Some(wgpu) = &mut self.wgpu_viewport {
+                wgpu.mask_preview_layer_id = None;
+                wgpu.sync_textures(&mut self.project);
+            }
             self.update_uv_texture(ctx);
+            ctx.request_repaint();
         }
     }
 
     /// Update 3D viewport texture in egui
     fn update_viewport_texture(&mut self, ctx: &egui::Context) {
+        let eff_mode = if self.mask_preview_layer_id.is_some() {
+            ViewportChannelMode::BaseColor
+        } else {
+            self.view_mode
+        };
         self.renderer.render(
             &self.camera,
             &self.project.mesh,
             &self.project.composite_textures,
-            self.view_mode,
+            eff_mode,
             self.project.thickness_map.as_ref(),
         );
 
@@ -5923,6 +5946,7 @@ impl PaintcraftApp {
             }
         } else if let Some(wgpu) = &mut self.wgpu_viewport {
             wgpu.resize(render_w, render_h);
+            wgpu.mask_preview_layer_id = self.mask_preview_layer_id;
             
             let view = self.camera.view_matrix();
             let proj = self.camera.projection_matrix(aspect);
@@ -5930,22 +5954,26 @@ impl PaintcraftApp {
             let eye = self.camera.eye_position();
             let eye_vec4 = glam::Vec4::new(eye.x, eye.y, eye.z, 1.0);
             
-            let mode_u32 = match self.view_mode {
-                ViewportChannelMode::Material => 0u32,
-                ViewportChannelMode::BaseColor => 1,
-                ViewportChannelMode::Roughness => 2,
-                ViewportChannelMode::Metallic => 3,
-                ViewportChannelMode::Normal => 4,
-                ViewportChannelMode::AmbientOcclusion => 5,
-                ViewportChannelMode::Curvature => 6,
-                ViewportChannelMode::Position => 7,
-                ViewportChannelMode::WorldNormal => 8,
-                ViewportChannelMode::Thickness => 9,
-                ViewportChannelMode::Height => 10,
-                ViewportChannelMode::Emissive => 11,
-                ViewportChannelMode::Opacity => 12,
-                ViewportChannelMode::Clearcoat => 13,
-                ViewportChannelMode::Anisotropy => 14,
+            let mode_u32 = if self.mask_preview_layer_id.is_some() {
+                1u32 // Unlit BaseColor mode for mask preview
+            } else {
+                match self.view_mode {
+                    ViewportChannelMode::Material => 0u32,
+                    ViewportChannelMode::BaseColor => 1,
+                    ViewportChannelMode::Roughness => 2,
+                    ViewportChannelMode::Metallic => 3,
+                    ViewportChannelMode::Normal => 4,
+                    ViewportChannelMode::AmbientOcclusion => 5,
+                    ViewportChannelMode::Curvature => 6,
+                    ViewportChannelMode::Position => 7,
+                    ViewportChannelMode::WorldNormal => 8,
+                    ViewportChannelMode::Thickness => 9,
+                    ViewportChannelMode::Height => 10,
+                    ViewportChannelMode::Emissive => 11,
+                    ViewportChannelMode::Opacity => 12,
+                    ViewportChannelMode::Clearcoat => 13,
+                    ViewportChannelMode::Anisotropy => 14,
+                }
             };
             let t_rnd = std::time::Instant::now();
             wgpu.render(vp, eye_vec4, self.renderer.hdri.rotation.to_radians(), mode_u32, self.bg_blur, self.bg_opacity, &frame_settings, self.renderer.show_wireframe);
@@ -7155,15 +7183,15 @@ impl PaintcraftApp {
             ui.painter().rect_stroke(
                 banner_rect,
                 egui::Rounding::same(5.0),
-                egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(243, 94, 24)),
+                egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(0, 210, 255)),
             );
-            let banner_text = format!("Mask Preview: {} [Alt+Click mask or M to exit]", layer_name);
+            let banner_text = format!("Mask Preview (Unlit): {} [Alt+Click mask or M/Esc to exit]", layer_name);
             ui.painter().text(
                 banner_rect.center(),
                 egui::Align2::CENTER_CENTER,
                 banner_text,
                 egui::FontId::proportional(11.5),
-                egui::Color32::from_rgb(240, 242, 248),
+                egui::Color32::from_rgb(240, 248, 255),
             );
         }
     }
@@ -10847,6 +10875,69 @@ mod tests {
         let normal_px = layer.normal_buf.get_pixel(0, 0);
         assert!((normal_px.w - 0.85).abs() < 1e-4);
     }
+
+    #[test]
+    fn test_mask_preview_mode_toggle_and_unlit_view_mode() {
+        let mut proj = Project::new_default(32, 32);
+        let layer_id = proj.layers[0].id;
+        proj.layers[0].add_white_mask();
+
+        let mut mask_preview_layer_id = None;
+        let mut uv_view_mask_mode = false;
+        assert!(!uv_view_mask_mode);
+        let mut target = crate::brush::PaintTarget::Material;
+
+        // Simulate Alt+Click on mask swatch
+        if mask_preview_layer_id == Some(layer_id) {
+            mask_preview_layer_id = None;
+            uv_view_mask_mode = false;
+        } else {
+            mask_preview_layer_id = Some(layer_id);
+            uv_view_mask_mode = true;
+            target = crate::brush::PaintTarget::Mask;
+        }
+
+        assert_eq!(mask_preview_layer_id, Some(layer_id));
+        assert!(uv_view_mask_mode);
+        assert_eq!(target, crate::brush::PaintTarget::Mask);
+
+        // Effective view mode during mask preview must be 1u32 (Unlit BaseColor)
+        let mode_u32 = if mask_preview_layer_id.is_some() {
+            1u32
+        } else {
+            0u32
+        };
+        assert_eq!(mode_u32, 1u32, "Mask preview must render via unlit BaseColor channel mode (1u)");
+
+        // Exit preview
+        mask_preview_layer_id = None;
+        uv_view_mask_mode = false;
+        assert_eq!(mask_preview_layer_id, None);
+        assert!(!uv_view_mask_mode);
+    }
+
+    #[test]
+    fn test_delete_layer_resets_single_remaining_layer() {
+        let mut proj = Project::new_default(64, 64);
+        assert_eq!(proj.layers.len(), 1);
+        let orig_name = proj.layers[0].name.clone();
+
+        // Deleting the only remaining layer must succeed and reset document to a clean Paint 1 layer
+        let removed = proj.delete_layer(0);
+        assert!(removed.is_some());
+        assert_eq!(removed.unwrap().name, orig_name);
+        assert_eq!(proj.layers.len(), 1);
+        assert_eq!(proj.layers[0].name, "Paint 1");
+        assert_eq!(proj.active_layer_idx, 0);
+
+        // Adding another layer and deleting one leaves the other
+        proj.add_paint_layer(Some("Paint 2".to_string()));
+        assert_eq!(proj.layers.len(), 2);
+        let removed2 = proj.delete_layer(1);
+        assert!(removed2.is_some());
+        assert_eq!(removed2.unwrap().name, "Paint 2");
+        assert_eq!(proj.layers.len(), 1);
+    }
 }
 
 
@@ -11069,20 +11160,82 @@ impl PaintcraftApp {
                         }
     
                         // Layer Stack Toolbar
-                        let icon_ids = self.icons.as_ref().map(|ic| (
-                            ic.layer_paint.id(),
-                            ic.layer_fill.id(),
-                            ic.layer_folder.id(),
-                            ic.layer_eye.id(),
-                        ));
                         let mut delete_layer_requested = false;
+                        if self.renaming_layer_idx.is_none() && (ui.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace))) {
+                            delete_layer_requested = true;
+                        }
+
+                        #[derive(Clone, Copy)]
+                        enum MaskAddAction {
+                            Black,
+                            White,
+                            Curvature,
+                            Grunge,
+                            Invert,
+                            Remove,
+                        }
+                        let mut mask_add_action = None;
+                        let mut duplicate_layer_requested = false;
+                        let mut save_as_mat_requested = false;
+
+                        // Modern Uniform Icon Toolbar for Layers Stack
                         ui.horizontal(|ui| {
-                            let btn_paint = if let Some((paint_id, _, _, _)) = icon_ids {
-                                egui::Button::image_and_text((paint_id, egui::vec2(13.0, 13.0)), "Paint")
-                            } else {
-                                egui::Button::new("+ Paint")
+                            ui.spacing_mut().item_spacing = egui::vec2(3.0, 0.0);
+
+                            let render_tb_btn = |ui: &mut egui::Ui, tex_id: Option<egui::TextureId>, fallback_glyph: &str, tip: &str| -> egui::Response {
+                                let btn_size = egui::vec2(28.0, 24.0);
+                                let (rect, resp) = ui.allocate_exact_size(btn_size, egui::Sense::click());
+                                let is_down = resp.is_pointer_button_down_on();
+                                let bg = if is_down {
+                                    Color32::from_rgb(52, 56, 66)
+                                } else if resp.hovered() {
+                                    Color32::from_rgb(42, 46, 56)
+                                } else {
+                                    Color32::from_rgb(28, 30, 36)
+                                };
+                                let stroke = if resp.hovered() {
+                                    egui::Stroke::new(1.0_f32, Color32::from_rgb(90, 96, 112))
+                                } else {
+                                    egui::Stroke::new(1.0_f32, Color32::from_rgb(45, 48, 56))
+                                };
+                                ui.painter().rect(rect, 3.0, bg, stroke);
+
+                                if let Some(tex) = tex_id {
+                                    let icon_rect = egui::Rect::from_center_size(rect.center(), egui::vec2(15.0, 15.0));
+                                    let tint = if resp.hovered() {
+                                        Color32::WHITE
+                                    } else {
+                                        Color32::from_rgba_unmultiplied(200, 205, 218, 225)
+                                    };
+                                    ui.painter().image(
+                                        tex,
+                                        icon_rect,
+                                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                                        tint,
+                                    );
+                                } else {
+                                    ui.painter().text(
+                                        rect.center(),
+                                        egui::Align2::CENTER_CENTER,
+                                        fallback_glyph,
+                                        egui::FontId::proportional(11.0),
+                                        Color32::from_rgb(210, 215, 225),
+                                    );
+                                }
+                                resp.on_hover_text(tip)
                             };
-                            if ui.add(btn_paint).on_hover_text("Add Paint Layer").clicked() {
+
+                            let icons = self.icons.as_ref();
+                            let paint_tex = icons.map(|ic| ic.layer_paint.id());
+                            let fill_tex = icons.map(|ic| ic.layer_fill.id());
+                            let folder_tex = icons.map(|ic| ic.layer_folder.id());
+                            let mask_tex = icons.map(|ic| ic.layer_mask.id());
+                            let shaders_tex = icons.map(|ic| ic.shaders.id());
+                            let dup_tex = icons.map(|ic| ic.layer_duplicate.id());
+                            let del_tex = icons.map(|ic| ic.layer_delete.id());
+
+                            // 1. Add Paint Layer
+                            if render_tb_btn(ui, paint_tex, "+P", "Add Paint Layer").clicked() {
                                 let prev_active = self.project.active_layer_idx;
                                 let new_idx = self.project.add_paint_layer(None);
                                 self.brush_engine.settings.target = PaintTarget::Material;
@@ -11095,12 +11248,8 @@ impl PaintcraftApp {
                                 self.status_message = "Added Paint Layer.".to_string();
                             }
 
-                            let btn_fill = if let Some((_, fill_id, _, _)) = icon_ids {
-                                egui::Button::image_and_text((fill_id, egui::vec2(13.0, 13.0)), "Fill")
-                            } else {
-                                egui::Button::new("+ Fill")
-                            };
-                            if ui.add(btn_fill).on_hover_text("Add Fill Layer").clicked() {
+                            // 2. Add Fill Layer
+                            if render_tb_btn(ui, fill_tex, "+F", "Add Fill Layer").clicked() {
                                 let prev_active = self.project.active_layer_idx;
                                 let new_idx = self.project.add_fill_layer(
                                     None,
@@ -11118,12 +11267,8 @@ impl PaintcraftApp {
                                 self.status_message = "Added Fill Layer.".to_string();
                             }
 
-                            let btn_folder = if let Some((_, _, folder_id, _)) = icon_ids {
-                                egui::Button::image_and_text((folder_id, egui::vec2(13.0, 13.0)), "Folder")
-                            } else {
-                                egui::Button::new("+ Folder")
-                            };
-                            if ui.add(btn_folder).on_hover_text("Add Layer Folder / Group").clicked() {
+                            // 3. Add Folder
+                            if render_tb_btn(ui, folder_tex, "+D", "Add Layer Folder / Group").clicked() {
                                 let prev_active = self.project.active_layer_idx;
                                 let new_idx = self.project.add_folder_layer(None);
                                 let layer_clone = self.project.layers[new_idx].clone_stroke_snapshot();
@@ -11135,135 +11280,166 @@ impl PaintcraftApp {
                                 self.status_message = "Added Layer Folder.".to_string();
                             }
 
-                            #[derive(Clone, Copy)]
-                            enum MaskAddAction {
-                                Black,
-                                White,
-                                Curvature,
-                                Grunge,
+                            // 4. Add Mask Menu
+                            let mask_popup_id = ui.make_persistent_id("layers_toolbar_mask_menu_popup");
+                            let mask_btn_resp = render_tb_btn(ui, mask_tex, "+M", "Add Layer Mask / Mask Options");
+                            if mask_btn_resp.clicked() {
+                                ui.memory_mut(|mem| mem.toggle_popup(mask_popup_id));
                             }
-                            let mut mask_add_action = None;
-
-                            ui.menu_button("+ Mask", |ui| {
+                            let has_active_mask = self.project.layers.get(act_idx).map(|l| l.has_mask).unwrap_or(false);
+                            egui::popup_below_widget(ui, mask_popup_id, &mask_btn_resp, egui::PopupCloseBehavior::CloseOnClick, |ui| {
+                                ui.set_min_width(170.0);
                                 if ui.button("Black Mask (Hide All)").clicked() {
                                     mask_add_action = Some(MaskAddAction::Black);
-                                    ui.close_menu();
                                 }
                                 if ui.button("White Mask (Reveal All)").clicked() {
                                     mask_add_action = Some(MaskAddAction::White);
-                                    ui.close_menu();
                                 }
                                 if ui.button("Edge Wear Mask (Curvature)").clicked() {
                                     mask_add_action = Some(MaskAddAction::Curvature);
-                                    ui.close_menu();
                                 }
                                 if ui.button("Grunge Mask").clicked() {
                                     mask_add_action = Some(MaskAddAction::Grunge);
-                                    ui.close_menu();
+                                }
+                                if has_active_mask {
+                                    ui.separator();
+                                    if ui.button("Invert Mask").clicked() {
+                                        mask_add_action = Some(MaskAddAction::Invert);
+                                    }
+                                    if ui.button("Remove Mask").clicked() {
+                                        mask_add_action = Some(MaskAddAction::Remove);
+                                    }
                                 }
                             });
 
-                            if let Some(action) = mask_add_action {
-                                let curv = self.project.curvature_map.clone();
-                                if let Some(layer) = self.project.layers.get_mut(act_idx) {
-                                    match action {
-                                        MaskAddAction::Black => {
-                                            layer.add_black_mask();
-                                            self.brush_engine.settings.target = PaintTarget::Mask;
-                                            self.brush_engine.settings.mask_paint_value = 1.0;
-                                        }
-                                        MaskAddAction::White => {
-                                            layer.add_white_mask();
-                                            self.brush_engine.settings.target = PaintTarget::Mask;
-                                            self.brush_engine.settings.mask_paint_value = 0.0;
-                                        }
-                                        MaskAddAction::Curvature => {
-                                            layer.add_curvature_mask(curv.as_ref());
-                                            self.brush_engine.settings.target = PaintTarget::Mask;
-                                        }
-                                        MaskAddAction::Grunge => {
-                                            layer.add_grunge_mask();
-                                            self.brush_engine.settings.target = PaintTarget::Mask;
-                                        }
-                                    }
+                            // 5. Effects / Filters / Layer Options
+                            let fx_popup_id = ui.make_persistent_id("layers_toolbar_fx_menu_popup");
+                            let fx_btn_resp = render_tb_btn(ui, shaders_tex, "FX", "Layer Effects, Filters & Organization");
+                            if fx_btn_resp.clicked() {
+                                ui.memory_mut(|mem| mem.toggle_popup(fx_popup_id));
+                            }
+                            egui::popup_below_widget(ui, fx_popup_id, &fx_btn_resp, egui::PopupCloseBehavior::CloseOnClick, |ui| {
+                                ui.set_min_width(180.0);
+                                if ui.button("Filters... (Blur, Levels, Sharp)").clicked() {
+                                    self.show_filter_modal = true;
                                 }
-                                self.project.rebuild_composite();
-                            }
-
-                            if ui.button("Dup").on_hover_text("Duplicate selected layer").clicked() {
-                                if let Some(new_idx) = self.project.duplicate_layer(act_idx) {
-                                    let layer_clone = Box::new(self.project.layers[new_idx].clone());
-                                    self.history.push("Duplicate Layer", HistoryAction::AddLayer {
-                                        layer_idx: new_idx,
-                                        layer: layer_clone,
-                                        prev_active: act_idx,
-                                    });
-                                    self.status_message = format!("Duplicated layer #{}", new_idx);
-                                }
-                            }
-
-                            if ui.button("Del").on_hover_text("Delete selected layer (Delete or Backspace)").clicked() {
-                                delete_layer_requested = true;
-                            }
-
-                            let mut save_as_mat_requested = false;
-                            ui.menu_button("...", |ui| {
+                                ui.separator();
                                 if ui.button("Move Layer Up").clicked() {
                                     self.project.move_layer_up(act_idx);
                                     self.project.rebuild_composite();
-                                    ui.close_menu();
                                 }
                                 if ui.button("Move Layer Down").clicked() {
                                     self.project.move_layer_down(act_idx);
                                     self.project.rebuild_composite();
-                                    ui.close_menu();
                                 }
                                 ui.separator();
-                                if ui.button("Filters...").on_hover_text("Apply filter (Blur, Levels, Invert, Sharpen)").clicked() {
-                                    self.show_filter_modal = true;
-                                    ui.close_menu();
-                                }
-                                if ui.button("Save as Shelf Material").on_hover_text("Save selected layer as a reusable PBR material in the Shelf").clicked() {
+                                if ui.button("Save as Shelf Material").clicked() {
                                     save_as_mat_requested = true;
-                                    ui.close_menu();
                                 }
                             });
 
-                            if save_as_mat_requested {
-                                if let Some(layer) = self.project.layers.get(act_idx) {
-                                    let name = layer.name.clone();
-                                    let clean_id = name.trim().replace(' ', "_").to_lowercase();
-                                    let mat = crate::asset_manager::CustomMaterialEntry {
-                                        id: clean_id,
-                                        name: name.clone(),
-                                        description: format!("Custom PBR material created from layer '{}'", name),
-                                        path: std::path::PathBuf::new(),
-                                        file_name: String::new(),
-                                        base_color: [layer.fill_color.x, layer.fill_color.y, layer.fill_color.z, layer.fill_color.w],
-                                        roughness: layer.fill_roughness,
-                                        metallic: layer.fill_metallic,
-                                        height: layer.fill_height,
-                                        normal: [0.5, 0.5, 1.0, 0.5],
-                                        emissive: [layer.fill_emissive.x, layer.fill_emissive.y, layer.fill_emissive.z, layer.fill_emissive.w],
-                                        opacity: layer.fill_opacity,
-                                        clearcoat: layer.fill_clearcoat,
-                                        anisotropy: layer.fill_anisotropy,
-                                    };
-                                    match self.asset_manager.save_material(&mat) {
-                                        Ok(path) => {
-                                            self.status_message = format!("Saved Material '{}' to {:?}", mat.name, path.file_name().unwrap_or_default());
+                            // 6. Duplicate Layer
+                            if render_tb_btn(ui, dup_tex, "Dup", "Duplicate selected layer (Ctrl+D)").clicked() {
+                                duplicate_layer_requested = true;
+                            }
+
+                            // 7. Delete Layer
+                            if render_tb_btn(ui, del_tex, "Del", "Delete selected layer (Delete or Backspace)").clicked() {
+                                delete_layer_requested = true;
+                            }
+                        });
+
+                        if let Some(action) = mask_add_action {
+                            let curv = self.project.curvature_map.clone();
+                            if let Some(layer) = self.project.layers.get_mut(act_idx) {
+                                match action {
+                                    MaskAddAction::Black => {
+                                        layer.add_black_mask();
+                                        self.brush_engine.settings.target = PaintTarget::Mask;
+                                        self.brush_engine.settings.mask_paint_value = 1.0;
+                                    }
+                                    MaskAddAction::White => {
+                                        layer.add_white_mask();
+                                        self.brush_engine.settings.target = PaintTarget::Mask;
+                                        self.brush_engine.settings.mask_paint_value = 0.0;
+                                    }
+                                    MaskAddAction::Curvature => {
+                                        layer.add_curvature_mask(curv.as_ref());
+                                        self.brush_engine.settings.target = PaintTarget::Mask;
+                                    }
+                                    MaskAddAction::Grunge => {
+                                        layer.add_grunge_mask();
+                                        self.brush_engine.settings.target = PaintTarget::Mask;
+                                    }
+                                    MaskAddAction::Invert => {
+                                        layer.invert_mask();
+                                    }
+                                    MaskAddAction::Remove => {
+                                        layer.has_mask = false;
+                                        if self.mask_preview_layer_id == Some(layer.id) {
+                                            self.mask_preview_layer_id = None;
+                                            self.uv_view_mask_mode = false;
+                                            if let Some(wgpu) = &mut self.wgpu_viewport {
+                                                wgpu.mask_preview_layer_id = None;
+                                                wgpu.sync_textures(&mut self.project);
+                                            }
                                         }
-                                        Err(e) => {
-                                            self.status_message = format!("Failed to save material: {}", e);
-                                        }
+                                        self.brush_engine.settings.target = PaintTarget::Material;
                                     }
                                 }
                             }
-                        });
+                            self.project.rebuild_composite();
+                            self.project.gpu_sync_needed = true;
+                            self.need_cpu_composite_sync = true;
+                        }
+
+                        if duplicate_layer_requested {
+                            if let Some(new_idx) = self.project.duplicate_layer(act_idx) {
+                                let layer_clone = Box::new(self.project.layers[new_idx].clone());
+                                self.history.push("Duplicate Layer", HistoryAction::AddLayer {
+                                    layer_idx: new_idx,
+                                    layer: layer_clone,
+                                    prev_active: act_idx,
+                                });
+                                self.status_message = format!("Duplicated layer #{}", new_idx);
+                            }
+                        }
+
+                        if save_as_mat_requested {
+                            if let Some(layer) = self.project.layers.get(act_idx) {
+                                let name = layer.name.clone();
+                                let clean_id = name.trim().replace(' ', "_").to_lowercase();
+                                let mat = crate::asset_manager::CustomMaterialEntry {
+                                    id: clean_id,
+                                    name: name.clone(),
+                                    description: format!("Custom PBR material created from layer '{}'", name),
+                                    path: std::path::PathBuf::new(),
+                                    file_name: String::new(),
+                                    base_color: [layer.fill_color.x, layer.fill_color.y, layer.fill_color.z, layer.fill_color.w],
+                                    roughness: layer.fill_roughness,
+                                    metallic: layer.fill_metallic,
+                                    height: layer.fill_height,
+                                    normal: [0.5, 0.5, 1.0, 0.5],
+                                    emissive: [layer.fill_emissive.x, layer.fill_emissive.y, layer.fill_emissive.z, layer.fill_emissive.w],
+                                    opacity: layer.fill_opacity,
+                                    clearcoat: layer.fill_clearcoat,
+                                    anisotropy: layer.fill_anisotropy,
+                                };
+                                match self.asset_manager.save_material(&mat) {
+                                    Ok(path) => {
+                                        self.status_message = format!("Saved Material '{}' to {:?}", mat.name, path.file_name().unwrap_or_default());
+                                    }
+                                    Err(e) => {
+                                        self.status_message = format!("Failed to save material: {}", e);
+                                    }
+                                }
+                            }
+                        }
 
                         if delete_layer_requested {
                             let ctx = ui.ctx().clone();
                             self.delete_selected_layer(&ctx);
+                            ctx.request_repaint();
                         }
     
                         ui.separator();
@@ -11312,6 +11488,12 @@ impl PaintcraftApp {
                                 let mouse_pos = ui.input(|i| i.pointer.hover_pos());
                                 let mouse_released = ui.input(|i| i.pointer.any_released());
 
+                                let (paint_icon, fill_icon, folder_icon, eye_icon_id) = if let Some(ic) = self.icons.as_ref() {
+                                    (Some(ic.layer_paint.id()), Some(ic.layer_fill.id()), Some(ic.layer_folder.id()), Some(ic.layer_eye.id()))
+                                } else {
+                                    (None, None, None, None)
+                                };
+
                                 for rev_i in 0..layer_count {
                                     let i = layer_count - 1 - rev_i;
                                     let layer = &summaries[i];
@@ -11328,15 +11510,15 @@ impl PaintcraftApp {
                                     let is_target_mask = is_active && self.brush_engine.settings.target == PaintTarget::Mask;
 
                                     let card_bg = if is_active {
-                                        Color32::from_rgb(44, 48, 56)
+                                        Color32::from_rgb(42, 46, 56)
                                     } else {
-                                        Color32::from_rgb(26, 28, 32)
+                                        Color32::from_rgb(26, 28, 34)
                                     };
                                     // Highlight the OUTLINE of the active layer card!
                                     let card_stroke = if is_active {
-                                        egui::Stroke::new(2.0_f32, Color32::from_rgb(243, 94, 24))
+                                        egui::Stroke::new(1.8_f32, Color32::from_rgb(243, 94, 24))
                                     } else {
-                                        egui::Stroke::new(1.0_f32, Color32::from_rgb(45, 48, 55))
+                                        egui::Stroke::new(1.0_f32, Color32::from_rgb(46, 50, 60))
                                     };
 
                                     let card_response = egui::Frame::none()
@@ -11352,9 +11534,9 @@ impl PaintcraftApp {
                                                 }
 
                                                 // 1. Drag & Drop Handle
-                                                let drag_label = egui::RichText::new("::")
-                                                    .color(if is_active { Color32::from_rgb(243, 94, 24) } else { Color32::from_rgb(120, 125, 135) })
-                                                    .strong();
+                                                let drag_label = egui::RichText::new("⠿")
+                                                    .color(if is_active { Color32::from_rgb(243, 94, 24) } else { Color32::from_rgb(110, 115, 125) })
+                                                    .size(12.0);
                                                 let drag_resp = ui.add(egui::Label::new(drag_label).selectable(false).sense(egui::Sense::drag()))
                                                     .on_hover_text("Drag to reorder layer in stack");
                                                 if drag_resp.drag_started() {
@@ -11362,8 +11544,8 @@ impl PaintcraftApp {
                                                 }
 
                                                 // 2. Visibility toggle
-                                                let (eye_rect, eye_resp) = ui.allocate_exact_size(egui::vec2(15.0, 15.0), egui::Sense::click());
-                                                if let Some((_, _, _, eye_id)) = icon_ids {
+                                                let (eye_rect, eye_resp) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::click());
+                                                if let Some(eye_id) = eye_icon_id {
                                                     let tint = if layer.visible {
                                                         Color32::WHITE
                                                     } else {
@@ -11376,7 +11558,7 @@ impl PaintcraftApp {
                                                         tint,
                                                     );
                                                 } else {
-                                                    let eye_icon = if layer.visible { "[o]" } else { "[-]" };
+                                                    let eye_icon = if layer.visible { "👁" } else { "⊘" };
                                                     let eye_color = if layer.visible { Color32::from_rgb(220, 225, 235) } else { Color32::from_rgb(110, 115, 125) };
                                                     ui.painter().text(eye_rect.center(), egui::Align2::CENTER_CENTER, eye_icon, egui::FontId::proportional(11.0), eye_color);
                                                 }
@@ -11384,16 +11566,17 @@ impl PaintcraftApp {
                                                     toggle_visible_idx = Some(i);
                                                 }
 
-                                                // 3. Type badge & Folder Chevron
+                                                // 3. Folder Chevron
                                                 if layer.layer_type == LayerType::Folder {
-                                                    let chev = if layer.folder_collapsed { "[+]" } else { "[-]" };
-                                                    if ui.add(egui::Label::new(egui::RichText::new(chev).color(Color32::from_rgb(243, 156, 18))).selectable(false).sense(egui::Sense::click())).on_hover_text("Expand/collapse folder").clicked() {
+                                                    let chev = if layer.folder_collapsed { "▶" } else { "▼" };
+                                                    if ui.add(egui::Label::new(egui::RichText::new(chev).color(Color32::from_rgb(245, 166, 35)).size(10.0)).selectable(false).sense(egui::Sense::click())).on_hover_text("Expand/collapse folder").clicked() {
                                                         toggle_collapse_idx = Some(i);
                                                     }
                                                 }
+
                                                 // 3. Dual Swatch Thumbnails: Material Swatch & Mask Swatch (Substance Painter 1:1)
                                                 // 3a. Material Swatch Thumbnail
-                                                let (mat_rect, mat_resp) = ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::click());
+                                                let (mat_rect, mat_resp) = ui.allocate_exact_size(egui::vec2(22.0, 22.0), egui::Sense::click());
                                                 let mat_bg = match layer.layer_type {
                                                     LayerType::Fill => Color32::from_rgb(
                                                         (layer.fill_color.x * 255.0) as u8,
@@ -11408,22 +11591,20 @@ impl PaintcraftApp {
                                                 } else {
                                                     egui::Stroke::new(1.0_f32, Color32::from_rgb(58, 62, 72))
                                                 };
-                                                ui.painter().rect(mat_rect, 2.0, mat_bg, mat_stroke);
-                                                if let Some((paint_id, fill_id, folder_id, _)) = icon_ids {
-                                                    let icon_tex = match layer.layer_type {
-                                                        LayerType::Paint => Some(paint_id),
-                                                        LayerType::Folder => Some(folder_id),
-                                                        LayerType::Fill => Some(fill_id),
-                                                    };
-                                                    if let Some(tex) = icon_tex {
-                                                        let icon_inset = egui::Rect::from_center_size(mat_rect.center(), egui::vec2(12.0, 12.0));
-                                                        ui.painter().image(
-                                                            tex,
-                                                            icon_inset,
-                                                            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                                                            Color32::WHITE,
-                                                        );
-                                                    }
+                                                ui.painter().rect(mat_rect, 3.0, mat_bg, mat_stroke);
+                                                let icon_tex = match layer.layer_type {
+                                                    LayerType::Paint => paint_icon,
+                                                    LayerType::Folder => folder_icon,
+                                                    LayerType::Fill => fill_icon,
+                                                };
+                                                if let Some(tex) = icon_tex {
+                                                    let icon_inset = egui::Rect::from_center_size(mat_rect.center(), egui::vec2(14.0, 14.0));
+                                                    ui.painter().image(
+                                                        tex,
+                                                        icon_inset,
+                                                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                                                        Color32::WHITE,
+                                                    );
                                                 } else {
                                                     if layer.layer_type == LayerType::Paint {
                                                         ui.painter().text(mat_rect.center(), egui::Align2::CENTER_CENTER, "P", egui::FontId::proportional(10.0), Color32::WHITE);
@@ -11438,37 +11619,30 @@ impl PaintcraftApp {
 
                                                 // 3b. Mask Swatch Thumbnail (if layer has mask)
                                                 if layer.has_mask {
-                                                    ui.painter().text(
-                                                        ui.cursor().min + egui::vec2(2.0, 9.0),
-                                                        egui::Align2::CENTER_CENTER,
-                                                        "-",
-                                                        egui::FontId::proportional(10.0),
-                                                        Color32::from_rgb(110, 115, 125),
-                                                    );
-                                                    let (mask_rect, mask_resp) = ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::click());
+                                                    let (mask_rect, mask_resp) = ui.allocate_exact_size(egui::vec2(22.0, 22.0), egui::Sense::click());
                                                     let is_mask_previewing = self.mask_preview_layer_id == Some(layer.id);
                                                     let mask_stroke = if is_mask_previewing {
-                                                        egui::Stroke::new(2.0_f32, Color32::from_rgb(0, 210, 255))
+                                                        egui::Stroke::new(2.0_f32, Color32::from_rgb(0, 215, 255))
                                                     } else if is_active && is_target_mask {
                                                         egui::Stroke::new(1.8_f32, Color32::from_rgb(243, 94, 24))
                                                     } else {
-                                                        egui::Stroke::new(1.0_f32, Color32::from_rgb(65, 70, 80))
+                                                        egui::Stroke::new(1.0_f32, Color32::from_rgb(60, 65, 75))
                                                     };
-                                                    ui.painter().rect(mask_rect, 2.0, Color32::from_rgb(20, 22, 26), mask_stroke);
+                                                    ui.painter().rect(mask_rect, 3.0, Color32::from_rgb(18, 20, 24), mask_stroke);
                                                     let circle_color = if is_mask_previewing {
-                                                        Color32::from_rgb(0, 210, 255)
+                                                        Color32::from_rgb(0, 215, 255)
                                                     } else {
                                                         Color32::from_rgb(235, 235, 240)
                                                     };
-                                                    ui.painter().circle_filled(mask_rect.center(), 5.0, circle_color);
+                                                    ui.painter().circle_filled(mask_rect.center(), 5.5, circle_color);
 
                                                     let hover_text = if is_mask_previewing {
-                                                        "Mask Preview Active • Alt+Click to exit preview"
+                                                        "Mask Preview (Unlit) Active • Alt+Click to exit preview"
                                                     } else {
-                                                        "Target Mask (Click to edit • Alt+Click to isolate preview on 3D mesh)"
+                                                        "Target Mask (Click to edit • Alt+Click to isolate preview unlit on 3D mesh)"
                                                     };
                                                     if mask_resp.on_hover_text(hover_text).clicked() {
-                                                        if ui.input(|i| i.modifiers.alt) {
+                                                        if ui.input(|inp| inp.modifiers.alt) {
                                                             toggle_mask_preview_id = Some(layer.id);
                                                         } else {
                                                             self.project.active_layer_idx = i;
@@ -11476,7 +11650,23 @@ impl PaintcraftApp {
                                                         }
                                                     }
                                                 } else {
-                                                    if ui.small_button("+M").on_hover_text("Add layer mask").clicked() {
+                                                    // Elegant add-mask placeholder slot
+                                                    let (slot_rect, slot_resp) = ui.allocate_exact_size(egui::vec2(22.0, 22.0), egui::Sense::click());
+                                                    let slot_bg = if slot_resp.hovered() { Color32::from_rgb(38, 42, 50) } else { Color32::from_rgba_unmultiplied(24, 26, 32, 140) };
+                                                    let slot_stroke = if slot_resp.hovered() {
+                                                        egui::Stroke::new(1.0_f32, Color32::from_rgb(100, 108, 125))
+                                                    } else {
+                                                        egui::Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(50, 54, 65, 140))
+                                                    };
+                                                    ui.painter().rect(slot_rect, 3.0, slot_bg, slot_stroke);
+                                                    ui.painter().text(
+                                                        slot_rect.center(),
+                                                        egui::Align2::CENTER_CENTER,
+                                                        "+",
+                                                        egui::FontId::proportional(11.0),
+                                                        if slot_resp.hovered() { Color32::WHITE } else { Color32::from_rgb(110, 115, 128) },
+                                                    );
+                                                    if slot_resp.on_hover_text("Add Mask to Layer").clicked() {
                                                         add_mask_idx = Some(i);
                                                         self.project.active_layer_idx = i;
                                                         self.brush_engine.settings.target = PaintTarget::Mask;
@@ -11521,15 +11711,15 @@ impl PaintcraftApp {
                                                     }
                                                 }
 
-                                                // 6. Folder membership (Move in/out)
+                                                // 5. Folder membership (Move in/out)
                                                 if layer.layer_type != LayerType::Folder && !folders.is_empty() {
                                                     let cur_layer_id = layer.id;
                                                     if layer.parent_folder_id.is_some() {
-                                                        if ui.small_button("^").on_hover_text("Remove from folder").clicked() {
+                                                        if ui.add(egui::Button::new(egui::RichText::new("▲").size(10.0)).fill(Color32::TRANSPARENT)).on_hover_text("Remove from folder").clicked() {
                                                             folder_change = Some((i, None));
                                                         }
                                                     } else {
-                                                        ui.menu_button(">", |ui| {
+                                                        ui.menu_button("📁", |ui| {
                                                             for (fid, fname) in &folders {
                                                                 if *fid != cur_layer_id && ui.button(fname).clicked() {
                                                                     folder_change = Some((i, Some(*fid)));
@@ -11541,6 +11731,105 @@ impl PaintcraftApp {
                                                 }
                                             });
                                         });
+
+                                    // Clicking anywhere on card selects active layer, dragging starts reorder
+                                    let card_resp = card_response.response.interact(egui::Sense::click_and_drag());
+                                    if card_resp.clicked() {
+                                        self.project.active_layer_idx = i;
+                                    }
+                                    if card_resp.drag_started() {
+                                        self.dragged_layer_idx = Some(i);
+                                    }
+
+                                    // Full Right-Click Layer Context Menu
+                                    card_response.response.context_menu(|ui| {
+                                        ui.set_min_width(170.0);
+                                        if ui.button("Duplicate Layer").clicked() {
+                                            if let Some(new_idx) = self.project.duplicate_layer(i) {
+                                                let layer_clone = Box::new(self.project.layers[new_idx].clone());
+                                                self.history.push("Duplicate Layer", HistoryAction::AddLayer {
+                                                    layer_idx: new_idx,
+                                                    layer: layer_clone,
+                                                    prev_active: i,
+                                                });
+                                                self.status_message = format!("Duplicated layer #{}", new_idx);
+                                            }
+                                            ui.close_menu();
+                                        }
+                                        if ui.button("Delete Layer (Del)").clicked() {
+                                            self.project.active_layer_idx = i;
+                                            delete_layer_requested = true;
+                                            ui.close_menu();
+                                        }
+                                        ui.separator();
+                                        if layer.has_mask {
+                                            let is_prev = self.mask_preview_layer_id == Some(layer.id);
+                                            let preview_label = if is_prev { "Exit Mask Preview" } else { "Preview Mask (Unlit)" };
+                                            if ui.button(preview_label).clicked() {
+                                                toggle_mask_preview_id = Some(layer.id);
+                                                ui.close_menu();
+                                            }
+                                            if ui.button("Invert Mask").clicked() {
+                                                if let Some(l) = self.project.layers.get_mut(i) {
+                                                    l.invert_mask();
+                                                }
+                                                self.project.rebuild_composite();
+                                                self.project.gpu_sync_needed = true;
+                                                ui.close_menu();
+                                            }
+                                            if ui.button("Remove Mask").clicked() {
+                                                if let Some(l) = self.project.layers.get_mut(i) {
+                                                    l.has_mask = false;
+                                                }
+                                                if self.mask_preview_layer_id == Some(layer.id) {
+                                                    self.mask_preview_layer_id = None;
+                                                    self.uv_view_mask_mode = false;
+                                                    if let Some(wgpu) = &mut self.wgpu_viewport {
+                                                        wgpu.mask_preview_layer_id = None;
+                                                        wgpu.sync_textures(&mut self.project);
+                                                    }
+                                                }
+                                                self.brush_engine.settings.target = PaintTarget::Material;
+                                                self.project.rebuild_composite();
+                                                self.project.gpu_sync_needed = true;
+                                                ui.close_menu();
+                                            }
+                                        } else {
+                                            if ui.button("Add White Mask").clicked() {
+                                                add_mask_idx = Some(i);
+                                                self.project.active_layer_idx = i;
+                                                self.brush_engine.settings.target = PaintTarget::Mask;
+                                                ui.close_menu();
+                                            }
+                                            if ui.button("Add Black Mask").clicked() {
+                                                if let Some(l) = self.project.layers.get_mut(i) {
+                                                    l.add_black_mask();
+                                                }
+                                                self.project.active_layer_idx = i;
+                                                self.brush_engine.settings.target = PaintTarget::Mask;
+                                                self.brush_engine.settings.mask_paint_value = 1.0;
+                                                self.project.rebuild_composite();
+                                                self.project.gpu_sync_needed = true;
+                                                ui.close_menu();
+                                            }
+                                        }
+                                        ui.separator();
+                                        if ui.button("Filters...").clicked() {
+                                            self.project.active_layer_idx = i;
+                                            self.show_filter_modal = true;
+                                            ui.close_menu();
+                                        }
+                                        if ui.button("Rename Layer").clicked() {
+                                            self.renaming_layer_idx = Some(i);
+                                            self.rename_buffer = layer.name.clone();
+                                            ui.close_menu();
+                                        }
+                                        if ui.button("Save as Shelf Material").clicked() {
+                                            self.project.active_layer_idx = i;
+                                            save_as_mat_requested = true;
+                                            ui.close_menu();
+                                        }
+                                    });
 
                                     let card_rect = card_response.response.rect;
 

@@ -287,6 +287,8 @@ pub struct AppIcons {
     pub layer_folder: TextureHandle,
     pub layer_mask: TextureHandle,
     pub layer_eye: TextureHandle,
+    pub layer_duplicate: TextureHandle,
+    pub layer_delete: TextureHandle,
     pub shaders: TextureHandle,
     pub viewport_settings: TextureHandle,
     pub bake: TextureHandle,
@@ -312,6 +314,8 @@ impl AppIcons {
         let layer_folder = Self::load_or_generate(ctx, &assets_dir, "layer_folder.png", generate_layer_folder_icon);
         let layer_mask = Self::load_or_generate(ctx, &assets_dir, "layer_mask.png", generate_layer_mask_icon);
         let layer_eye = Self::load_or_generate(ctx, &assets_dir, "layer_eye.png", generate_layer_eye_icon);
+        let layer_duplicate = Self::load_or_generate(ctx, &assets_dir, "layer_duplicate.png", generate_layer_duplicate_icon);
+        let layer_delete = Self::load_or_generate(ctx, &assets_dir, "layer_delete.png", generate_layer_delete_icon);
 
         let shaders = Self::load_or_generate(ctx, &assets_dir, "icon_shaders.png", generate_shaders_icon);
         let viewport_settings = Self::load_or_generate(ctx, &assets_dir, "icon_viewport_settings.png", generate_viewport_settings_icon);
@@ -331,6 +335,8 @@ impl AppIcons {
             layer_folder,
             layer_mask,
             layer_eye,
+            layer_duplicate,
+            layer_delete,
             shaders,
             viewport_settings,
             bake,
@@ -557,6 +563,35 @@ pub fn generate_bake_icon() -> IconCanvas {
     c
 }
 
+pub fn generate_layer_delete_icon() -> IconCanvas {
+    let mut c = IconCanvas::new(64, 64);
+    // Trash bin lid
+    c.draw_line(16.0, 20.0, 48.0, 20.0, 3.5, 255, 255, 255, 255);
+    // Lid handle
+    c.draw_line(26.0, 15.0, 38.0, 15.0, 3.0, 255, 255, 255, 255);
+    c.draw_line(26.0, 15.0, 26.0, 20.0, 2.5, 255, 255, 255, 255);
+    c.draw_line(38.0, 15.0, 38.0, 20.0, 2.5, 255, 255, 255, 255);
+    // Can body outline (tapered)
+    c.draw_line(20.0, 22.0, 24.0, 52.0, 3.0, 255, 255, 255, 255);
+    c.draw_line(44.0, 22.0, 40.0, 52.0, 3.0, 255, 255, 255, 255);
+    c.draw_line(23.0, 52.0, 41.0, 52.0, 3.0, 255, 255, 255, 255);
+    // Vertical ribs
+    c.draw_line(28.0, 27.0, 29.0, 47.0, 2.0, 255, 255, 255, 255);
+    c.draw_line(32.0, 27.0, 32.0, 47.0, 2.0, 255, 255, 255, 255);
+    c.draw_line(36.0, 27.0, 35.0, 47.0, 2.0, 255, 255, 255, 255);
+    c
+}
+
+pub fn generate_layer_duplicate_icon() -> IconCanvas {
+    let mut c = IconCanvas::new(64, 64);
+    // Back card
+    c.draw_rect_stroke(14.0, 12.0, 44.0, 42.0, 3.0, 255, 255, 255, 255);
+    // Front card with clean clear underlay
+    c.clear_rect(20.0, 20.0, 54.0, 54.0);
+    c.draw_rect_stroke(22.0, 20.0, 52.0, 50.0, 3.0, 255, 255, 255, 255);
+    c
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -600,6 +635,8 @@ mod tests {
             ("layer_folder.png", generate_layer_folder_icon()),
             ("layer_mask.png", generate_layer_mask_icon()),
             ("layer_eye.png", generate_layer_eye_icon()),
+            ("layer_duplicate.png", generate_layer_duplicate_icon()),
+            ("layer_delete.png", generate_layer_delete_icon()),
             ("icon_shaders.png", generate_shaders_icon()),
             ("icon_viewport_settings.png", generate_viewport_settings_icon()),
             ("icon_bake.png", generate_bake_icon()),

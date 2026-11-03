@@ -354,6 +354,7 @@ pub struct WgpuViewport {
     pub queue_submit_ms: f32,
     pub profiler: crate::gpu_profiler::GpuProfiler,
     aniso_staging: Vec<f32>,
+    pub mask_preview_layer_id: Option<u64>,
 }
 
 impl WgpuViewport {
@@ -1163,6 +1164,7 @@ impl WgpuViewport {
             queue_submit_ms: 0.0,
             profiler,
             aniso_staging: Vec::new(),
+            mask_preview_layer_id: None,
         }
     }
 
@@ -1314,11 +1316,13 @@ impl WgpuViewport {
         let final_target = self.gpu_compositor.composite_all(&project.layers, &self.gpu_layers);
         let size = wgpu::Extent3d { width: self.pbr_tex_width, height: self.pbr_tex_height, depth_or_array_layers: 1 };
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-        encoder.copy_texture_to_texture(
-            wgpu::ImageCopyTexture { texture: &final_target.base_color, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-            wgpu::ImageCopyTexture { texture: &self.tex_base_color, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-            size
-        );
+        if self.mask_preview_layer_id.is_none() {
+            encoder.copy_texture_to_texture(
+                wgpu::ImageCopyTexture { texture: &final_target.base_color, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                wgpu::ImageCopyTexture { texture: &self.tex_base_color, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                size
+            );
+        }
         encoder.copy_texture_to_texture(
             wgpu::ImageCopyTexture { texture: &final_target.normal, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
             wgpu::ImageCopyTexture { texture: &self.tex_normal, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
@@ -1345,11 +1349,13 @@ impl WgpuViewport {
         let final_target = self.gpu_compositor.composite_incremental(&project.layers, &self.gpu_layers, active_idx);
         let size = wgpu::Extent3d { width: self.pbr_tex_width, height: self.pbr_tex_height, depth_or_array_layers: 1 };
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-        encoder.copy_texture_to_texture(
-            wgpu::ImageCopyTexture { texture: &final_target.base_color, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-            wgpu::ImageCopyTexture { texture: &self.tex_base_color, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-            size
-        );
+        if self.mask_preview_layer_id.is_none() {
+            encoder.copy_texture_to_texture(
+                wgpu::ImageCopyTexture { texture: &final_target.base_color, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                wgpu::ImageCopyTexture { texture: &self.tex_base_color, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                size
+            );
+        }
         encoder.copy_texture_to_texture(
             wgpu::ImageCopyTexture { texture: &final_target.normal, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
             wgpu::ImageCopyTexture { texture: &self.tex_normal, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
@@ -1406,11 +1412,13 @@ impl WgpuViewport {
 
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
         
-        encoder.copy_texture_to_texture(
-            wgpu::ImageCopyTexture { texture: &final_target.base_color, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-            wgpu::ImageCopyTexture { texture: &self.tex_base_color, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-            size
-        );
+        if self.mask_preview_layer_id.is_none() {
+            encoder.copy_texture_to_texture(
+                wgpu::ImageCopyTexture { texture: &final_target.base_color, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                wgpu::ImageCopyTexture { texture: &self.tex_base_color, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                size
+            );
+        }
         encoder.copy_texture_to_texture(
             wgpu::ImageCopyTexture { texture: &final_target.normal, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
             wgpu::ImageCopyTexture { texture: &self.tex_normal, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
@@ -2118,12 +2126,18 @@ fn blur_equirectangular(
         );
         let light_view_proj = light_proj * light_view;
 
+        let effective_view_mode = if self.mask_preview_layer_id.is_some() {
+            1u32 // Unlit BaseColor mode for mask preview
+        } else {
+            view_mode
+        };
+
         let t_enc = std::time::Instant::now();
         let mut data = [0u8; 352];
         data[0..64].copy_from_slice(bytemuck::cast_slice(&[view_proj_jittered]));
         data[64..80].copy_from_slice(bytemuck::cast_slice(&[eye_pos]));
         data[80..84].copy_from_slice(bytemuck::cast_slice(&[env_rot]));
-        data[84..88].copy_from_slice(bytemuck::cast_slice(&[view_mode]));
+        data[84..88].copy_from_slice(bytemuck::cast_slice(&[effective_view_mode]));
         data[88..92].copy_from_slice(bytemuck::cast_slice(&[bg_blur]));
         data[92..96].copy_from_slice(bytemuck::cast_slice(&[bg_opacity]));
         let inv_view_proj = view_proj_jittered.inverse();
@@ -2336,7 +2350,7 @@ fn blur_equirectangular(
         pp_data[212..216].copy_from_slice(bytemuck::cast_slice(&[shader.ssr_max_roughness]));
         pp_data[216..220].copy_from_slice(bytemuck::cast_slice(&[shader.ssr_step_size]));
         pp_data[220..224].copy_from_slice(bytemuck::cast_slice(&[shader.ssr_max_steps]));
-        pp_data[224..228].copy_from_slice(bytemuck::cast_slice(&[view_mode]));
+        pp_data[224..228].copy_from_slice(bytemuck::cast_slice(&[effective_view_mode]));
         let ssao_u32 = if shader.ssao_enabled { 1u32 } else { 0u32 };
         pp_data[228..232].copy_from_slice(bytemuck::cast_slice(&[ssao_u32]));
         pp_data[232..236].copy_from_slice(bytemuck::cast_slice(&[shader.ssao_radius]));
