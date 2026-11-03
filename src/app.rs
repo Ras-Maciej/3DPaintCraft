@@ -386,6 +386,7 @@ pub struct PaintcraftApp {
     pub last_hovered_uv_2d: Option<glam::Vec2>,
     pub last_hovered_tri: Option<usize>,
     pub polygon_fill_drag_tris: std::collections::HashSet<usize>,
+    pub poly_fill_hover_cache: Option<(usize, crate::brush::PolygonFillMode, Vec<usize>)>,
 
     // Dedicated Baking Screen & Background Worker State
     pub bake_worker_state: Option<Arc<Mutex<BakeProgressState>>>,
@@ -736,6 +737,7 @@ impl PaintcraftApp {
             last_hovered_uv_2d: None,
             last_hovered_tri: None,
             polygon_fill_drag_tris: std::collections::HashSet::new(),
+            poly_fill_hover_cache: None,
             bake_worker_state: None,
             bake_receiver: None,
             bake_selected_texture_sets: Vec::new(),
@@ -3397,13 +3399,41 @@ impl eframe::App for PaintcraftApp {
                 }
             }
 
-            // Delete selected layer: Delete or Backspace key (edge-triggered debounce, single layer delete)
+            // Delete selected layer or mask effect: Delete or Backspace key (edge-triggered debounce)
             if self.renaming_layer_idx.is_none() && delete_pressed {
                 ctx.input_mut(|i| {
                     i.consume_key(egui::Modifiers::NONE, egui::Key::Delete);
                     i.consume_key(egui::Modifiers::NONE, egui::Key::Backspace);
                 });
-                self.delete_selected_layer(ctx);
+                let act_idx = self.project.active_layer_idx;
+                let mut eff_removed = false;
+                if self.brush_engine.settings.target == PaintTarget::Mask && act_idx < self.project.layers.len() {
+                    let layer = &mut self.project.layers[act_idx];
+                    if let Some(eff_id) = layer.active_mask_effect_id {
+                        layer.remove_mask_effect(eff_id, self.project.curvature_map.as_ref());
+                        let curv = self.project.curvature_map.as_ref();
+                        let pos = self.project.position_map.as_ref();
+                        let wn = self.project.world_space_normal_map.as_ref();
+                        let ao = self.project.ao_map.as_ref();
+                        let id_ref = self.project.id_map.as_ref();
+                        layer.evaluate_mask_full_with_mesh(curv, ao, pos, wn, id_ref, &[], Some(&self.project.mesh));
+                        self.status_message = "Removed selected mask effect".to_string();
+                        eff_removed = true;
+                    }
+                }
+                if eff_removed {
+                    self.project.rebuild_composite();
+                    self.project.gpu_sync_needed = true;
+                    if let Some(preview_id) = self.mask_preview_layer_id {
+                        if let Some(wgpu) = &mut self.wgpu_viewport {
+                            wgpu.sync_mask_preview_full(&self.project, preview_id);
+                        }
+                    }
+                    self.update_uv_texture(ctx);
+                    ctx.request_repaint();
+                } else {
+                    self.delete_selected_layer(ctx);
+                }
             }
 
             // Undo: Ctrl+Z
@@ -5790,6 +5820,10 @@ impl eframe::App for PaintcraftApp {
         // --- DEFERRED CPU COMPOSITING SYNC ON POINTER RELEASE ---
         if self.need_cpu_composite_sync && !ctx.input(|i| i.pointer.any_down()) {
             self.project.rebuild_composite();
+            self.update_uv_texture(ctx);
+            if let Some(wgpu) = &mut self.wgpu_viewport {
+                wgpu.sync_textures(&mut self.project);
+            }
             self.need_cpu_composite_sync = false;
             ctx.request_repaint();
         }
@@ -5924,6 +5958,8 @@ impl PaintcraftApp {
             frame_settings.shadow_softness = 0.0; // Fast single-tap shadow lookup during camera motion
         }
 
+        let effective_wireframe = self.renderer.show_wireframe || self.brush_engine.settings.mode == ToolMode::FillBucket;
+
         let texture_id = if self.iray_mode {
             let t_rnd = std::time::Instant::now();
             let scale = if is_interacting && self.shader_settings.adaptive_resolution { 0.5 } else { 1.0 };
@@ -6011,7 +6047,7 @@ impl PaintcraftApp {
                 }
             };
             let t_rnd = std::time::Instant::now();
-            wgpu.render(vp, eye_vec4, self.renderer.hdri.rotation.to_radians(), mode_u32, self.bg_blur, self.bg_opacity, &frame_settings, self.renderer.show_wireframe);
+            wgpu.render(vp, eye_vec4, self.renderer.hdri.rotation.to_radians(), mode_u32, self.bg_blur, self.bg_opacity, &frame_settings, effective_wireframe);
             self.perf_metrics.gpu_render_ms = t_rnd.elapsed().as_secs_f32() * 1000.0;
             self.perf_metrics.cmd_encoding_ms = wgpu.cmd_encoding_ms;
             self.perf_metrics.queue_submit_ms = wgpu.queue_submit_ms;
@@ -6081,7 +6117,7 @@ impl PaintcraftApp {
             if self.shader_settings.denoiser_enabled { pp_badges.push("Denoiser"); }
             if self.shader_settings.ssao_enabled { pp_badges.push("SSAO"); }
             if self.shader_settings.shadows_enabled { pp_badges.push("Shadows"); }
-            if self.renderer.show_wireframe { pp_badges.push("Wireframe"); }
+            if effective_wireframe { pp_badges.push("Wireframe"); }
             if self.shader_settings.bloom_enabled { pp_badges.push("Bloom"); }
             if self.shader_settings.dof_enabled { pp_badges.push("DoF"); }
             let pp_str = if pp_badges.is_empty() { String::new() } else { format!(" | PP: [{}]", pp_badges.join(", ")) };
@@ -6531,21 +6567,39 @@ impl PaintcraftApp {
                                             let val = self.brush_engine.settings.polygon_fill_value;
                                             let w = layer.mask_buf.width;
                                             let h = layer.mask_buf.height;
+                                            let mut b_min_x = u32::MAX;
+                                            let mut b_min_y = u32::MAX;
+                                            let mut b_max_x = 0;
+                                            let mut b_max_y = 0;
                                             for &(uv0, uv1, uv2) in &tri_uvs {
                                                 let min_x = ((uv0.x.min(uv1.x).min(uv2.x) * w as f32).floor() as i32).clamp(0, w as i32 - 1) as u32;
                                                 let max_x = ((uv0.x.max(uv1.x).max(uv2.x) * w as f32).ceil() as i32).clamp(0, w as i32 - 1) as u32;
                                                 let min_y = ((uv0.y.min(uv1.y).min(uv2.y) * h as f32).floor() as i32).clamp(0, h as i32 - 1) as u32;
                                                 let max_y = ((uv0.y.max(uv1.y).max(uv2.y) * h as f32).ceil() as i32).clamp(0, h as i32 - 1) as u32;
+                                                b_min_x = b_min_x.min(min_x);
+                                                b_min_y = b_min_y.min(min_y);
+                                                b_max_x = b_max_x.max(max_x);
+                                                b_max_y = b_max_y.max(max_y);
                                                 layer.record_tiles_for_rect(min_x, min_y, max_x, max_y);
                                                 crate::mesh::Mesh::rasterize_triangle_uv(w, h, uv0, uv1, uv2, |px, py| {
                                                     layer.mask_buf.set_pixel(px, py, val);
                                                 });
                                             }
-                                            layer.mark_dirty_full();
-                                            self.project.rebuild_composite();
-                                            self.update_uv_texture(ctx);
-                                            if let Some(wgpu) = &mut self.wgpu_viewport {
-                                                wgpu.sync_textures(&mut self.project);
+                                            if b_min_x <= b_max_x && b_min_y <= b_max_y {
+                                                layer.mark_dirty_mask_rect(b_min_x, b_min_y, b_max_x, b_max_y);
+                                                if let Some(wgpu) = &mut self.wgpu_viewport {
+                                                    if let Some(gpu_layer) = wgpu.gpu_layers.get(act_idx) {
+                                                        let pw = self.project.texture_width;
+                                                        let ph = self.project.texture_height;
+                                                        wgpu.gpu_compositor.update_layer(layer, gpu_layer, pw, ph);
+                                                        wgpu.composite_and_update_active(&self.project, act_idx);
+                                                        if let Some(preview_id) = self.mask_preview_layer_id {
+                                                            wgpu.sync_mask_preview_full(&self.project, preview_id);
+                                                        }
+                                                    }
+                                                }
+                                                self.need_cpu_composite_sync = true;
+                                                self.update_uv_texture_rect(ctx, b_min_x, b_min_y, b_max_x, b_max_y);
                                             }
                                             ctx.request_repaint();
                                             self.status_message = format!("Polygon Fill ({}) filled {} triangles on mask", mode.name(), new_tris.len());
@@ -6569,11 +6623,19 @@ impl PaintcraftApp {
                                             let do_opac = layer.channel_flags.opacity;
                                             let w = layer.base_color_buf.width;
                                             let h = layer.base_color_buf.height;
+                                            let mut b_min_x = u32::MAX;
+                                            let mut b_min_y = u32::MAX;
+                                            let mut b_max_x = 0;
+                                            let mut b_max_y = 0;
                                             for &(uv0, uv1, uv2) in &tri_uvs {
                                                 let min_x = ((uv0.x.min(uv1.x).min(uv2.x) * w as f32).floor() as i32).clamp(0, w as i32 - 1) as u32;
                                                 let max_x = ((uv0.x.max(uv1.x).max(uv2.x) * w as f32).ceil() as i32).clamp(0, w as i32 - 1) as u32;
                                                 let min_y = ((uv0.y.min(uv1.y).min(uv2.y) * h as f32).floor() as i32).clamp(0, h as i32 - 1) as u32;
                                                 let max_y = ((uv0.y.max(uv1.y).max(uv2.y) * h as f32).ceil() as i32).clamp(0, h as i32 - 1) as u32;
+                                                b_min_x = b_min_x.min(min_x);
+                                                b_min_y = b_min_y.min(min_y);
+                                                b_max_x = b_max_x.max(max_x);
+                                                b_max_y = b_max_y.max(max_y);
                                                 layer.record_tiles_for_rect(min_x, min_y, max_x, max_y);
                                                 crate::mesh::Mesh::rasterize_triangle_uv(w, h, uv0, uv1, uv2, |px, py| {
                                                     if do_col {
@@ -6590,12 +6652,21 @@ impl PaintcraftApp {
                                                     if do_opac { layer.opacity_buf.set_pixel(px, py, opac); }
                                                 });
                                             }
-                                            layer.update_normal_from_height(1.0);
-                                            layer.mark_dirty_full();
-                                            self.project.rebuild_composite();
-                                            self.update_uv_texture(ctx);
-                                            if let Some(wgpu) = &mut self.wgpu_viewport {
-                                                wgpu.sync_textures(&mut self.project);
+                                            if b_min_x <= b_max_x && b_min_y <= b_max_y {
+                                                if do_h {
+                                                    layer.update_normal_from_height(1.0);
+                                                }
+                                                layer.mark_dirty_rect(b_min_x, b_min_y, b_max_x, b_max_y);
+                                                if let Some(wgpu) = &mut self.wgpu_viewport {
+                                                    if let Some(gpu_layer) = wgpu.gpu_layers.get(act_idx) {
+                                                        let pw = self.project.texture_width;
+                                                        let ph = self.project.texture_height;
+                                                        wgpu.gpu_compositor.update_layer(layer, gpu_layer, pw, ph);
+                                                        wgpu.composite_and_update_active(&self.project, act_idx);
+                                                    }
+                                                }
+                                                self.need_cpu_composite_sync = true;
+                                                self.update_uv_texture_rect(ctx, b_min_x, b_min_y, b_max_x, b_max_y);
                                             }
                                             ctx.request_repaint();
                                             self.status_message = format!("Polygon Fill ({}) filled {} triangles with material", mode.name(), new_tris.len());
@@ -6984,11 +7055,18 @@ impl PaintcraftApp {
         if self.brush_engine.settings.mode == ToolMode::FillBucket {
             if let Some(tri_idx) = self.last_hovered_tri {
                 let mode = self.brush_engine.settings.polygon_fill_mode;
-                let preview_tris = match mode {
-                    crate::brush::PolygonFillMode::Triangle => vec![tri_idx],
-                    crate::brush::PolygonFillMode::Polygon => self.project.mesh.get_polygon_quad(tri_idx),
-                    crate::brush::PolygonFillMode::UvIsland => self.project.mesh.get_connected_uv_island(tri_idx),
-                    crate::brush::PolygonFillMode::MeshElement => self.project.mesh.get_connected_mesh_element(tri_idx),
+                let preview_tris = match &self.poly_fill_hover_cache {
+                    Some((c_tri, c_mode, c_tris)) if *c_tri == tri_idx && *c_mode == mode => c_tris.clone(),
+                    _ => {
+                        let tris = match mode {
+                            crate::brush::PolygonFillMode::Triangle => vec![tri_idx],
+                            crate::brush::PolygonFillMode::Polygon => self.project.mesh.get_polygon_quad(tri_idx),
+                            crate::brush::PolygonFillMode::UvIsland => self.project.mesh.get_connected_uv_island(tri_idx),
+                            crate::brush::PolygonFillMode::MeshElement => self.project.mesh.get_connected_mesh_element(tri_idx),
+                        };
+                        self.poly_fill_hover_cache = Some((tri_idx, mode, tris.clone()));
+                        tris
+                    }
                 };
 
                 let fill_col = egui::Color32::from_rgba_unmultiplied(243, 94, 24, 75);
@@ -7340,8 +7418,8 @@ impl PaintcraftApp {
                 );
             }
 
-            // UV Wireframe Overlay
-            if self.show_uv_wireframe {
+            // UV Wireframe Overlay (Auto-enabled when in Polygon Fill mode)
+            if self.show_uv_wireframe || self.brush_engine.settings.mode == ToolMode::FillBucket {
                 let wire_stroke = egui::Stroke::new(0.8_f32, egui::Color32::from_rgba_unmultiplied(220, 225, 235, 75));
                 let clip = rect;
                 let painter = ui.painter().with_clip_rect(clip);
@@ -7463,21 +7541,39 @@ impl PaintcraftApp {
                                                 let val = self.brush_engine.settings.polygon_fill_value;
                                                 let w = layer.mask_buf.width;
                                                 let h = layer.mask_buf.height;
-                                                 for &(uv0, uv1, uv2) in &tri_uvs {
+                                                let mut b_min_x = u32::MAX;
+                                                let mut b_min_y = u32::MAX;
+                                                let mut b_max_x = 0;
+                                                let mut b_max_y = 0;
+                                                for &(uv0, uv1, uv2) in &tri_uvs {
                                                     let min_x = ((uv0.x.min(uv1.x).min(uv2.x) * w as f32).floor() as i32).clamp(0, w as i32 - 1) as u32;
                                                     let max_x = ((uv0.x.max(uv1.x).max(uv2.x) * w as f32).ceil() as i32).clamp(0, w as i32 - 1) as u32;
                                                     let min_y = ((uv0.y.min(uv1.y).min(uv2.y) * h as f32).floor() as i32).clamp(0, h as i32 - 1) as u32;
                                                     let max_y = ((uv0.y.max(uv1.y).max(uv2.y) * h as f32).ceil() as i32).clamp(0, h as i32 - 1) as u32;
+                                                    b_min_x = b_min_x.min(min_x);
+                                                    b_min_y = b_min_y.min(min_y);
+                                                    b_max_x = b_max_x.max(max_x);
+                                                    b_max_y = b_max_y.max(max_y);
                                                     layer.record_tiles_for_rect(min_x, min_y, max_x, max_y);
                                                     crate::mesh::Mesh::rasterize_triangle_uv(w, h, uv0, uv1, uv2, |px, py| {
                                                         layer.mask_buf.set_pixel(px, py, val);
                                                     });
                                                 }
-                                                layer.mark_dirty_full();
-                                                self.project.rebuild_composite();
-                                                self.update_uv_texture(ctx);
-                                                if let Some(wgpu) = &mut self.wgpu_viewport {
-                                                    wgpu.sync_textures(&mut self.project);
+                                                if b_min_x <= b_max_x && b_min_y <= b_max_y {
+                                                    layer.mark_dirty_mask_rect(b_min_x, b_min_y, b_max_x, b_max_y);
+                                                    if let Some(wgpu) = &mut self.wgpu_viewport {
+                                                        if let Some(gpu_layer) = wgpu.gpu_layers.get(act_idx) {
+                                                            let pw = self.project.texture_width;
+                                                            let ph = self.project.texture_height;
+                                                            wgpu.gpu_compositor.update_layer(layer, gpu_layer, pw, ph);
+                                                            wgpu.composite_and_update_active(&self.project, act_idx);
+                                                            if let Some(preview_id) = self.mask_preview_layer_id {
+                                                                wgpu.sync_mask_preview_full(&self.project, preview_id);
+                                                            }
+                                                        }
+                                                    }
+                                                    self.need_cpu_composite_sync = true;
+                                                    self.update_uv_texture_rect(ctx, b_min_x, b_min_y, b_max_x, b_max_y);
                                                 }
                                                 ctx.request_repaint();
                                                 self.status_message = format!("2D Polygon Fill ({}) filled {} triangles on mask", mode.name(), new_tris.len());
@@ -7501,11 +7597,19 @@ impl PaintcraftApp {
                                                 let do_opac = layer.channel_flags.opacity;
                                                 let w = layer.base_color_buf.width;
                                                 let h = layer.base_color_buf.height;
+                                                let mut b_min_x = u32::MAX;
+                                                let mut b_min_y = u32::MAX;
+                                                let mut b_max_x = 0;
+                                                let mut b_max_y = 0;
                                                 for &(uv0, uv1, uv2) in &tri_uvs {
                                                     let min_x = ((uv0.x.min(uv1.x).min(uv2.x) * w as f32).floor() as i32).clamp(0, w as i32 - 1) as u32;
                                                     let max_x = ((uv0.x.max(uv1.x).max(uv2.x) * w as f32).ceil() as i32).clamp(0, w as i32 - 1) as u32;
                                                     let min_y = ((uv0.y.min(uv1.y).min(uv2.y) * h as f32).floor() as i32).clamp(0, h as i32 - 1) as u32;
                                                     let max_y = ((uv0.y.max(uv1.y).max(uv2.y) * h as f32).ceil() as i32).clamp(0, h as i32 - 1) as u32;
+                                                    b_min_x = b_min_x.min(min_x);
+                                                    b_min_y = b_min_y.min(min_y);
+                                                    b_max_x = b_max_x.max(max_x);
+                                                    b_max_y = b_max_y.max(max_y);
                                                     layer.record_tiles_for_rect(min_x, min_y, max_x, max_y);
                                                     crate::mesh::Mesh::rasterize_triangle_uv(w, h, uv0, uv1, uv2, |px, py| {
                                                         if do_col {
@@ -7522,12 +7626,21 @@ impl PaintcraftApp {
                                                         if do_opac { layer.opacity_buf.set_pixel(px, py, opac); }
                                                     });
                                                 }
-                                                layer.update_normal_from_height(1.0);
-                                                layer.mark_dirty_full();
-                                                self.project.rebuild_composite();
-                                                self.update_uv_texture(ctx);
-                                                if let Some(wgpu) = &mut self.wgpu_viewport {
-                                                    wgpu.sync_textures(&mut self.project);
+                                                if b_min_x <= b_max_x && b_min_y <= b_max_y {
+                                                    if do_h {
+                                                        layer.update_normal_from_height(1.0);
+                                                    }
+                                                    layer.mark_dirty_rect(b_min_x, b_min_y, b_max_x, b_max_y);
+                                                    if let Some(wgpu) = &mut self.wgpu_viewport {
+                                                        if let Some(gpu_layer) = wgpu.gpu_layers.get(act_idx) {
+                                                            let pw = self.project.texture_width;
+                                                            let ph = self.project.texture_height;
+                                                            wgpu.gpu_compositor.update_layer(layer, gpu_layer, pw, ph);
+                                                            wgpu.composite_and_update_active(&self.project, act_idx);
+                                                        }
+                                                    }
+                                                    self.need_cpu_composite_sync = true;
+                                                    self.update_uv_texture_rect(ctx, b_min_x, b_min_y, b_max_x, b_max_y);
                                                 }
                                                 ctx.request_repaint();
                                                 self.status_message = format!("2D Polygon Fill ({}) filled {} triangles with material", mode.name(), new_tris.len());
@@ -7658,11 +7771,18 @@ impl PaintcraftApp {
             if self.brush_engine.settings.mode == ToolMode::FillBucket {
                 if let Some(tri_idx) = self.last_hovered_tri {
                     let mode = self.brush_engine.settings.polygon_fill_mode;
-                    let preview_tris = match mode {
-                        crate::brush::PolygonFillMode::Triangle => vec![tri_idx],
-                        crate::brush::PolygonFillMode::Polygon => self.project.mesh.get_polygon_quad(tri_idx),
-                        crate::brush::PolygonFillMode::UvIsland => self.project.mesh.get_connected_uv_island(tri_idx),
-                        crate::brush::PolygonFillMode::MeshElement => self.project.mesh.get_connected_mesh_element(tri_idx),
+                    let preview_tris = match &self.poly_fill_hover_cache {
+                        Some((c_tri, c_mode, c_tris)) if *c_tri == tri_idx && *c_mode == mode => c_tris.clone(),
+                        _ => {
+                            let tris = match mode {
+                                crate::brush::PolygonFillMode::Triangle => vec![tri_idx],
+                                crate::brush::PolygonFillMode::Polygon => self.project.mesh.get_polygon_quad(tri_idx),
+                                crate::brush::PolygonFillMode::UvIsland => self.project.mesh.get_connected_uv_island(tri_idx),
+                                crate::brush::PolygonFillMode::MeshElement => self.project.mesh.get_connected_mesh_element(tri_idx),
+                            };
+                            self.poly_fill_hover_cache = Some((tri_idx, mode, tris.clone()));
+                            tris
+                        }
                     };
 
                     let fill_col = egui::Color32::from_rgba_unmultiplied(243, 94, 24, 75);
@@ -11557,10 +11677,10 @@ impl PaintcraftApp {
                                 let mouse_pos = ui.input(|i| i.pointer.hover_pos());
                                 let mouse_released = ui.input(|i| i.pointer.any_released());
 
-                                let (paint_icon, fill_icon, folder_icon, eye_icon_id) = if let Some(ic) = self.icons.as_ref() {
-                                    (Some(ic.layer_paint.id()), Some(ic.layer_fill.id()), Some(ic.layer_folder.id()), Some(ic.layer_eye.id()))
+                                let (paint_icon, fill_icon, folder_icon, mask_icon_id, eye_icon_id) = if let Some(ic) = self.icons.as_ref() {
+                                    (Some(ic.layer_paint.id()), Some(ic.layer_fill.id()), Some(ic.layer_folder.id()), Some(ic.layer_mask.id()), Some(ic.layer_eye.id()))
                                 } else {
-                                    (None, None, None, None)
+                                    (None, None, None, None, None)
                                 };
 
                                 for rev_i in 0..layer_count {
@@ -11575,7 +11695,7 @@ impl PaintcraftApp {
                                     }
 
                                     let is_active = self.project.active_layer_idx == i;
-                                    let _is_target_mat = is_active && self.brush_engine.settings.target == PaintTarget::Material;
+                                    let is_target_mat = is_active && self.brush_engine.settings.target == PaintTarget::Material;
                                     let is_target_mask = is_active && self.brush_engine.settings.target == PaintTarget::Mask;
 
                                     let card_bg = if is_active {
@@ -11643,20 +11763,25 @@ impl PaintcraftApp {
                                                     }
                                                 }
 
-                                                // 3. Dual Swatch Thumbnails: Material Swatch & Mask Swatch (Substance Painter 1:1)
-                                                // 3a. Material Swatch Thumbnail
+                                                // 3. Dual Swatch Buttons: Material Swatch & Mask Swatch (Directly swap between Mask & Layer)
+                                                // 3a. Material Swatch Button
                                                 let (mat_rect, mat_resp) = ui.allocate_exact_size(egui::vec2(22.0, 22.0), egui::Sense::click());
+                                                if mat_resp.hovered() {
+                                                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                                                }
                                                 let mat_bg = match layer.layer_type {
                                                     LayerType::Fill => Color32::from_rgb(
                                                         (layer.fill_color.x * 255.0) as u8,
                                                         (layer.fill_color.y * 255.0) as u8,
                                                         (layer.fill_color.z * 255.0) as u8,
                                                     ),
-                                                    LayerType::Paint => Color32::from_rgb(46, 52, 64),
+                                                    LayerType::Paint => if mat_resp.hovered() { Color32::from_rgb(58, 64, 78) } else { Color32::from_rgb(46, 52, 64) },
                                                     LayerType::Folder => Color32::from_rgb(160, 115, 35),
                                                 };
-                                                let mat_stroke = if is_active && !is_target_mask {
-                                                    egui::Stroke::new(1.8_f32, Color32::from_rgb(243, 94, 24))
+                                                let mat_stroke = if is_target_mat {
+                                                    egui::Stroke::new(2.0_f32, Color32::from_rgb(243, 94, 24))
+                                                } else if mat_resp.hovered() {
+                                                    egui::Stroke::new(1.5_f32, Color32::from_rgb(140, 145, 160))
                                                 } else {
                                                     egui::Stroke::new(1.0_f32, Color32::from_rgb(58, 62, 72))
                                                 };
@@ -11681,7 +11806,7 @@ impl PaintcraftApp {
                                                         ui.painter().text(mat_rect.center(), egui::Align2::CENTER_CENTER, "D", egui::FontId::proportional(10.0), Color32::WHITE);
                                                     }
                                                 }
-                                                if mat_resp.on_hover_text("Target Material (Click to activate material editing)").clicked() {
+                                                if mat_resp.on_hover_text("Layer / Material (Click to switch to Layer painting)").clicked() {
                                                     self.project.active_layer_idx = i;
                                                     self.brush_engine.settings.target = PaintTarget::Material;
                                                     if self.mask_preview_layer_id.is_some() {
@@ -11692,29 +11817,55 @@ impl PaintcraftApp {
                                                     ui.ctx().request_repaint();
                                                 }
 
-                                                // 3b. Mask Swatch Thumbnail (if layer has mask)
+                                                // 3b. Mask Swatch Button (if layer has mask)
                                                 if layer.has_mask {
                                                     let (mask_rect, mask_resp) = ui.allocate_exact_size(egui::vec2(22.0, 22.0), egui::Sense::click());
+                                                    if mask_resp.hovered() {
+                                                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                                                    }
                                                     let is_mask_previewing = self.mask_preview_layer_id == Some(layer.id);
                                                     let mask_stroke = if is_mask_previewing {
                                                         egui::Stroke::new(2.0_f32, Color32::from_rgb(0, 215, 255))
                                                     } else if is_active && is_target_mask {
-                                                        egui::Stroke::new(1.8_f32, Color32::from_rgb(243, 94, 24))
+                                                        egui::Stroke::new(2.0_f32, Color32::from_rgb(243, 94, 24))
+                                                    } else if mask_resp.hovered() {
+                                                        egui::Stroke::new(1.5_f32, Color32::from_rgb(140, 145, 160))
                                                     } else {
                                                         egui::Stroke::new(1.0_f32, Color32::from_rgb(60, 65, 75))
                                                     };
-                                                    ui.painter().rect(mask_rect, 3.0, Color32::from_rgb(18, 20, 24), mask_stroke);
-                                                    let circle_color = if is_mask_previewing {
-                                                        Color32::from_rgb(0, 215, 255)
+                                                    let mask_bg = if mask_resp.hovered() { Color32::from_rgb(32, 36, 44) } else { Color32::from_rgb(18, 20, 24) };
+                                                    ui.painter().rect(mask_rect, 3.0, mask_bg, mask_stroke);
+
+                                                    if let Some(tex) = mask_icon_id {
+                                                        let icon_inset = egui::Rect::from_center_size(mask_rect.center(), egui::vec2(15.0, 15.0));
+                                                        let tint = if is_mask_previewing {
+                                                            Color32::from_rgb(0, 215, 255)
+                                                        } else if is_active && is_target_mask {
+                                                            Color32::WHITE
+                                                        } else if mask_resp.hovered() {
+                                                            Color32::from_rgb(230, 235, 245)
+                                                        } else {
+                                                            Color32::from_rgb(175, 180, 192)
+                                                        };
+                                                        ui.painter().image(
+                                                            tex,
+                                                            icon_inset,
+                                                            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                                                            tint,
+                                                        );
                                                     } else {
-                                                        Color32::from_rgb(235, 235, 240)
-                                                    };
-                                                    ui.painter().circle_filled(mask_rect.center(), 5.5, circle_color);
+                                                        let circle_color = if is_mask_previewing {
+                                                            Color32::from_rgb(0, 215, 255)
+                                                        } else {
+                                                            Color32::from_rgb(235, 235, 240)
+                                                        };
+                                                        ui.painter().circle_filled(mask_rect.center(), 5.5, circle_color);
+                                                    }
 
                                                     let hover_text = if is_mask_previewing {
-                                                        "Mask Preview (Unlit) Active • Alt+Click to exit preview"
+                                                        "Mask Preview Active • Click to switch to Mask painting • Alt+Click to exit preview"
                                                     } else {
-                                                        "Target Mask (Click to edit • Alt+Click to isolate preview unlit on 3D mesh)"
+                                                        "Mask (Click to switch to Mask painting • Alt+Click to isolate preview unlit)"
                                                     };
                                                     if mask_resp.on_hover_text(hover_text).clicked() {
                                                         if ui.input(|inp| inp.modifiers.alt) {
@@ -13673,7 +13824,15 @@ impl PaintcraftApp {
                             } else {
                                 self.project.rebuild_composite();
                                 self.project.gpu_sync_needed = true;
+                                self.update_uv_texture(ui.ctx());
+                                if let Some(wgpu) = &mut self.wgpu_viewport {
+                                    wgpu.sync_textures(&mut self.project);
+                                    if let Some(preview_id) = self.mask_preview_layer_id {
+                                        wgpu.sync_mask_preview_full(&self.project, preview_id);
+                                    }
+                                }
                             }
+                            ui.ctx().request_repaint();
                         }
 
                         if let Some(target) = open_shelf_picker {

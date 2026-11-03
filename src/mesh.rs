@@ -399,6 +399,222 @@ fn default_submesh_visible() -> bool {
     true
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct MeshTopologyCache {
+    /// 32x32 spatial grid of triangle indices for fast UV coordinate to triangle lookup
+    pub uv_grid: Vec<Vec<usize>>,
+    pub uv_aabbs: Vec<[f32; 4]>,
+    /// Precomputed connected UV islands: island_index -> Vec<triangle_index>
+    pub uv_islands: Vec<Vec<usize>>,
+    /// triangle_index -> island_index
+    pub tri_to_uv_island: Vec<usize>,
+    /// Precomputed 3D connected mesh elements: element_index -> Vec<triangle_index>
+    pub mesh_elements: Vec<Vec<usize>>,
+    /// triangle_index -> element_index
+    pub tri_to_mesh_element: Vec<usize>,
+    /// Coplanar quad for each triangle
+    pub tri_to_quad: Vec<Vec<usize>>,
+}
+
+impl MeshTopologyCache {
+    pub fn build(vertices: &[Vertex], indices: &[u32]) -> Self {
+        let tri_count = indices.len() / 3;
+        if tri_count == 0 {
+            return Self {
+                uv_grid: vec![Vec::new(); 32 * 32],
+                uv_aabbs: Vec::new(),
+                uv_islands: Vec::new(),
+                tri_to_uv_island: Vec::new(),
+                mesh_elements: Vec::new(),
+                tri_to_mesh_element: Vec::new(),
+                tri_to_quad: Vec::new(),
+            };
+        }
+
+        let quant_v = |v: &Vertex| -> ([i32; 3], [i32; 2]) {
+            (
+                [(v.position.x * 1000.0).round() as i32, (v.position.y * 1000.0).round() as i32, (v.position.z * 1000.0).round() as i32],
+                [(v.uv.x * 10000.0).round() as i32, (v.uv.y * 10000.0).round() as i32],
+            )
+        };
+        type UvEdgeKey = ([i32; 3], [i32; 2], [i32; 3], [i32; 2]);
+        let make_uv_edge = |k0: ([i32; 3], [i32; 2]), k1: ([i32; 3], [i32; 2])| -> UvEdgeKey {
+            if k0 < k1 { (k0.0, k0.1, k1.0, k1.1) } else { (k1.0, k1.1, k0.0, k0.1) }
+        };
+
+        let quant_p = |v: &Vertex| -> [i32; 3] {
+            [(v.position.x * 1000.0).round() as i32, (v.position.y * 1000.0).round() as i32, (v.position.z * 1000.0).round() as i32]
+        };
+        type PosEdgeKey = ([i32; 3], [i32; 3]);
+        let make_pos_edge = |p0: [i32; 3], p1: [i32; 3]| -> PosEdgeKey {
+            if p0 < p1 { (p0, p1) } else { (p1, p0) }
+        };
+
+        let mut uv_edge_map: std::collections::HashMap<UvEdgeKey, Vec<usize>> = std::collections::HashMap::with_capacity(tri_count * 3);
+        let mut pos_edge_map: std::collections::HashMap<PosEdgeKey, Vec<usize>> = std::collections::HashMap::with_capacity(tri_count * 3);
+        let mut uv_aabbs = Vec::with_capacity(tri_count);
+        let mut face_normals = Vec::with_capacity(tri_count);
+        let mut tri_pos_edges = Vec::with_capacity(tri_count);
+        let mut tri_uv_edges = Vec::with_capacity(tri_count);
+
+        for t in 0..tri_count {
+            let i0 = indices[t * 3] as usize;
+            let i1 = indices[t * 3 + 1] as usize;
+            let i2 = indices[t * 3 + 2] as usize;
+            let v0 = &vertices[i0];
+            let v1 = &vertices[i1];
+            let v2 = &vertices[i2];
+
+            let min_u = v0.uv.x.min(v1.uv.x).min(v2.uv.x);
+            let max_u = v0.uv.x.max(v1.uv.x).max(v2.uv.x);
+            let min_v = v0.uv.y.min(v1.uv.y).min(v2.uv.y);
+            let max_v = v0.uv.y.max(v1.uv.y).max(v2.uv.y);
+            uv_aabbs.push([min_u, min_v, max_u, max_v]);
+
+            let fnorm = (v1.position - v0.position).cross(v2.position - v0.position).normalize_or_zero();
+            face_normals.push(fnorm);
+
+            let k0 = quant_v(v0);
+            let k1 = quant_v(v1);
+            let k2 = quant_v(v2);
+            let e0 = make_uv_edge(k0, k1);
+            let e1 = make_uv_edge(k1, k2);
+            let e2 = make_uv_edge(k2, k0);
+            uv_edge_map.entry(e0).or_default().push(t);
+            uv_edge_map.entry(e1).or_default().push(t);
+            uv_edge_map.entry(e2).or_default().push(t);
+            tri_uv_edges.push([e0, e1, e2]);
+
+            let p0 = quant_p(v0);
+            let p1 = quant_p(v1);
+            let p2 = quant_p(v2);
+            let pe0 = make_pos_edge(p0, p1);
+            let pe1 = make_pos_edge(p1, p2);
+            let pe2 = make_pos_edge(p2, p0);
+            pos_edge_map.entry(pe0).or_default().push(t);
+            pos_edge_map.entry(pe1).or_default().push(t);
+            pos_edge_map.entry(pe2).or_default().push(t);
+            tri_pos_edges.push([pe0, pe1, pe2]);
+        }
+
+        // Build 32x32 UV spatial grid
+        let mut uv_grid = vec![Vec::new(); 32 * 32];
+        for (t, aabb) in uv_aabbs.iter().enumerate() {
+            let min_gx = ((aabb[0].clamp(0.0, 0.999999) * 32.0).floor() as usize).min(31);
+            let max_gx = ((aabb[2].clamp(0.0, 0.999999) * 32.0).floor() as usize).min(31);
+            let min_gy = ((aabb[1].clamp(0.0, 0.999999) * 32.0).floor() as usize).min(31);
+            let max_gy = ((aabb[3].clamp(0.0, 0.999999) * 32.0).floor() as usize).min(31);
+            for gy in min_gy..=max_gy {
+                for gx in min_gx..=max_gx {
+                    uv_grid[gy * 32 + gx].push(t);
+                }
+            }
+        }
+
+        // Compute UV islands
+        let mut uv_visited = vec![false; tri_count];
+        let mut uv_islands = Vec::new();
+        let mut tri_to_uv_island = vec![0; tri_count];
+        let mut queue = std::collections::VecDeque::new();
+
+        for t in 0..tri_count {
+            if uv_visited[t] { continue; }
+            let island_id = uv_islands.len();
+            let mut island = Vec::new();
+            uv_visited[t] = true;
+            queue.push_back(t);
+
+            while let Some(curr) = queue.pop_front() {
+                island.push(curr);
+                tri_to_uv_island[curr] = island_id;
+                for edge in &tri_uv_edges[curr] {
+                    if let Some(neighbors) = uv_edge_map.get(edge) {
+                        for &nbr in neighbors {
+                            if !uv_visited[nbr] {
+                                uv_visited[nbr] = true;
+                                queue.push_back(nbr);
+                            }
+                        }
+                    }
+                }
+            }
+            uv_islands.push(island);
+        }
+
+        // Compute 3D mesh elements
+        let mut pos_visited = vec![false; tri_count];
+        let mut mesh_elements = Vec::new();
+        let mut tri_to_mesh_element = vec![0; tri_count];
+
+        for t in 0..tri_count {
+            if pos_visited[t] { continue; }
+            let elem_id = mesh_elements.len();
+            let mut elem = Vec::new();
+            pos_visited[t] = true;
+            queue.push_back(t);
+
+            while let Some(curr) = queue.pop_front() {
+                elem.push(curr);
+                tri_to_mesh_element[curr] = elem_id;
+                for edge in &tri_pos_edges[curr] {
+                    if let Some(neighbors) = pos_edge_map.get(edge) {
+                        for &nbr in neighbors {
+                            if !pos_visited[nbr] {
+                                pos_visited[nbr] = true;
+                                queue.push_back(nbr);
+                            }
+                        }
+                    }
+                }
+            }
+            mesh_elements.push(elem);
+        }
+
+        // Compute Coplanar Quads: O(1) edge lookup per triangle
+        let mut tri_to_quad = Vec::with_capacity(tri_count);
+        for t in 0..tri_count {
+            let fnorm = face_normals[t];
+            let mut best_nbr = None;
+            for edge in &tri_pos_edges[t] {
+                if let Some(neighbors) = pos_edge_map.get(edge) {
+                    for &nbr in neighbors {
+                        if nbr != t && face_normals[nbr].dot(fnorm) > 0.95 {
+                            best_nbr = Some(nbr);
+                            break;
+                        }
+                    }
+                }
+                if best_nbr.is_some() { break; }
+            }
+            if let Some(nbr) = best_nbr {
+                tri_to_quad.push(vec![t, nbr]);
+            } else {
+                tri_to_quad.push(vec![t]);
+            }
+        }
+
+        Self {
+            uv_grid,
+            uv_aabbs,
+            uv_islands,
+            tri_to_uv_island,
+            mesh_elements,
+            tri_to_mesh_element,
+            tri_to_quad,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct TopologyCacheCell(pub std::sync::RwLock<Option<std::sync::Arc<MeshTopologyCache>>>);
+
+impl Clone for TopologyCacheCell {
+    fn clone(&self) -> Self {
+        let cache = self.0.read().ok().and_then(|r| r.as_ref().cloned());
+        Self(std::sync::RwLock::new(cache))
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Mesh {
     pub name: String,
@@ -413,6 +629,8 @@ pub struct Mesh {
     pub original_scale: f32,
     #[serde(default)]
     pub submeshes: Vec<SubMeshRange>,
+    #[serde(skip)]
+    pub topology_cache: TopologyCacheCell,
 }
 
 impl Mesh {
@@ -434,6 +652,7 @@ impl Mesh {
             original_center: Vec3::ZERO,
             original_scale: 1.0,
             submeshes,
+            topology_cache: TopologyCacheCell::default(),
         };
         mesh.recompute_bounds();
         mesh.ensure_tangents();
@@ -455,8 +674,25 @@ impl Mesh {
             .unwrap_or(true)
     }
 
+    pub fn ensure_topology_cache(&self) -> std::sync::Arc<MeshTopologyCache> {
+        if let Ok(guard) = self.topology_cache.0.read() {
+            if let Some(cache) = guard.as_ref() {
+                return std::sync::Arc::clone(cache);
+            }
+        }
+        let built = std::sync::Arc::new(MeshTopologyCache::build(&self.vertices, &self.indices));
+        if let Ok(mut guard) = self.topology_cache.0.write() {
+            *guard = Some(std::sync::Arc::clone(&built));
+        }
+        built
+    }
+
     pub fn rebuild_bvh(&mut self) {
         self.bvh = Bvh::build(&self.vertices, &self.indices);
+        let built = std::sync::Arc::new(MeshTopologyCache::build(&self.vertices, &self.indices));
+        if let Ok(mut guard) = self.topology_cache.0.write() {
+            *guard = Some(built);
+        }
     }
 
     /// Generate LineList index buffer for clean wireframe rendering
@@ -611,7 +847,46 @@ impl Mesh {
     /// Find which triangle in UV space contains the given (u, v) coordinates
     pub fn find_triangle_at_uv(&self, uv: Vec2) -> Option<usize> {
         let tri_count = self.indices.len() / 3;
-        for t in 0..tri_count {
+        if tri_count == 0 {
+            return None;
+        }
+        let cache = self.ensure_topology_cache();
+        let gx = ((uv.x.clamp(0.0, 0.999999) * 32.0).floor() as usize).min(31);
+        let gy = ((uv.y.clamp(0.0, 0.999999) * 32.0).floor() as usize).min(31);
+        let cell_idx = gy * 32 + gx;
+        if cell_idx < cache.uv_grid.len() {
+            for &t in &cache.uv_grid[cell_idx] {
+                if t >= tri_count {
+                    continue;
+                }
+                let [min_u, min_v, max_u, max_v] = cache.uv_aabbs[t];
+                if uv.x < min_u - 1e-4 || uv.x > max_u + 1e-4 || uv.y < min_v - 1e-4 || uv.y > max_v + 1e-4 {
+                    continue;
+                }
+                let i0 = self.indices[t * 3] as usize;
+                let i1 = self.indices[t * 3 + 1] as usize;
+                let i2 = self.indices[t * 3 + 2] as usize;
+                let uv0 = self.vertices[i0].uv;
+                let uv1 = self.vertices[i1].uv;
+                let uv2 = self.vertices[i2].uv;
+                let denom = (uv1.y - uv2.y) * (uv0.x - uv2.x) + (uv2.x - uv1.x) * (uv0.y - uv2.y);
+                if denom.abs() < 1e-7 {
+                    continue;
+                }
+                let inv = 1.0 / denom;
+                let w0 = ((uv1.y - uv2.y) * (uv.x - uv2.x) + (uv2.x - uv1.x) * (uv.y - uv2.y)) * inv;
+                let w1 = ((uv2.y - uv0.y) * (uv.x - uv2.x) + (uv0.x - uv2.x) * (uv.y - uv2.y)) * inv;
+                let w2 = 1.0 - w0 - w1;
+                if w0 >= -1e-4 && w1 >= -1e-4 && w2 >= -1e-4 {
+                    return Some(t);
+                }
+            }
+        }
+        // Fallback for UV seam borders or coordinates outside [0, 1]
+        for (t, &[min_u, min_v, max_u, max_v]) in cache.uv_aabbs.iter().enumerate() {
+            if uv.x < min_u - 1e-4 || uv.x > max_u + 1e-4 || uv.y < min_v - 1e-4 || uv.y > max_v + 1e-4 {
+                continue;
+            }
             let i0 = self.indices[t * 3] as usize;
             let i1 = self.indices[t * 3 + 1] as usize;
             let i2 = self.indices[t * 3 + 2] as usize;
@@ -635,8 +910,7 @@ impl Mesh {
 
     /// Convert a 2D UV coordinate to a 3D position and surface normal on the mesh
     pub fn uv_to_3d_point(&self, uv: Vec2) -> Option<(Vec3, Vec3)> {
-        let tri_count = self.indices.len() / 3;
-        for t in 0..tri_count {
+        if let Some(t) = self.find_triangle_at_uv(uv) {
             let i0 = self.indices[t * 3] as usize;
             let i1 = self.indices[t * 3 + 1] as usize;
             let i2 = self.indices[t * 3 + 2] as usize;
@@ -647,14 +921,11 @@ impl Mesh {
             let uv1 = v1.uv;
             let uv2 = v2.uv;
             let denom = (uv1.y - uv2.y) * (uv0.x - uv2.x) + (uv2.x - uv1.x) * (uv0.y - uv2.y);
-            if denom.abs() < 1e-7 {
-                continue;
-            }
-            let inv = 1.0 / denom;
-            let w0 = ((uv1.y - uv2.y) * (uv.x - uv2.x) + (uv2.x - uv1.x) * (uv.y - uv2.y)) * inv;
-            let w1 = ((uv2.y - uv0.y) * (uv.x - uv2.x) + (uv0.x - uv2.x) * (uv.y - uv2.y)) * inv;
-            let w2 = 1.0 - w0 - w1;
-            if w0 >= -1e-4 && w1 >= -1e-4 && w2 >= -1e-4 {
+            if denom.abs() >= 1e-7 {
+                let inv = 1.0 / denom;
+                let w0 = ((uv1.y - uv2.y) * (uv.x - uv2.x) + (uv2.x - uv1.x) * (uv.y - uv2.y)) * inv;
+                let w1 = ((uv2.y - uv0.y) * (uv.x - uv2.x) + (uv0.x - uv2.x) * (uv.y - uv2.y)) * inv;
+                let w2 = 1.0 - w0 - w1;
                 let p = v0.position * w0 + v1.position * w1 + v2.position * w2;
                 let n = (v0.normal * w0 + v1.normal * w1 + v2.normal * w2).normalize_or_zero();
                 return Some((p, n));
@@ -669,64 +940,13 @@ impl Mesh {
         if start_tri >= tri_count {
             return Vec::new();
         }
-
-        type EdgeKey = ([i32; 3], [i32; 2], [i32; 3], [i32; 2]);
-        let quant_v = |v: &Vertex| -> ([i32; 3], [i32; 2]) {
-            (
-                [(v.position.x * 1000.0).round() as i32, (v.position.y * 1000.0).round() as i32, (v.position.z * 1000.0).round() as i32],
-                [(v.uv.x * 10000.0).round() as i32, (v.uv.y * 10000.0).round() as i32],
-            )
-        };
-        let make_edge = |k0: ([i32; 3], [i32; 2]), k1: ([i32; 3], [i32; 2])| -> EdgeKey {
-            if k0 < k1 {
-                (k0.0, k0.1, k1.0, k1.1)
-            } else {
-                (k1.0, k1.1, k0.0, k0.1)
-            }
-        };
-
-        let mut edge_map: std::collections::HashMap<EdgeKey, Vec<usize>> = std::collections::HashMap::with_capacity(tri_count * 3);
-        for t in 0..tri_count {
-            let i0 = self.indices[t * 3] as usize;
-            let i1 = self.indices[t * 3 + 1] as usize;
-            let i2 = self.indices[t * 3 + 2] as usize;
-            let k0 = quant_v(&self.vertices[i0]);
-            let k1 = quant_v(&self.vertices[i1]);
-            let k2 = quant_v(&self.vertices[i2]);
-            edge_map.entry(make_edge(k0, k1)).or_default().push(t);
-            edge_map.entry(make_edge(k1, k2)).or_default().push(t);
-            edge_map.entry(make_edge(k2, k0)).or_default().push(t);
-        }
-
-        let mut visited = vec![false; tri_count];
-        let mut result = Vec::new();
-        let mut queue = std::collections::VecDeque::new();
-
-        visited[start_tri] = true;
-        queue.push_back(start_tri);
-
-        while let Some(curr) = queue.pop_front() {
-            result.push(curr);
-            let i0 = self.indices[curr * 3] as usize;
-            let i1 = self.indices[curr * 3 + 1] as usize;
-            let i2 = self.indices[curr * 3 + 2] as usize;
-            let k0 = quant_v(&self.vertices[i0]);
-            let k1 = quant_v(&self.vertices[i1]);
-            let k2 = quant_v(&self.vertices[i2]);
-
-            for edge in [make_edge(k0, k1), make_edge(k1, k2), make_edge(k2, k0)] {
-                if let Some(neighbors) = edge_map.get(&edge) {
-                    for &nbr in neighbors {
-                        if !visited[nbr] {
-                            visited[nbr] = true;
-                            queue.push_back(nbr);
-                        }
-                    }
-                }
+        let cache = self.ensure_topology_cache();
+        if let Some(&island_idx) = cache.tri_to_uv_island.get(start_tri) {
+            if let Some(island) = cache.uv_islands.get(island_idx) {
+                return island.clone();
             }
         }
-
-        result
+        vec![start_tri]
     }
 
     /// Flood fill all triangles connected within the same 3D mesh element (regardless of UV seams)
@@ -735,57 +955,13 @@ impl Mesh {
         if start_tri >= tri_count {
             return Vec::new();
         }
-
-        type PosKey = ([i32; 3], [i32; 3]);
-        let quant_p = |v: &Vertex| -> [i32; 3] {
-            [(v.position.x * 1000.0).round() as i32, (v.position.y * 1000.0).round() as i32, (v.position.z * 1000.0).round() as i32]
-        };
-        let make_pos_edge = |p0: [i32; 3], p1: [i32; 3]| -> PosKey {
-            if p0 < p1 { (p0, p1) } else { (p1, p0) }
-        };
-
-        let mut edge_map: std::collections::HashMap<PosKey, Vec<usize>> = std::collections::HashMap::with_capacity(tri_count * 3);
-        for t in 0..tri_count {
-            let i0 = self.indices[t * 3] as usize;
-            let i1 = self.indices[t * 3 + 1] as usize;
-            let i2 = self.indices[t * 3 + 2] as usize;
-            let p0 = quant_p(&self.vertices[i0]);
-            let p1 = quant_p(&self.vertices[i1]);
-            let p2 = quant_p(&self.vertices[i2]);
-            edge_map.entry(make_pos_edge(p0, p1)).or_default().push(t);
-            edge_map.entry(make_pos_edge(p1, p2)).or_default().push(t);
-            edge_map.entry(make_pos_edge(p2, p0)).or_default().push(t);
-        }
-
-        let mut visited = vec![false; tri_count];
-        let mut result = Vec::new();
-        let mut queue = std::collections::VecDeque::new();
-
-        visited[start_tri] = true;
-        queue.push_back(start_tri);
-
-        while let Some(curr) = queue.pop_front() {
-            result.push(curr);
-            let i0 = self.indices[curr * 3] as usize;
-            let i1 = self.indices[curr * 3 + 1] as usize;
-            let i2 = self.indices[curr * 3 + 2] as usize;
-            let p0 = quant_p(&self.vertices[i0]);
-            let p1 = quant_p(&self.vertices[i1]);
-            let p2 = quant_p(&self.vertices[i2]);
-
-            for edge in [make_pos_edge(p0, p1), make_pos_edge(p1, p2), make_pos_edge(p2, p0)] {
-                if let Some(neighbors) = edge_map.get(&edge) {
-                    for &nbr in neighbors {
-                        if !visited[nbr] {
-                            visited[nbr] = true;
-                            queue.push_back(nbr);
-                        }
-                    }
-                }
+        let cache = self.ensure_topology_cache();
+        if let Some(&elem_idx) = cache.tri_to_mesh_element.get(start_tri) {
+            if let Some(elem) = cache.mesh_elements.get(elem_idx) {
+                return elem.clone();
             }
         }
-
-        result
+        vec![start_tri]
     }
 
     /// Calculate standard 1001-based UDIM tile ID from UV coordinate.
@@ -826,53 +1002,10 @@ impl Mesh {
         if start_tri >= tri_count {
             return Vec::new();
         }
-
-        let i0 = self.indices[start_tri * 3] as usize;
-        let i1 = self.indices[start_tri * 3 + 1] as usize;
-        let i2 = self.indices[start_tri * 3 + 2] as usize;
-
-        let v0 = &self.vertices[i0];
-        let v1 = &self.vertices[i1];
-        let v2 = &self.vertices[i2];
-        let fnorm0 = (v1.position - v0.position).cross(v2.position - v0.position).normalize_or_zero();
-
-        type PosKey = ([i32; 3], [i32; 3]);
-        let quant_p = |v: &Vertex| -> [i32; 3] {
-            [(v.position.x * 1000.0).round() as i32, (v.position.y * 1000.0).round() as i32, (v.position.z * 1000.0).round() as i32]
-        };
-        let make_pos_edge = |p0: [i32; 3], p1: [i32; 3]| -> PosKey {
-            if p0 < p1 { (p0, p1) } else { (p1, p0) }
-        };
-
-        let p0 = quant_p(v0);
-        let p1 = quant_p(v1);
-        let p2 = quant_p(v2);
-        let my_edges = [make_pos_edge(p0, p1), make_pos_edge(p1, p2), make_pos_edge(p2, p0)];
-
-        for t in 0..tri_count {
-            if t == start_tri {
-                continue;
-            }
-            let ti0 = self.indices[t * 3] as usize;
-            let ti1 = self.indices[t * 3 + 1] as usize;
-            let ti2 = self.indices[t * 3 + 2] as usize;
-            let tv0 = &self.vertices[ti0];
-            let tv1 = &self.vertices[ti1];
-            let tv2 = &self.vertices[ti2];
-            let tp0 = quant_p(tv0);
-            let tp1 = quant_p(tv1);
-            let tp2 = quant_p(tv2);
-
-            let other_edges = [make_pos_edge(tp0, tp1), make_pos_edge(tp1, tp2), make_pos_edge(tp2, tp0)];
-            let shares_edge = my_edges.iter().any(|me| other_edges.contains(me));
-            if shares_edge {
-                let fnorm1 = (tv1.position - tv0.position).cross(tv2.position - tv0.position).normalize_or_zero();
-                if fnorm0.dot(fnorm1) > 0.95 {
-                    return vec![start_tri, t];
-                }
-            }
+        let cache = self.ensure_topology_cache();
+        if let Some(quad) = cache.tri_to_quad.get(start_tri) {
+            return quad.clone();
         }
-
         vec![start_tri]
     }
 

@@ -833,6 +833,36 @@ impl Layer {
         }
     }
 
+    pub fn mark_dirty_rect(&mut self, min_x: u32, min_y: u32, max_x: u32, max_y: u32) {
+        let w = self.base_color_buf.width;
+        let h = self.base_color_buf.height;
+        let clamped_max_x = max_x.min(w.saturating_sub(1));
+        let clamped_max_y = max_y.min(h.saturating_sub(1));
+        let clamped_min_x = min_x.min(clamped_max_x);
+        let clamped_min_y = min_y.min(clamped_max_y);
+        if let Some((x0, y0, x1, y1)) = self.dirty_rect {
+            self.dirty_rect = Some((x0.min(clamped_min_x), y0.min(clamped_min_y), x1.max(clamped_max_x), y1.max(clamped_max_y)));
+        } else {
+            self.dirty_rect = Some((clamped_min_x, clamped_min_y, clamped_max_x, clamped_max_y));
+        }
+        self.dirty_flags = LayerDirtyFlags::all();
+    }
+
+    pub fn mark_dirty_mask_rect(&mut self, min_x: u32, min_y: u32, max_x: u32, max_y: u32) {
+        let w = self.mask_buf.width;
+        let h = self.mask_buf.height;
+        let clamped_max_x = max_x.min(w.saturating_sub(1));
+        let clamped_max_y = max_y.min(h.saturating_sub(1));
+        let clamped_min_x = min_x.min(clamped_max_x);
+        let clamped_min_y = min_y.min(clamped_max_y);
+        if let Some((x0, y0, x1, y1)) = self.dirty_rect {
+            self.dirty_rect = Some((x0.min(clamped_min_x), y0.min(clamped_min_y), x1.max(clamped_max_x), y1.max(clamped_max_y)));
+        } else {
+            self.dirty_rect = Some((clamped_min_x, clamped_min_y, clamped_max_x, clamped_max_y));
+        }
+        self.dirty_flags.mask = true;
+    }
+
     pub fn set_fill_height(&mut self, val: f32) {
         self.fill_height = val;
         if self.fill_height_tex.is_none() && self.fill_generator == ProceduralGenerator::None && !self.triplanar {
@@ -2842,6 +2872,7 @@ impl Layer {
         }
 
         if self.mask_effects.is_empty() {
+            self.mask_buf = ScalarBuffer::new(w, h, self.base_mask_value);
             self.mark_dirty_full();
             return;
         }
@@ -3997,7 +4028,7 @@ impl Layer {
     pub fn remove_mask_effect(&mut self, id: u64, curvature_map: Option<&ScalarBuffer>) {
         self.mask_effects.retain(|e| e.id != id);
         if self.active_mask_effect_id == Some(id) {
-            self.active_mask_effect_id = None;
+            self.active_mask_effect_id = self.mask_effects.last().map(|e| e.id);
         }
         self.evaluate_mask(curvature_map);
     }
