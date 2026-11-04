@@ -459,6 +459,17 @@ impl Project {
         self.active_layer_idx
     }
 
+    pub fn add_path_layer(&mut self, name: Option<String>) -> usize {
+        let id = self.next_layer_id;
+        self.next_layer_id += 1;
+        let layer_name = name.unwrap_or_else(|| format!("Path Layer {}", id));
+        let layer = Layer::new_path_layer(id, layer_name, self.texture_width, self.texture_height);
+        self.layers.push(layer);
+        self.active_layer_idx = self.layers.len() - 1;
+        self.rebuild_composite();
+        self.active_layer_idx
+    }
+
     pub fn apply_smart_material(&mut self, preset_id: &str) {
         let new_layers = SmartMaterialLibrary::build_layers_with_maps(
             preset_id,

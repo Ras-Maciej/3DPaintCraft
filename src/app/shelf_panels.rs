@@ -1442,6 +1442,10 @@ impl PaintcraftApp {
                                         self.brush_engine.settings.paint_color = glam::Vec4::new(decal.base_color[0], decal.base_color[1], decal.base_color[2], decal.base_color[3]);
                                         self.brush_engine.settings.paint_roughness = decal.roughness;
                                         self.brush_engine.settings.paint_metallic = decal.metallic;
+                                        self.brush_engine.settings.paint_emissive = glam::Vec4::new(decal.emissive[0], decal.emissive[1], decal.emissive[2], decal.emissive[3]);
+                                        self.brush_engine.settings.paint_opacity = decal.opacity;
+                                        self.brush_engine.settings.paint_clearcoat = decal.clearcoat;
+                                        self.brush_engine.settings.paint_anisotropy = decal.anisotropy;
                                         self.status_message = format!("Loaded Custom Decal Preset: {}", decal.name);
                                     }
 
@@ -2015,6 +2019,10 @@ impl PaintcraftApp {
                     self.brush_engine.settings.paint_color = glam::Vec4::new(custom.base_color[0], custom.base_color[1], custom.base_color[2], custom.base_color[3]);
                     self.brush_engine.settings.paint_roughness = custom.roughness;
                     self.brush_engine.settings.paint_metallic = custom.metallic;
+                    self.brush_engine.settings.paint_emissive = glam::Vec4::new(custom.emissive[0], custom.emissive[1], custom.emissive[2], custom.emissive[3]);
+                    self.brush_engine.settings.paint_opacity = custom.opacity;
+                    self.brush_engine.settings.paint_clearcoat = custom.clearcoat;
+                    self.brush_engine.settings.paint_anisotropy = custom.anisotropy;
                 } else {
                     match asset.id {
                         "weld_seam" => {

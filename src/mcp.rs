@@ -206,6 +206,7 @@ impl McpServer {
                             crate::layer::LayerType::Paint => "paint",
                             crate::layer::LayerType::Fill => "fill",
                             crate::layer::LayerType::Folder => "folder",
+                            crate::layer::LayerType::Path => "path",
                         },
                         "visible": l.visible,
                         "opacity": l.opacity,

@@ -202,6 +202,7 @@ pub enum LayerType {
     Paint,
     Fill,
     Folder,
+    Path,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -596,6 +597,10 @@ pub struct Layer {
     // Active stroke tile-delta undo buffer (Sub-megabyte sparse history recording)
     #[serde(skip)]
     pub stroke_undo_buffer: Option<TileUndoBuffer>,
+
+    // Substance 3D Painter-style Vector Path State for non-destructive vector Path Layers
+    #[serde(default)]
+    pub path_state: Option<crate::brush::PathToolState>,
 }
 
 /// Dynamic sparse tile accumulator for active paint strokes
@@ -730,7 +735,125 @@ impl Layer {
             channel_opacities: ChannelOpacities::default(),
             anchor_point: None,
             stroke_undo_buffer: None,
+            path_state: None,
         }
+    }
+
+    pub fn new_path_layer(id: u64, name: String, width: u32, height: u32) -> Self {
+        let mut layer = Self::new_paint_layer(id, name, width, height);
+        layer.layer_type = LayerType::Path;
+        layer.path_state = Some(crate::brush::PathToolState::default());
+        layer
+    }
+
+    /// Resets all raster paint buffers to transparent / neutral defaults without destroying layer metadata
+    pub fn clear_paint_buffers(&mut self) {
+        let w = self.base_color_buf.width;
+        let h = self.base_color_buf.height;
+        self.base_color_buf = RgbaBuffer::new(w, h, Vec4::ZERO);
+        self.roughness_buf = ScalarBuffer::new(w, h, 0.5);
+        self.metallic_buf = ScalarBuffer::new(w, h, 0.0);
+        self.height_buf = ScalarBuffer::new(w, h, 0.5);
+        self.normal_buf = RgbaBuffer::new(w, h, Vec4::new(0.5, 0.5, 1.0, 0.5));
+        self.emissive_buf = RgbaBuffer::new(w, h, Vec4::ZERO);
+        self.opacity_buf = ScalarBuffer::new(w, h, 1.0);
+        self.clearcoat_buf = ScalarBuffer::new(w, h, 0.0);
+        self.anisotropy_buf = ScalarBuffer::new(w, h, 0.0);
+        self.anisotropy_angle_buf = ScalarBuffer::new(w, h, 0.0);
+        if w > 0 && h > 0 {
+            self.dirty_rect = Some((0, 0, w - 1, h - 1));
+            self.dirty_flags = LayerDirtyFlags::all();
+        }
+    }
+
+    /// Non-destructively re-rasterizes the path layer from its vector path_state
+    pub fn evaluate_path_layer(&mut self, mesh: &crate::mesh::Mesh, brush_engine: &mut crate::brush::BrushEngine) {
+        if self.layer_type != LayerType::Path {
+            return;
+        }
+        self.clear_paint_buffers();
+
+        let path_state = match &self.path_state {
+            Some(ps) if !ps.points.is_empty() => ps.clone(),
+            _ => return,
+        };
+
+        let w = self.base_color_buf.width;
+        let orig_radius = brush_engine.settings.radius;
+        let world_rad = ((orig_radius / (w as f32).max(1.0)) * 2.0).clamp(0.005, 0.5);
+        let mut samples = path_state.sample_path(world_rad);
+        if samples.is_empty() {
+            return;
+        }
+
+        if path_state.snap_to_surface {
+            crate::brush::PathToolState::project_samples_to_mesh(
+                &mut samples,
+                mesh,
+                world_rad,
+                path_state.surface_offset,
+            );
+        }
+
+        let orig_follow_path = brush_engine.settings.follow_path;
+        let orig_follow_angle = brush_engine.follow_path_angle;
+
+        if path_state.follow_tangent {
+            brush_engine.settings.follow_path = true;
+        }
+
+        brush_engine.last_hit_pos = None;
+        brush_engine.last_hit_normal = None;
+        brush_engine.last_uv = None;
+
+        for (i, sample) in samples.iter().enumerate() {
+            brush_engine.settings.radius = (orig_radius * sample.radius_scale).clamp(1.0, 300.0);
+            if path_state.follow_tangent {
+                brush_engine.follow_path_angle = sample.tangent_angle;
+            }
+            let sample_world_rad = ((brush_engine.settings.radius / (w as f32).max(1.0)) * 2.0).max(0.005);
+
+            if path_state.stroke_style == crate::brush::PathStrokeStyle::Continuous {
+                brush_engine.paint_stroke_3d(self, mesh, sample.position_3d, sample.normal, sample_world_rad);
+            } else {
+                let next_idx = if i + 1 < samples.len() { i + 1 } else { i };
+                let prev_idx = if i > 0 { i - 1 } else { i };
+                let tan_3d = if next_idx != prev_idx {
+                    samples[next_idx].position_3d - samples[prev_idx].position_3d
+                } else if i + 1 < samples.len() {
+                    samples[i + 1].position_3d - sample.position_3d
+                } else if i > 0 {
+                    sample.position_3d - samples[i - 1].position_3d
+                } else {
+                    glam::Vec3::X
+                };
+
+                brush_engine.stamp_3d_decal(
+                    self,
+                    mesh,
+                    sample.position_3d,
+                    sample.normal,
+                    tan_3d,
+                    sample_world_rad,
+                    path_state.stroke_style,
+                    path_state.decal_type,
+                    path_state.heat_tint,
+                    sample.arc_length,
+                    path_state.height_depth,
+                );
+            }
+        }
+
+        if path_state.stroke_style != crate::brush::PathStrokeStyle::Continuous {
+            self.update_normal_from_height(1.0);
+        }
+
+        brush_engine.settings.radius = orig_radius;
+        brush_engine.settings.follow_path = orig_follow_path;
+        brush_engine.follow_path_angle = orig_follow_angle;
+        brush_engine.last_hit_pos = None;
+        brush_engine.last_hit_normal = None;
+        brush_engine.last_uv = None;
     }
 
     pub fn new_folder_layer(id: u64, name: String, _width: u32, _height: u32) -> Self {
@@ -805,6 +928,7 @@ impl Layer {
             channel_opacities: ChannelOpacities::default(),
             anchor_point: None,
             stroke_undo_buffer: None,
+            path_state: None,
         }
     }
 
@@ -1132,6 +1256,7 @@ impl Layer {
             channel_opacities: self.channel_opacities,
             anchor_point: self.anchor_point.clone(),
             stroke_undo_buffer: None,
+            path_state: self.path_state.clone(),
         })
     }
 
@@ -1171,6 +1296,9 @@ impl Layer {
         }
         if snapshot.mask_buf.width > 0 {
             self.mask_buf = snapshot.mask_buf.clone();
+        }
+        if snapshot.path_state.is_some() {
+            self.path_state = snapshot.path_state.clone();
         }
         self.has_mask = snapshot.has_mask;
         self.mask_inverted = snapshot.mask_inverted;
@@ -5014,7 +5142,7 @@ impl CompositeTextureSet {
                     if let Some(folder) = parent_folder {
                         layer_op *= folder.opacity;
                     }
-                    let is_paint_layer = layer.layer_type == LayerType::Paint;
+                    let is_paint_layer = layer.layer_type == LayerType::Paint || layer.layer_type == LayerType::Path;
                     if is_paint_layer && layer.base_color_buf.is_sparse() && layer.base_color_buf.default_val.w <= 1e-4 {
                         continue;
                     }
@@ -6206,6 +6334,53 @@ mod tests {
 
         let sampled = layer.base_color_buf.get_pixel(16, 16);
         assert!(sampled.z > 0.5, "Triplanar sampling should sample color texture with z ~ 0.8, got {:?}", sampled);
+    }
+
+    #[test]
+    fn test_path_layer_lifecycle() {
+        let mut layer = Layer::new_path_layer(10, "Vector Seam Path".to_string(), 64, 64);
+        assert_eq!(layer.layer_type, LayerType::Path);
+        assert!(layer.path_state.is_some());
+
+        // Configure path points
+        if let Some(ps) = &mut layer.path_state {
+            ps.points.push(crate::brush::PathControlPoint {
+                position_3d: Vec3::new(0.0, 1.0, 0.0),
+                normal: Vec3::Y,
+                uv: glam::Vec2::new(0.2, 0.5),
+                radius_scale: 1.0,
+            });
+            ps.points.push(crate::brush::PathControlPoint {
+                position_3d: Vec3::new(0.5, 1.0, 0.0),
+                normal: Vec3::Y,
+                uv: glam::Vec2::new(0.8, 0.5),
+                radius_scale: 1.0,
+            });
+            ps.stroke_style = crate::brush::PathStrokeStyle::WeldSeam;
+        }
+
+        let mesh = crate::mesh::Mesh::create_cube_mesh("Cube", 2.0);
+        let mut engine = crate::brush::BrushEngine::new();
+        engine.settings.radius = 0.2;
+        layer.evaluate_path_layer(&mesh, &mut engine);
+
+        assert!(layer.dirty_rect.is_some());
+        assert!(layer.dirty_flags.color);
+
+        // Snapshot and restore
+        let snapshot = layer.clone_stroke_snapshot();
+        assert_eq!(snapshot.layer_type, LayerType::Path);
+        assert!(snapshot.path_state.is_some());
+        assert_eq!(snapshot.path_state.as_ref().unwrap().points.len(), 2);
+
+        // Shift path points and re-evaluate non-destructively
+        if let Some(ps) = &mut layer.path_state {
+            ps.shift(Vec3::new(0.1, 0.0, 0.0));
+            ps.decal_type = crate::brush::SmartDecalType::HexBolt;
+            ps.stroke_style = crate::brush::PathStrokeStyle::SmartDecal;
+        }
+        layer.evaluate_path_layer(&mesh, &mut engine);
+        assert_eq!(layer.path_state.as_ref().unwrap().points[0].position_3d.x, 0.1);
     }
 }
 

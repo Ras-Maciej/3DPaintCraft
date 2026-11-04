@@ -319,6 +319,21 @@ impl PaintcraftApp {
                                 self.status_message = "Added Fill Layer.".to_string();
                             }
 
+                            // 2b. Add Path Layer (Non-destructive Vector Path Layer)
+                            if render_tb_btn(ui, paint_tex, "+Path", "Add Vector Path Layer (Always live and editable)").clicked() {
+                                let prev_active = self.project.active_layer_idx;
+                                let new_idx = self.project.add_path_layer(None);
+                                self.brush_engine.settings.target = PaintTarget::Material;
+                                self.brush_engine.settings.mode = ToolMode::Path;
+                                let layer_clone = self.project.layers[new_idx].clone_stroke_snapshot();
+                                self.history.push("Add Path Layer", HistoryAction::AddLayer {
+                                    layer_idx: new_idx,
+                                    layer: layer_clone,
+                                    prev_active,
+                                });
+                                self.status_message = "Added Vector Path Layer (always editable).".to_string();
+                            }
+
                             // 3. Add Folder
                             if render_tb_btn(ui, folder_tex, "+D", "Add Layer Folder / Group").clicked() {
                                 let prev_active = self.project.active_layer_idx;
@@ -640,6 +655,7 @@ impl PaintcraftApp {
                                                     ),
                                                     LayerType::Paint => if mat_resp.hovered() { Color32::from_rgb(58, 64, 78) } else { Color32::from_rgb(46, 52, 64) },
                                                     LayerType::Folder => Color32::from_rgb(160, 115, 35),
+                                                    LayerType::Path => if mat_resp.hovered() { Color32::from_rgb(38, 70, 105) } else { Color32::from_rgb(28, 55, 85) },
                                                 };
                                                 let mat_stroke = if is_target_mat {
                                                     egui::Stroke::new(2.0_f32, Color32::from_rgb(243, 94, 24))
@@ -653,6 +669,7 @@ impl PaintcraftApp {
                                                     LayerType::Paint => paint_icon,
                                                     LayerType::Folder => folder_icon,
                                                     LayerType::Fill => fill_icon,
+                                                    LayerType::Path => paint_icon,
                                                 };
                                                 if let Some(tex) = icon_tex {
                                                     let icon_inset = egui::Rect::from_center_size(mat_rect.center(), egui::vec2(14.0, 14.0));
@@ -667,11 +684,21 @@ impl PaintcraftApp {
                                                         ui.painter().text(mat_rect.center(), egui::Align2::CENTER_CENTER, "P", egui::FontId::proportional(10.0), Color32::WHITE);
                                                     } else if layer.layer_type == LayerType::Folder {
                                                         ui.painter().text(mat_rect.center(), egui::Align2::CENTER_CENTER, "D", egui::FontId::proportional(10.0), Color32::WHITE);
+                                                    } else if layer.layer_type == LayerType::Path {
+                                                        ui.painter().text(mat_rect.center(), egui::Align2::CENTER_CENTER, "~", egui::FontId::proportional(12.0), Color32::from_rgb(0, 200, 255));
                                                     }
                                                 }
                                                 if mat_resp.on_hover_text("Layer / Material (Click to switch to Layer painting)").clicked() {
                                                     self.project.active_layer_idx = i;
                                                     self.brush_engine.settings.target = PaintTarget::Material;
+                                                    if layer.layer_type == LayerType::Path {
+                                                        if let Some(l) = self.project.layers.get(i) {
+                                                            if let Some(ps) = &l.path_state {
+                                                                self.brush_engine.settings.path_tool = ps.clone();
+                                                            }
+                                                        }
+                                                        self.brush_engine.settings.mode = ToolMode::Path;
+                                                    }
                                                     if self.mask_preview_layer_id.is_some() {
                                                         let ctx = ui.ctx().clone();
                                                         self.exit_mask_preview(&ctx);
@@ -795,6 +822,14 @@ impl PaintcraftApp {
                                                     if name_resp.clicked() {
                                                         self.project.active_layer_idx = i;
                                                         self.brush_engine.settings.target = PaintTarget::Material;
+                                                        if layer.layer_type == LayerType::Path {
+                                                            if let Some(l) = self.project.layers.get(i) {
+                                                                if let Some(ps) = &l.path_state {
+                                                                    self.brush_engine.settings.path_tool = ps.clone();
+                                                                }
+                                                            }
+                                                            self.brush_engine.settings.mode = ToolMode::Path;
+                                                        }
                                                         if self.mask_preview_layer_id.is_some() {
                                                             let ctx = ui.ctx().clone();
                                                             self.exit_mask_preview(&ctx);
@@ -1049,6 +1084,7 @@ impl PaintcraftApp {
                                 LayerType::Fill => format!("Properties - Fill: {}", layer.name),
                                 LayerType::Paint => format!("Properties - Paint: {}", layer.name),
                                 LayerType::Folder => format!("Properties - Folder: {}", layer.name),
+                                LayerType::Path => format!("Properties - Path: {}", layer.name),
                             }
                         };
                         (true, layer.has_mask, title)
@@ -2563,6 +2599,228 @@ impl PaintcraftApp {
                                             });
                                         }
                                     });
+                                } else if layer.layer_type == LayerType::Path {
+                                    // --- PROPERTIES: NON-DESTRUCTIVE VECTOR PATH LAYER ---
+                                    ui.group(|ui| {
+                                        ui.label(egui::RichText::new("Vector Path Layer (Always Live & Editable)").strong().color(Color32::from_rgb(0, 180, 255)));
+                                        ui.label("Control points and decals stay live on this layer. Shift, smooth, reverse, or re-tune PBR anytime.");
+                                        ui.separator();
+
+                                        if layer.path_state.is_none() {
+                                            layer.path_state = Some(crate::brush::PathToolState::default());
+                                        }
+                                        let ps = layer.path_state.as_mut().unwrap();
+
+                                        ui.horizontal(|ui| {
+                                            ui.label(format!("Points: {}", ps.points.len()));
+                                            if ui.button("Reverse").on_hover_text("Reverse stroke point order").clicked() {
+                                                ps.reverse();
+                                                prop_changed = true;
+                                            }
+                                            if ui.button("Smooth").on_hover_text("Apply Laplacian smoothing to points").clicked() {
+                                                ps.smooth();
+                                                prop_changed = true;
+                                            }
+                                            if ui.button("Clear Points").clicked() {
+                                                ps.clear();
+                                                prop_changed = true;
+                                            }
+                                        });
+
+                                        ui.horizontal(|ui| {
+                                            if ui.checkbox(&mut ps.closed, "Loop Path").changed() {
+                                                prop_changed = true;
+                                            }
+                                            if ui.checkbox(&mut ps.snap_to_surface, "Snap to Surface").changed() {
+                                                prop_changed = true;
+                                            }
+                                            if ui.checkbox(&mut ps.follow_tangent, "Follow Tangent").changed() {
+                                                prop_changed = true;
+                                            }
+                                        });
+
+                                        ui.horizontal(|ui| {
+                                            ui.label("Surface Offset:");
+                                            if ui.add(egui::Slider::new(&mut ps.surface_offset, -0.05..=0.05)).changed() {
+                                                prop_changed = true;
+                                            }
+                                        });
+
+                                        ui.horizontal(|ui| {
+                                            ui.label("Shift Along Normal:");
+                                            if ui.button("+0.005").clicked() {
+                                                ps.shift_along_normal(0.005);
+                                                prop_changed = true;
+                                            }
+                                            if ui.button("-0.005").clicked() {
+                                                ps.shift_along_normal(-0.005);
+                                                prop_changed = true;
+                                            }
+                                        });
+
+                                        ui.horizontal(|ui| {
+                                            ui.label("Shift Position:");
+                                            if ui.button("+X").clicked() { ps.shift(glam::Vec3::new(0.05, 0.0, 0.0)); prop_changed = true; }
+                                            if ui.button("-X").clicked() { ps.shift(glam::Vec3::new(-0.05, 0.0, 0.0)); prop_changed = true; }
+                                            if ui.button("+Y").clicked() { ps.shift(glam::Vec3::new(0.0, 0.05, 0.0)); prop_changed = true; }
+                                            if ui.button("-Y").clicked() { ps.shift(glam::Vec3::new(0.0, -0.05, 0.0)); prop_changed = true; }
+                                            if ui.button("+Z").clicked() { ps.shift(glam::Vec3::new(0.0, 0.0, 0.05)); prop_changed = true; }
+                                            if ui.button("-Z").clicked() { ps.shift(glam::Vec3::new(0.0, 0.0, -0.05)); prop_changed = true; }
+                                        });
+
+                                        ui.separator();
+                                        ui.label(egui::RichText::new("Stroke & Decal Style").strong());
+
+                                        ui.horizontal(|ui| {
+                                            ui.label("Style:");
+                                            egui::ComboBox::from_id_source("path_layer_stroke_style")
+                                                .selected_text(ps.stroke_style.name())
+                                                .show_ui(ui, |ui| {
+                                                    for style in &[
+                                                        crate::brush::PathStrokeStyle::Continuous,
+                                                        crate::brush::PathStrokeStyle::WeldSeam,
+                                                        crate::brush::PathStrokeStyle::RopeBraid,
+                                                        crate::brush::PathStrokeStyle::StitchSeam,
+                                                        crate::brush::PathStrokeStyle::ChainLinks,
+                                                        crate::brush::PathStrokeStyle::SmartDecal,
+                                                    ] {
+                                                        if ui.selectable_value(&mut ps.stroke_style, *style, style.name()).clicked() {
+                                                            prop_changed = true;
+                                                        }
+                                                    }
+                                                });
+                                        });
+
+                                        if ps.stroke_style == crate::brush::PathStrokeStyle::SmartDecal {
+                                            ui.horizontal(|ui| {
+                                                ui.label("Decal:");
+                                                egui::ComboBox::from_id_source("path_layer_decal_type")
+                                                    .selected_text(ps.decal_type.name())
+                                                    .show_ui(ui, |ui| {
+                                                        for decal in &[
+                                                            crate::brush::SmartDecalType::ButtonHole,
+                                                            crate::brush::SmartDecalType::PhillipsScrew,
+                                                            crate::brush::SmartDecalType::FlatheadScrew,
+                                                            crate::brush::SmartDecalType::TorxScrew,
+                                                            crate::brush::SmartDecalType::HexBolt,
+                                                            crate::brush::SmartDecalType::DomedRivet,
+                                                            crate::brush::SmartDecalType::GrommetEyelet,
+                                                            crate::brush::SmartDecalType::AirVentLouver,
+                                                        ] {
+                                                            if ui.selectable_value(&mut ps.decal_type, *decal, decal.name()).clicked() {
+                                                                prop_changed = true;
+                                                            }
+                                                        }
+                                                    });
+                                            });
+
+                                            ui.horizontal(|ui| {
+                                                ui.label("Spacing:");
+                                                if ui.add(egui::Slider::new(&mut ps.decal_spacing, 0.2..=5.0)).changed() {
+                                                    prop_changed = true;
+                                                }
+                                            });
+                                        } else if ps.stroke_style == crate::brush::PathStrokeStyle::WeldSeam {
+                                            if ui.checkbox(&mut ps.heat_tint, "HAZ Heat Oxidation Bands").changed() {
+                                                prop_changed = true;
+                                            }
+                                        }
+
+                                        ui.horizontal(|ui| {
+                                            ui.label("Height Depth:");
+                                            if ui.add(egui::Slider::new(&mut ps.height_depth, -1.0..=1.0)).changed() {
+                                                prop_changed = true;
+                                            }
+                                        });
+
+                                        ui.horizontal(|ui| {
+                                            ui.label("Taper Start:");
+                                            if ui.add(egui::Slider::new(&mut ps.taper_start, 0.0..=1.0)).changed() {
+                                                prop_changed = true;
+                                            }
+                                            ui.label("End:");
+                                            if ui.add(egui::Slider::new(&mut ps.taper_end, 0.0..=1.0)).changed() {
+                                                prop_changed = true;
+                                            }
+                                        });
+
+                                        ui.separator();
+                                        ui.label(egui::RichText::new("Full PBR Material Channels").strong());
+
+                                        ui.horizontal(|ui| {
+                                            ui.label("Radius:");
+                                            if ui.add(egui::Slider::new(&mut self.brush_engine.settings.radius, 1.0..=150.0).text("px")).changed() {
+                                                prop_changed = true;
+                                            }
+                                        });
+
+                                        ui.horizontal(|ui| {
+                                            ui.label("Base Color:");
+                                            let mut col = [
+                                                self.brush_engine.settings.paint_color.x,
+                                                self.brush_engine.settings.paint_color.y,
+                                                self.brush_engine.settings.paint_color.z,
+                                                self.brush_engine.settings.paint_color.w,
+                                            ];
+                                            if ui.color_edit_button_rgba_unmultiplied(&mut col).changed() {
+                                                self.brush_engine.settings.paint_color = glam::Vec4::new(col[0], col[1], col[2], col[3]);
+                                                prop_changed = true;
+                                            }
+                                        });
+
+                                        ui.horizontal(|ui| {
+                                            ui.label("Roughness:");
+                                            if ui.add(egui::Slider::new(&mut self.brush_engine.settings.paint_roughness, 0.0..=1.0)).changed() {
+                                                prop_changed = true;
+                                            }
+                                        });
+
+                                        ui.horizontal(|ui| {
+                                            ui.label("Metallic:");
+                                            if ui.add(egui::Slider::new(&mut self.brush_engine.settings.paint_metallic, 0.0..=1.0)).changed() {
+                                                prop_changed = true;
+                                            }
+                                        });
+
+                                        ui.horizontal(|ui| {
+                                            ui.label("Height:");
+                                            if ui.add(egui::Slider::new(&mut self.brush_engine.settings.paint_height, 0.0..=1.0)).changed() {
+                                                prop_changed = true;
+                                            }
+                                        });
+
+                                        ui.horizontal(|ui| {
+                                            ui.label("Emissive:");
+                                            let mut em_col = [
+                                                self.brush_engine.settings.paint_emissive.x,
+                                                self.brush_engine.settings.paint_emissive.y,
+                                                self.brush_engine.settings.paint_emissive.z,
+                                                self.brush_engine.settings.paint_emissive.w,
+                                            ];
+                                            if ui.color_edit_button_rgba_unmultiplied(&mut em_col).changed() {
+                                                self.brush_engine.settings.paint_emissive = glam::Vec4::new(em_col[0], em_col[1], em_col[2], em_col[3]);
+                                                prop_changed = true;
+                                            }
+                                        });
+
+                                        ui.horizontal(|ui| {
+                                            ui.label("Clearcoat:");
+                                            if ui.add(egui::Slider::new(&mut self.brush_engine.settings.paint_clearcoat, 0.0..=1.0)).changed() {
+                                                prop_changed = true;
+                                            }
+                                        });
+
+                                        ui.horizontal(|ui| {
+                                            ui.label("Anisotropy:");
+                                            if ui.add(egui::Slider::new(&mut self.brush_engine.settings.paint_anisotropy, -1.0..=1.0)).changed() {
+                                                prop_changed = true;
+                                            }
+                                        });
+
+                                        if prop_changed {
+                                            self.brush_engine.settings.path_tool = ps.clone();
+                                        }
+                                    });
                                 } else {
                                     // --- PROPERTIES: PAINT ---
                                     ui.group(|ui| {
@@ -2727,6 +2985,8 @@ impl PaintcraftApp {
                             let layer = &mut higher[0];
                             if prop_changed && layer.layer_type == LayerType::Fill {
                                 layer.evaluate_fill_advanced(curv, pos, wn, ao);
+                            } else if prop_changed && layer.layer_type == LayerType::Path {
+                                layer.evaluate_path_layer(&proj.mesh, &mut self.brush_engine);
                             }
                             if mask_changed && layer.has_mask {
                                 layer.evaluate_mask_full_with_mesh(curv, ao, pos, wn, id_ref, &anchor_refs, Some(&proj.mesh));

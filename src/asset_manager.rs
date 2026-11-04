@@ -68,6 +68,22 @@ pub struct CustomDecalPreset {
     pub metallic: f32,
     pub heat_tint: bool,
     pub surface_offset: f32,
+    #[serde(default = "default_decal_preset_emissive")]
+    pub emissive: [f32; 4],
+    #[serde(default = "default_decal_preset_opacity")]
+    pub opacity: f32,
+    #[serde(default)]
+    pub clearcoat: f32,
+    #[serde(default)]
+    pub anisotropy: f32,
+}
+
+fn default_decal_preset_emissive() -> [f32; 4] {
+    [0.0, 0.0, 0.0, 0.0]
+}
+
+fn default_decal_preset_opacity() -> f32 {
+    1.0
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -648,6 +664,10 @@ mod tests {
             metallic: 0.95,
             heat_tint: false,
             surface_offset: 0.005,
+            emissive: [0.0, 0.0, 0.0, 0.0],
+            opacity: 1.0,
+            clearcoat: 0.5,
+            anisotropy: 0.2,
         };
 
         let save_res = manager.save_decal(&test_decal);

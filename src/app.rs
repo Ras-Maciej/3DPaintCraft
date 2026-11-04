@@ -936,6 +936,26 @@ impl PaintcraftApp {
         }
     }
 
+    /// Syncs vector path state into active Path layer, re-evaluates all spline decals non-destructively, and updates viewport textures
+    pub fn sync_and_evaluate_active_path_layer(&mut self, ctx: &egui::Context) {
+        let act_idx = self.project.active_layer_idx;
+        if act_idx < self.project.layers.len() && self.project.layers[act_idx].layer_type == LayerType::Path {
+            self.project.layers[act_idx].path_state = Some(self.brush_engine.settings.path_tool.clone());
+            self.project.layers[act_idx].evaluate_path_layer(&self.project.mesh, &mut self.brush_engine);
+            self.project.rebuild_composite();
+            self.project.gpu_sync_needed = true;
+            self.update_uv_texture(ctx);
+            if let Some(wgpu) = &mut self.wgpu_viewport {
+                wgpu.sync_textures(&mut self.project);
+                if let Some(preview_id) = self.mask_preview_layer_id {
+                    wgpu.sync_mask_preview_full(&self.project, preview_id);
+                }
+            }
+            self.project.is_dirty = true;
+            ctx.request_repaint();
+        }
+    }
+
     /// Commit all stamps along the Catmull-Rom spline path into the active layer or mask
     pub fn commit_path_tool(&mut self, ctx: &egui::Context) {
         let n_points = self.brush_engine.settings.path_tool.points.len();
@@ -948,10 +968,17 @@ impl PaintcraftApp {
             return;
         }
 
+        if self.project.layers[act_idx].layer_type == LayerType::Path {
+            self.sync_and_evaluate_active_path_layer(ctx);
+            let style_label = self.brush_engine.settings.path_tool.stroke_style.name();
+            self.status_message = format!("{}: path updated on Path Layer (always editable)", style_label);
+            return;
+        }
+
         let is_fill = self.project.layers[act_idx].layer_type != LayerType::Paint;
         let is_mask = self.brush_engine.settings.target == PaintTarget::Mask;
         if is_fill && !is_mask {
-            self.status_message = "Cannot paint material on Fill layer. Switch target to Mask or add a Paint layer.".to_string();
+            self.status_message = "Cannot paint material on Fill or Folder layer. Switch target to Mask or add a Paint or Path layer.".to_string();
             return;
         }
 
@@ -1095,8 +1122,8 @@ impl PaintcraftApp {
         }
 
         self.brush_engine.settings.path_tool.clear();
-        self.project.is_dirty = true;
         self.status_message = format!("{}: {} stamps committed", style_label, samples.len());
+        self.project.is_dirty = true;
         ctx.request_repaint();
     }
 
@@ -2976,6 +3003,20 @@ impl eframe::App for PaintcraftApp {
                             ui.label("Radius:");
                             ui.add_sized([55.0, 18.0], egui::Slider::new(&mut self.brush_engine.settings.radius, 1.0..=100.0).text("px"));
 
+                            let mut path_col = [
+                                self.brush_engine.settings.paint_color.x,
+                                self.brush_engine.settings.paint_color.y,
+                                self.brush_engine.settings.paint_color.z,
+                                self.brush_engine.settings.paint_color.w,
+                            ];
+                            if ui.color_edit_button_rgba_unmultiplied(&mut path_col).on_hover_text("Path Decal Color").changed() {
+                                self.brush_engine.settings.paint_color = glam::Vec4::new(path_col[0], path_col[1], path_col[2], path_col[3]);
+                            }
+                            ui.label("R:");
+                            ui.add_sized([40.0, 18.0], egui::Slider::new(&mut self.brush_engine.settings.paint_roughness, 0.0..=1.0).text(""));
+                            ui.label("M:");
+                            ui.add_sized([40.0, 18.0], egui::Slider::new(&mut self.brush_engine.settings.paint_metallic, 0.0..=1.0).text(""));
+
                             if ui.small_button("+ Save Decal...").on_hover_text("Save current decal/path parameters as a custom preset").clicked() {
                                 self.show_new_decal_modal = true;
                                 self.new_decal_name = format!("Decal_{}", self.asset_manager.decals.len() + 1);
@@ -3046,6 +3087,10 @@ impl eframe::App for PaintcraftApp {
                                                 self.brush_engine.settings.paint_color = glam::Vec4::new(preset.base_color[0], preset.base_color[1], preset.base_color[2], preset.base_color[3]);
                                                 self.brush_engine.settings.paint_roughness = preset.roughness;
                                                 self.brush_engine.settings.paint_metallic = preset.metallic;
+                                                self.brush_engine.settings.paint_emissive = glam::Vec4::new(preset.emissive[0], preset.emissive[1], preset.emissive[2], preset.emissive[3]);
+                                                self.brush_engine.settings.paint_opacity = preset.opacity;
+                                                self.brush_engine.settings.paint_clearcoat = preset.clearcoat;
+                                                self.brush_engine.settings.paint_anisotropy = preset.anisotropy;
                                             }
                                         }
                                     });
@@ -3064,6 +3109,20 @@ impl eframe::App for PaintcraftApp {
 
                             ui.label("Offset:");
                             ui.add_sized([45.0, 18.0], egui::Slider::new(&mut self.brush_engine.settings.stamp_tool.surface_offset, -0.05..=0.05).text(""));
+
+                            let mut stamp_col = [
+                                self.brush_engine.settings.paint_color.x,
+                                self.brush_engine.settings.paint_color.y,
+                                self.brush_engine.settings.paint_color.z,
+                                self.brush_engine.settings.paint_color.w,
+                            ];
+                            if ui.color_edit_button_rgba_unmultiplied(&mut stamp_col).on_hover_text("Decal Base Color").changed() {
+                                self.brush_engine.settings.paint_color = glam::Vec4::new(stamp_col[0], stamp_col[1], stamp_col[2], stamp_col[3]);
+                            }
+                            ui.label("R:");
+                            ui.add_sized([40.0, 18.0], egui::Slider::new(&mut self.brush_engine.settings.paint_roughness, 0.0..=1.0).text(""));
+                            ui.label("M:");
+                            ui.add_sized([40.0, 18.0], egui::Slider::new(&mut self.brush_engine.settings.paint_metallic, 0.0..=1.0).text(""));
 
                             ui.separator();
                             if ui.small_button("+ Save Decal...").on_hover_text("Save current decal parameters as a custom preset").clicked() {
@@ -4754,6 +4813,10 @@ impl eframe::App for PaintcraftApp {
                     metallic: self.brush_engine.settings.paint_metallic,
                     heat_tint: heat,
                     surface_offset: offset,
+                    emissive: [self.brush_engine.settings.paint_emissive.x, self.brush_engine.settings.paint_emissive.y, self.brush_engine.settings.paint_emissive.z, self.brush_engine.settings.paint_emissive.w],
+                    opacity: self.brush_engine.settings.paint_opacity,
+                    clearcoat: self.brush_engine.settings.paint_clearcoat,
+                    anisotropy: self.brush_engine.settings.paint_anisotropy,
                 };
                 match self.asset_manager.save_decal(&preset) {
                     Ok(path) => {

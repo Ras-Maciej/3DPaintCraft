@@ -610,6 +610,7 @@ impl PaintcraftApp {
                 self.commit_path_tool(ctx);
             } else if input.key_pressed(egui::Key::Escape) {
                 self.brush_engine.settings.path_tool.clear();
+                self.sync_and_evaluate_active_path_layer(ctx);
                 self.status_message = "Path cleared".to_string();
                 ctx.request_repaint();
             } else if (input.key_pressed(egui::Key::Delete) || input.key_pressed(egui::Key::Backspace))
@@ -619,6 +620,7 @@ impl PaintcraftApp {
                     if idx < self.brush_engine.settings.path_tool.points.len() {
                         self.brush_engine.settings.path_tool.points.remove(idx);
                         self.brush_engine.settings.path_tool.selected_point = None;
+                        self.sync_and_evaluate_active_path_layer(ctx);
                         self.status_message = format!("Removed path point {}", idx + 1);
                         ctx.request_repaint();
                     }
@@ -653,6 +655,7 @@ impl PaintcraftApp {
                         });
                         let new_idx = self.brush_engine.settings.path_tool.points.len() - 1;
                         self.brush_engine.settings.path_tool.selected_point = Some(new_idx);
+                        self.sync_and_evaluate_active_path_layer(ctx);
                         self.status_message = format!("Added path point {} (Enter to commit, Esc to clear)", new_idx + 1);
                     }
                     ctx.request_repaint();
@@ -708,8 +711,12 @@ impl PaintcraftApp {
                         }
                     }
                 } else if response.drag_stopped() || !input.pointer.any_down() {
+                    let was_interacting = self.brush_engine.settings.path_tool.is_dragging || self.brush_engine.settings.path_tool.is_sketching;
                     self.brush_engine.settings.path_tool.is_dragging = false;
                     self.brush_engine.settings.path_tool.is_sketching = false;
+                    if was_interacting {
+                        self.sync_and_evaluate_active_path_layer(ctx);
+                    }
                 }
             }
         }
@@ -728,7 +735,7 @@ impl PaintcraftApp {
                             let is_fill = self.project.layers[act_idx].layer_type != LayerType::Paint;
                             let is_mask = self.brush_engine.settings.target == PaintTarget::Mask;
                             if is_fill && !is_mask {
-                                self.status_message = "Cannot stamp on Fill layer. Switch target to Mask or add a Paint layer.".to_string();
+                                self.status_message = "Cannot stamp on Fill or Path layer. Switch target to Mask or add a Paint layer.".to_string();
                             } else {
                                 self.flush_pending_gpu_readbacks(ctx);
                                 if let Some(wgpu) = &mut self.wgpu_viewport {
@@ -1072,7 +1079,7 @@ impl PaintcraftApp {
                                 let is_blocked = self.brush_engine.settings.target == PaintTarget::Material
                                     && self.project.layers[act_idx].layer_type != LayerType::Paint;
                                 if is_blocked {
-                                    self.status_message = "Direct painting blocked on Fill layers. Switch target to Mask or add a Paint layer.".to_string();
+                                    self.status_message = "Direct painting blocked on Fill and Path layers. Switch target to Mask or add a Paint layer.".to_string();
                                 } else {
                                     let (effective_radius, effective_flow, effective_hardness) = self.brush_engine.settings.compute_effective_dynamics(pressure);
                                     let ray2 = self.camera.screen_to_ray(

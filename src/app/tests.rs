@@ -799,6 +799,10 @@
             metallic: 0.9,
             heat_tint: false,
             surface_offset: 0.005,
+            emissive: [0.1, 0.2, 0.3, 1.0],
+            opacity: 1.0,
+            clearcoat: 0.8,
+            anisotropy: 0.4,
         };
 
         engine.settings.stamp_tool.stroke_style = preset.stroke_style;
@@ -811,11 +815,17 @@
         engine.settings.paint_color = glam::Vec4::new(preset.base_color[0], preset.base_color[1], preset.base_color[2], preset.base_color[3]);
         engine.settings.paint_roughness = preset.roughness;
         engine.settings.paint_metallic = preset.metallic;
+        engine.settings.paint_emissive = glam::Vec4::new(preset.emissive[0], preset.emissive[1], preset.emissive[2], preset.emissive[3]);
+        engine.settings.paint_opacity = preset.opacity;
+        engine.settings.paint_clearcoat = preset.clearcoat;
+        engine.settings.paint_anisotropy = preset.anisotropy;
 
         assert_eq!(engine.settings.stamp_tool.decal_type, crate::brush::SmartDecalType::HexBolt);
         assert_eq!(engine.settings.radius, 36.0);
         assert!((engine.settings.stamp_tool.surface_offset - 0.005).abs() < 1e-4);
         assert!((engine.settings.paint_metallic - 0.9).abs() < 1e-4);
+        assert!((engine.settings.paint_clearcoat - 0.8).abs() < 1e-4);
+        assert!((engine.settings.paint_anisotropy - 0.4).abs() < 1e-4);
     }
 
     #[test]

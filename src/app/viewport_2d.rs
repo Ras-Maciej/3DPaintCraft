@@ -168,6 +168,7 @@ impl PaintcraftApp {
                     self.commit_path_tool(ctx);
                 } else if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                     self.brush_engine.settings.path_tool.clear();
+                    self.sync_and_evaluate_active_path_layer(ctx);
                     self.status_message = "Path cleared".to_string();
                     ctx.request_repaint();
                 } else if ui.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace)) {
@@ -175,6 +176,7 @@ impl PaintcraftApp {
                         if idx < self.brush_engine.settings.path_tool.points.len() {
                             self.brush_engine.settings.path_tool.points.remove(idx);
                             self.brush_engine.settings.path_tool.selected_point = None;
+                            self.sync_and_evaluate_active_path_layer(ctx);
                             self.status_message = format!("Removed path point {}", idx + 1);
                             ctx.request_repaint();
                         }
@@ -207,6 +209,7 @@ impl PaintcraftApp {
                                 });
                                 let new_idx = self.brush_engine.settings.path_tool.points.len() - 1;
                                 self.brush_engine.settings.path_tool.selected_point = Some(new_idx);
+                                self.sync_and_evaluate_active_path_layer(ctx);
                                 self.status_message = format!("Added path point {} on UV canvas (Enter to commit, Esc to clear)", new_idx + 1);
                             }
                             ctx.request_repaint();
@@ -261,14 +264,22 @@ impl PaintcraftApp {
                                 }
                             }
                         } else if response.drag_stopped() || !ui.input(|i| i.pointer.any_down()) {
+                            let was_interacting = self.brush_engine.settings.path_tool.is_dragging || self.brush_engine.settings.path_tool.is_sketching;
                             self.brush_engine.settings.path_tool.is_dragging = false;
                             self.brush_engine.settings.path_tool.is_sketching = false;
+                            if was_interacting {
+                                self.sync_and_evaluate_active_path_layer(ctx);
+                            }
                         }
                     }
                 }
                 if response.drag_stopped() || !ui.input(|i| i.pointer.any_down()) {
+                    let was_interacting = self.brush_engine.settings.path_tool.is_dragging || self.brush_engine.settings.path_tool.is_sketching;
                     self.brush_engine.settings.path_tool.is_dragging = false;
                     self.brush_engine.settings.path_tool.is_sketching = false;
+                    if was_interacting {
+                        self.sync_and_evaluate_active_path_layer(ctx);
+                    }
                 }
             }
             // 2D Decal Stamp Tool Interaction
@@ -284,7 +295,7 @@ impl PaintcraftApp {
                                 let is_fill = self.project.layers[act_idx].layer_type != LayerType::Paint;
                                 let is_mask = self.brush_engine.settings.target == PaintTarget::Mask;
                                 if is_fill && !is_mask {
-                                    self.status_message = "Cannot stamp on Fill layer. Switch target to Mask or add a Paint layer.".to_string();
+                                    self.status_message = "Cannot stamp on Fill or Path layer. Switch target to Mask or add a Paint layer.".to_string();
                                 } else {
                                     self.flush_pending_gpu_readbacks(ctx);
                                     if let Some(wgpu) = &mut self.wgpu_viewport {
@@ -563,8 +574,8 @@ impl PaintcraftApp {
                                                 }
                                                 ctx.request_repaint();
                                                 self.status_message = format!("2D Polygon Fill ({}) filled {} triangles with material", mode.name(), new_tris.len());
-                                            } else {
-                                                self.status_message = "Cannot fill material on Fill layer. Switch target to Mask or add a Paint layer.".to_string();
+                                             } else {
+                                                self.status_message = "Cannot fill material on Fill or Path layer. Switch target to Mask or add a Paint layer.".to_string();
                                             }
                                         }
                                     }
@@ -577,7 +588,7 @@ impl PaintcraftApp {
                             if act_idx < self.project.layers.len() {
                                 let is_paint = self.project.layers[act_idx].layer_type == LayerType::Paint;
                                 if self.brush_engine.settings.target == PaintTarget::Material && !is_paint {
-                                    self.status_message = "Direct painting blocked on Fill layers. Switch target to Mask or add a Paint layer.".to_string();
+                                    self.status_message = "Direct painting blocked on Fill and Path layers. Switch target to Mask or add a Paint layer.".to_string();
                                 } else {
                                     let pressure = ui.input(|i| {
                                         i.events.iter().find_map(|e| match e {
