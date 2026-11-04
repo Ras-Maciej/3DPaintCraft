@@ -3229,7 +3229,7 @@ impl eframe::App for PaintcraftApp {
         if !self.zen_mode {
             egui::SidePanel::left("left_toolbar")
             .resizable(false)
-            .exact_width(42.0)
+            .exact_width(46.0)
             .show(ctx, |ui| {
                 ui.vertical_centered(|ui| {
                     ui.add_space(4.0);
@@ -3237,7 +3237,7 @@ impl eframe::App for PaintcraftApp {
                     // Helper to render high-polish tool card with icon
                     let opt_icons = self.icons.as_ref();
                     let render_tool_button = |ui: &mut egui::Ui, active: bool, opt_tex: Option<egui::TextureId>, fallback_glyph: &str, label: &str, tip: &str| -> bool {
-                        let btn_size = egui::vec2(34.0, 34.0);
+                        let btn_size = egui::vec2(38.0, 42.0);
                         let (rect, resp) = ui.allocate_exact_size(btn_size, egui::Sense::click());
                         let bg = if active {
                             Color32::from_rgb(52, 56, 65)
@@ -3247,17 +3247,17 @@ impl eframe::App for PaintcraftApp {
                             Color32::from_rgb(26, 28, 32)
                         };
                         let stroke = if active {
-                            egui::Stroke::new(1.5_f32, Color32::from_rgb(180, 185, 195))
+                            egui::Stroke::new(1.5_f32, Color32::from_rgb(243, 94, 24))
                         } else if resp.hovered() {
                             egui::Stroke::new(1.0_f32, Color32::from_rgb(60, 65, 75))
                         } else {
                             egui::Stroke::new(1.0_f32, Color32::from_rgb(34, 36, 40))
                         };
 
-                        ui.painter().rect(rect, 3.0, bg, stroke);
+                        ui.painter().rect(rect, 4.0, bg, stroke);
 
                         if let Some(tex_id) = opt_tex {
-                            let icon_rect = egui::Rect::from_center_size(egui::pos2(rect.center().x, rect.min.y + 13.0), egui::vec2(18.0, 18.0));
+                            let icon_rect = egui::Rect::from_center_size(egui::pos2(rect.center().x, rect.min.y + 16.0), egui::vec2(22.0, 22.0));
                             ui.painter().image(
                                 tex_id,
                                 icon_rect,
@@ -3266,23 +3266,23 @@ impl eframe::App for PaintcraftApp {
                             );
                         } else {
                             // Tool glyph centered top
-                            let glyph_pos = egui::pos2(rect.center().x, rect.min.y + 10.0);
+                            let glyph_pos = egui::pos2(rect.center().x, rect.min.y + 14.0);
                             ui.painter().text(
                                 glyph_pos,
                                 egui::Align2::CENTER_CENTER,
                                 fallback_glyph,
-                                egui::FontId::proportional(11.0),
+                                egui::FontId::proportional(12.0),
                                 if active { Color32::WHITE } else { Color32::from_rgb(190, 195, 205) },
                             );
                         }
 
                         // Tool label centered bottom
-                        let label_pos = egui::pos2(rect.center().x, rect.max.y - 6.0);
+                        let label_pos = egui::pos2(rect.center().x, rect.max.y - 7.0);
                         ui.painter().text(
                             label_pos,
                             egui::Align2::CENTER_CENTER,
                             label,
-                            egui::FontId::proportional(7.5),
+                            egui::FontId::proportional(8.0),
                             if active { Color32::from_rgb(235, 240, 250) } else { Color32::from_rgb(130, 135, 145) },
                         );
 
@@ -3363,7 +3363,8 @@ impl eframe::App for PaintcraftApp {
 
                     // 9. Decal Stamp Tool [8 / D]
                     let is_stamp = self.brush_engine.settings.mode == ToolMode::Stamp;
-                    if render_tool_button(ui, is_stamp, None, "8", "Stamp", "Decal Stamp Tool [8 / D]") {
+                    let stamp_tex = opt_icons.map(|i| i.stamp.id());
+                    if render_tool_button(ui, is_stamp, stamp_tex, "8", "Stamp", "Decal Stamp Tool [8 / D]") {
                         self.brush_engine.settings.mode = ToolMode::Stamp;
                         self.status_message = "Tool: Decal Stamp Tool [8/D]".to_string();
                     }
@@ -3419,28 +3420,26 @@ impl eframe::App for PaintcraftApp {
             egui::SidePanel::right("right_panel")
                 .resizable(true)
                 .default_width(self.workspace.right_panel_width)
-                .min_width(280.0)
+                .min_width(180.0)
                 .max_width(700.0)
                 .show(ctx, |ui| {
-                    self.workspace.right_panel_width = ui.available_width().max(280.0);
+                    self.workspace.right_panel_width = ui.available_width().max(180.0);
 
                     // 1. Texture Set List (if docked)
                     if self.workspace.show_texture_sets && !self.workspace.texture_sets_floating {
                         ui.group(|ui| {
-                            ui.horizontal(|ui| {
+                            ui.horizontal_wrapped(|ui| {
                                 let col_btn = if self.workspace.texture_sets_collapsed { "[+]" } else { "[-]" };
                                 if ui.small_button(col_btn).on_hover_text("Collapse/Expand Texture Set List").clicked() {
                                     self.workspace.texture_sets_collapsed = !self.workspace.texture_sets_collapsed;
                                 }
-                                ui.strong(egui::RichText::new("TEXTURE SET LIST").size(10.5).color(Color32::from_rgb(175, 180, 190)));
+                                ui.strong(egui::RichText::new("TEXTURE SETS").size(10.5).color(Color32::from_rgb(175, 180, 190)));
                                 ui.label(egui::RichText::new(format!("[{}]", self.project.texture_sets.len())).small().color(Color32::from_rgb(226, 91, 16)));
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    if ui.small_button("↗ Pop Out").on_hover_text("Undock Texture Set List into floating window").clicked() {
-                                        self.workspace.texture_sets_floating = true;
-                                    }
-                                    ui.checkbox(&mut self.project.auto_switch_texture_set, "Auto-Switch")
-                                        .on_hover_text("Automatically activate Texture Set when painting or clicking on its sub-mesh in the 3D viewport");
-                                });
+                                ui.checkbox(&mut self.project.auto_switch_texture_set, "Auto")
+                                    .on_hover_text("Automatically switch texture set on 3D viewport click");
+                                if ui.small_button("↗").on_hover_text("Undock Texture Set List into floating window").clicked() {
+                                    self.workspace.texture_sets_floating = true;
+                                }
                             });
 
                             if !self.workspace.texture_sets_collapsed {
@@ -3455,18 +3454,16 @@ impl eframe::App for PaintcraftApp {
                     let props_docked = self.workspace.show_properties && !self.workspace.properties_floating;
 
                     if layers_docked {
-                        ui.horizontal(|ui| {
+                        ui.horizontal_wrapped(|ui| {
                             let col_btn = if self.workspace.layers_collapsed { "[+]" } else { "[-]" };
                             if ui.small_button(col_btn).on_hover_text("Collapse/Expand Layers Panel").clicked() {
                                 self.workspace.layers_collapsed = !self.workspace.layers_collapsed;
                             }
                             ui.selectable_value(&mut self.right_panel_tab, RightPanelTab::Layers, "Layers");
                             ui.selectable_value(&mut self.right_panel_tab, RightPanelTab::MeshMaps, "Mesh Maps");
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if ui.small_button("↗ Pop Out").on_hover_text("Undock Layers Stack into floating window").clicked() {
-                                    self.workspace.layers_floating = true;
-                                }
-                            });
+                            if ui.small_button("↗").on_hover_text("Undock Layers Stack into floating window").clicked() {
+                                self.workspace.layers_floating = true;
+                            }
                         });
                         ui.separator();
 
@@ -3507,17 +3504,15 @@ impl eframe::App for PaintcraftApp {
 
                     // 4. Properties Panel (if docked and RightPanelTab is Layers)
                     if props_docked && self.right_panel_tab == RightPanelTab::Layers {
-                        ui.horizontal(|ui| {
+                        ui.horizontal_wrapped(|ui| {
                             let col_btn = if self.workspace.properties_collapsed { "[+]" } else { "[-]" };
                             if ui.small_button(col_btn).on_hover_text("Collapse/Expand Properties Panel").clicked() {
                                 self.workspace.properties_collapsed = !self.workspace.properties_collapsed;
                             }
                             ui.strong(egui::RichText::new("PROPERTIES").size(11.0).color(Color32::from_rgb(220, 225, 235)));
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if ui.small_button("↗ Pop Out").on_hover_text("Undock Properties into floating window").clicked() {
-                                    self.workspace.properties_floating = true;
-                                }
-                            });
+                            if ui.small_button("↗").on_hover_text("Undock Properties into floating window").clicked() {
+                                self.workspace.properties_floating = true;
+                            }
                         });
                         ui.separator();
 

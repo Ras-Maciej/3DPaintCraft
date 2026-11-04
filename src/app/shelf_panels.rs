@@ -120,8 +120,9 @@ impl PaintcraftApp {
                     Vec::new()
                 };
 
-                let card_w = 95.0;
-                let card_h = 105.0;
+                let card_w = 95.0_f32;
+                let thumb_w = card_w - 10.0;
+                let card_h = thumb_w + 24.0;
 
                 egui::ScrollArea::vertical()
                     .id_source("shelf_picker_scroll")
@@ -160,7 +161,7 @@ impl PaintcraftApp {
                                         // Thumbnail
                                         let thumb_rect = egui::Rect::from_min_size(
                                             egui::pos2(card_rect.min.x + 5.0, card_rect.min.y + 5.0),
-                                            egui::vec2(card_w - 10.0, card_w - 24.0),
+                                            egui::vec2(thumb_w, thumb_w),
                                         );
 
                                         if let Some(tex) = self.shelf_thumbnails.get(&res.id) {
@@ -236,7 +237,7 @@ impl PaintcraftApp {
 
                                         let thumb_rect = egui::Rect::from_min_size(
                                             egui::pos2(card_rect.min.x + 5.0, card_rect.min.y + 5.0),
-                                            egui::vec2(card_w - 10.0, card_w - 24.0),
+                                            egui::vec2(thumb_w, thumb_w),
                                         );
                                         ui.painter().rect_filled(thumb_rect, 2.0, Color32::from_rgb(24, 26, 32));
 
@@ -321,7 +322,7 @@ impl PaintcraftApp {
 
                                         let thumb_rect = egui::Rect::from_min_size(
                                             egui::pos2(card_rect.min.x + 5.0, card_rect.min.y + 5.0),
-                                            egui::vec2(card_w - 10.0, card_w - 24.0),
+                                            egui::vec2(thumb_w, thumb_w),
                                         );
                                         draw_hdri_thumbnail(ui.painter(), thumb_rect, &hdri.id, &hdri.name);
 
@@ -773,7 +774,8 @@ impl PaintcraftApp {
         // Adaptive Grid in Vertical ScrollArea (wide in bottom shelf dock, compact in left dock)
         let avail_w = ui.available_width();
         let card_w = 78.0_f32;
-        let card_h = card_w + 16.0;
+        let thumb_w = card_w - 10.0;
+        let card_h = thumb_w + 24.0;
         let cols = ((avail_w - 6.0) / (card_w + 4.0)).floor().max(2.0) as usize;
 
         if self.shelf_category == crate::shelf::ShelfCategory::Environments {
@@ -826,7 +828,7 @@ impl PaintcraftApp {
                                     // Preview thumbnail
                                     let preview_rect = egui::Rect::from_min_size(
                                         egui::pos2(rect.min.x + 5.0, rect.min.y + 5.0),
-                                        egui::vec2(card_w - 10.0, card_w - 18.0),
+                                        egui::vec2(thumb_w, thumb_w),
                                     );
                                     draw_hdri_thumbnail(ui.painter(), preview_rect, &hdri.id, &hdri.name);
 
@@ -936,7 +938,7 @@ impl PaintcraftApp {
                                     // Preview Sphere / Swatch
                                     let preview_rect = egui::Rect::from_min_size(
                                         egui::pos2(rect.min.x + 5.0, rect.min.y + 5.0),
-                                        egui::vec2(card_w - 10.0, card_w - 18.0),
+                                        egui::vec2(thumb_w, thumb_w),
                                     );
                                     let center = preview_rect.center();
                                     let radius = (preview_rect.width() * 0.40).min(18.0);
@@ -1122,7 +1124,7 @@ impl PaintcraftApp {
                                     // Preview thumbnail
                                     let preview_rect = egui::Rect::from_min_size(
                                         egui::pos2(rect.min.x + 5.0, rect.min.y + 5.0),
-                                        egui::vec2(card_w - 10.0, card_w - 18.0),
+                                        egui::vec2(thumb_w, thumb_w),
                                     );
                                     if let Some(thumb) = self.shelf_thumbnails.get(&res.id) {
                                         ui.painter().image(
@@ -1228,7 +1230,7 @@ impl PaintcraftApp {
 
                                     let preview_rect = egui::Rect::from_min_size(
                                         egui::pos2(rect.min.x + 5.0, rect.min.y + 5.0),
-                                        egui::vec2(card_w - 10.0, card_w - 18.0),
+                                        egui::vec2(thumb_w, thumb_w),
                                     );
                                     if let Some(thumb) = self.shelf_thumbnails.get(&res.id) {
                                         ui.painter().image(
@@ -1313,7 +1315,7 @@ impl PaintcraftApp {
 
                                     let preview_rect = egui::Rect::from_min_size(
                                         egui::pos2(rect.min.x + 5.0, rect.min.y + 5.0),
-                                        egui::vec2(card_w - 10.0, card_w - 18.0),
+                                        egui::vec2(thumb_w, thumb_w),
                                     );
                                     let center = preview_rect.center();
                                     let radius = (preview_rect.width() * 0.40).min(18.0);
@@ -1385,7 +1387,7 @@ impl PaintcraftApp {
 
                                     let preview_rect = egui::Rect::from_min_size(
                                         egui::pos2(rect.min.x + 5.0, rect.min.y + 5.0),
-                                        egui::vec2(card_w - 10.0, card_w - 18.0),
+                                        egui::vec2(thumb_w, thumb_w),
                                     );
                                     let center = preview_rect.center();
                                     let radius = (preview_rect.width() * 0.38).min(17.0);
@@ -1486,7 +1488,7 @@ impl PaintcraftApp {
                             // Draw preview thumbnail depending on category
                             let preview_rect = egui::Rect::from_min_size(
                                 egui::pos2(rect.min.x + 5.0, rect.min.y + 5.0),
-                                egui::vec2(card_w - 10.0, card_w - 18.0),
+                                egui::vec2(thumb_w, thumb_w),
                             );
 
                             match asset.category {

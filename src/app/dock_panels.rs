@@ -17,7 +17,7 @@ impl PaintcraftApp {
                                 let is_active = idx == self.project.active_texture_set_idx;
                                 let is_visible = ts.visible;
                                 
-                                ui.horizontal(|ui| {
+                                ui.horizontal_wrapped(|ui| {
                                     // Eye visibility toggle
                                     let eye_txt = if is_visible { "[V]" } else { "[ ]" };
                                     let eye_col = if is_visible { Color32::from_rgb(220, 225, 235) } else { Color32::from_rgb(100, 105, 115) };
@@ -72,7 +72,7 @@ impl PaintcraftApp {
                         });
 
                     // Active Texture Set size selector and quick actions
-                    ui.horizontal(|ui| {
+                    ui.horizontal_wrapped(|ui| {
                         ui.label(egui::RichText::new("Size:").small().color(Color32::from_rgb(140, 145, 155)));
                         let res_list = [512, 1024, 2048, 4096];
                         for &r in &res_list {
@@ -93,35 +93,33 @@ impl PaintcraftApp {
                             }
                         }
 
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if self.project.texture_sets.len() > 1 {
-                                if ui.small_button("Del").on_hover_text("Delete active texture set").clicked() {
-                                    let cur_idx = self.project.active_texture_set_idx;
-                                    self.project.delete_texture_set(cur_idx);
-                                    if let Some(wgpu) = &mut self.wgpu_viewport {
-                                        wgpu.sync_textures(&mut self.project);
-                                    }
-                                }
-                            }
-                            if ui.small_button("Dup").on_hover_text("Duplicate active texture set").clicked() {
+                        if self.project.texture_sets.len() > 1 {
+                            if ui.small_button("Del").on_hover_text("Delete active texture set").clicked() {
                                 let cur_idx = self.project.active_texture_set_idx;
-                                self.project.duplicate_texture_set(cur_idx);
+                                self.project.delete_texture_set(cur_idx);
                                 if let Some(wgpu) = &mut self.wgpu_viewport {
                                     wgpu.sync_textures(&mut self.project);
                                 }
                             }
-                            if ui.small_button("+ Set").on_hover_text("Add new empty Texture Set").clicked() {
-                                let new_id = self.project.texture_sets.len() + 1;
-                                self.project.add_texture_set(
-                                    format!("Material_{}", new_id),
-                                    format!("Material_{}", new_id),
-                                    vec![],
-                                );
-                                if let Some(wgpu) = &mut self.wgpu_viewport {
-                                    wgpu.sync_textures(&mut self.project);
-                                }
+                        }
+                        if ui.small_button("Dup").on_hover_text("Duplicate active texture set").clicked() {
+                            let cur_idx = self.project.active_texture_set_idx;
+                            self.project.duplicate_texture_set(cur_idx);
+                            if let Some(wgpu) = &mut self.wgpu_viewport {
+                                wgpu.sync_textures(&mut self.project);
                             }
-                        });
+                        }
+                        if ui.small_button("+ Set").on_hover_text("Add new empty Texture Set").clicked() {
+                            let new_id = self.project.texture_sets.len() + 1;
+                            self.project.add_texture_set(
+                                format!("Material_{}", new_id),
+                                format!("Material_{}", new_id),
+                                vec![],
+                            );
+                            if let Some(wgpu) = &mut self.wgpu_viewport {
+                                wgpu.sync_textures(&mut self.project);
+                            }
+                        }
                     });
     }
 
@@ -134,7 +132,7 @@ impl PaintcraftApp {
                 ui.set_height(layers_pane_height);
             }
                         // Layers Window Header & Active Blend / Opacity Controls
-                        ui.horizontal(|ui| {
+                        ui.horizontal_wrapped(|ui| {
                             ui.heading("Layers");
 
                             // Substance 3D Painter Layer Stack Channel Selector
@@ -169,7 +167,7 @@ impl PaintcraftApp {
                             let mut cur_mode = act_layer.get_channel_blend_mode(cur_ch);
                             let mut cur_ch_op = act_layer.get_channel_opacity(cur_ch);
 
-                            ui.horizontal(|ui| {
+                            ui.horizontal_wrapped(|ui| {
                                 ui.label("Blend:");
                                 egui::ComboBox::from_id_source("active_layer_channel_blend_mode")
                                     .selected_text(cur_mode.name())
@@ -195,18 +193,18 @@ impl PaintcraftApp {
                                     });
 
                                 ui.label("Opac:");
-                                if ui.add_sized([55.0, 18.0], egui::Slider::new(&mut cur_ch_op, 0.0..=1.0)).changed() {
+                                if ui.add_sized([50.0, 18.0], egui::Slider::new(&mut cur_ch_op, 0.0..=1.0)).changed() {
                                     act_layer.set_channel_opacity(cur_ch, cur_ch_op);
                                     blend_or_opacity_changed = true;
                                 }
 
-                                ui.label("Layer:");
-                                if ui.add_sized([45.0, 18.0], egui::Slider::new(&mut act_layer.opacity, 0.0..=1.0)).on_hover_text("Master layer opacity").changed() {
+                                ui.label("Lyr:");
+                                if ui.add_sized([42.0, 18.0], egui::Slider::new(&mut act_layer.opacity, 0.0..=1.0)).on_hover_text("Master layer opacity").changed() {
                                     blend_or_opacity_changed = true;
                                 }
                             });
                         }
-    
+
                         if blend_or_opacity_changed {
                             if self.wgpu_viewport.is_some() && ui.input(|i| i.pointer.any_down()) {
                                 self.project.gpu_sync_needed = true;
@@ -215,7 +213,7 @@ impl PaintcraftApp {
                                 self.project.rebuild_composite();
                             }
                         }
-    
+
                         // Layer Stack Toolbar
                         let mut delete_layer_requested = false;
 
@@ -233,8 +231,8 @@ impl PaintcraftApp {
                         let mut save_as_mat_requested = false;
 
                         // Modern Uniform Icon Toolbar for Layers Stack
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing = egui::vec2(3.0, 0.0);
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing = egui::vec2(2.0, 2.0);
 
                             let render_tb_btn = |ui: &mut egui::Ui, tex_id: Option<egui::TextureId>, fallback_glyph: &str, tip: &str| -> egui::Response {
                                 let btn_size = egui::vec2(28.0, 24.0);
@@ -788,7 +786,7 @@ impl PaintcraftApp {
                                                     let name_text = egui::RichText::new(&layer.name)
                                                         .color(name_color)
                                                         .strong();
-                                                    let name_resp = ui.add(egui::Label::new(name_text).selectable(false).sense(egui::Sense::click_and_drag()))
+                                                    let name_resp = ui.add(egui::Label::new(name_text).truncate().selectable(false).sense(egui::Sense::click_and_drag()))
                                                         .on_hover_text("Click to select material • Drag to reorder • Double-click to rename");
 
                                                     if name_resp.drag_started() {
@@ -2144,7 +2142,7 @@ impl PaintcraftApp {
                                     // 2. Material Channel Toggles (Substance Painter iconic pill buttons)
                                     ui.group(|ui| {
                                         ui.label("Material Channels:");
-                                        ui.horizontal(|ui| {
+                                        ui.horizontal_wrapped(|ui| {
                                             if channel_pill_button(ui, "color", layer.channel_flags.base_color).clicked() {
                                                 layer.channel_flags.base_color = !layer.channel_flags.base_color;
                                                 prop_changed = true;
@@ -2604,7 +2602,7 @@ impl PaintcraftApp {
     
                                     ui.group(|ui| {
                                         ui.label("Material Stamp Channels:");
-                                        ui.horizontal(|ui| {
+                                        ui.horizontal_wrapped(|ui| {
                                             if channel_pill_button(ui, "color", self.brush_engine.settings.channels.base_color).clicked() {
                                                 self.brush_engine.settings.channels.base_color = !self.brush_engine.settings.channels.base_color;
                                             }
@@ -2633,9 +2631,9 @@ impl PaintcraftApp {
                                                 self.brush_engine.settings.channels.anisotropy = !self.brush_engine.settings.channels.anisotropy;
                                             }
                                         });
-    
+
                                         if self.brush_engine.settings.channels.base_color {
-                                            ui.horizontal(|ui| {
+                                            ui.horizontal_wrapped(|ui| {
                                                 ui.label("Base Color:");
                                                 crate::color_picker::color_picker_button_vec4(
                                                     ui,
@@ -2649,7 +2647,7 @@ impl PaintcraftApp {
                                                 ));
                                             });
                                         }
-    
+
                                         if self.brush_engine.settings.channels.roughness {
                                             ui.add(egui::Slider::new(&mut self.brush_engine.settings.paint_roughness, 0.0..=1.0).text("Roughness"));
                                         }
@@ -2657,7 +2655,7 @@ impl PaintcraftApp {
                                             ui.add(egui::Slider::new(&mut self.brush_engine.settings.paint_metallic, 0.0..=1.0).text("Metallic"));
                                         }
                                         if self.brush_engine.settings.channels.normal {
-                                            ui.horizontal(|ui| {
+                                            ui.horizontal_wrapped(|ui| {
                                                 ui.add(egui::Slider::new(&mut self.brush_engine.settings.paint_normal_intensity, 0.0..=2.0).text("Normal Intensity"));
                                                 if ui.small_button("Reset (1.0)").clicked() {
                                                     self.brush_engine.settings.paint_normal_intensity = 1.0;
@@ -2668,7 +2666,7 @@ impl PaintcraftApp {
                                             ui.add(egui::Slider::new(&mut self.brush_engine.settings.paint_height, 0.0..=1.0).text("Height"));
                                         }
                                         if self.brush_engine.settings.channels.emission {
-                                            ui.horizontal(|ui| {
+                                            ui.horizontal_wrapped(|ui| {
                                                 ui.label("Emission:");
                                                 crate::color_picker::color_picker_button_vec4(
                                                     ui,
@@ -2684,7 +2682,7 @@ impl PaintcraftApp {
                                             ui.add(egui::Slider::new(&mut self.brush_engine.settings.paint_emissive.w, 0.0..=10.0).text("Emission Intensity"));
                                         }
                                         if self.brush_engine.settings.channels.opacity {
-                                            ui.horizontal(|ui| {
+                                            ui.horizontal_wrapped(|ui| {
                                                 ui.add(egui::Slider::new(&mut self.brush_engine.settings.paint_opacity, 0.0..=1.0).text("Opacity"));
                                                 if ui.small_button("Hole (0%)").clicked() {
                                                     self.brush_engine.settings.paint_opacity = 0.0;
@@ -2778,7 +2776,7 @@ impl PaintcraftApp {
                             ui.label(format!("Triangles: {}", self.project.mesh.indices.len() / 3));
                             ui.label(format!("Working Resolution: {} x {}", self.project.texture_width, self.project.texture_height));
 
-                            ui.horizontal(|ui| {
+                            ui.horizontal_wrapped(|ui| {
                                 ui.label("Change Resolution:");
                                 let res_options = [512, 1024, 2048, 4096];
                                 egui::ComboBox::from_id_source("texture_set_res_select")
@@ -2823,7 +2821,7 @@ impl PaintcraftApp {
                             .show(ui, |ui| {
                                 // 1. Normal Map (Tangent Space)
                                 ui.group(|ui| {
-                                    ui.horizontal(|ui| {
+                                    ui.horizontal_wrapped(|ui| {
                                         ui.strong("Normal (Tangent Space):");
                                         if self.project.world_normal_map.is_some() {
                                             ui.colored_label(egui::Color32::from_rgb(80, 220, 120), "Active");
@@ -2831,7 +2829,7 @@ impl PaintcraftApp {
                                             ui.colored_label(egui::Color32::from_rgb(160, 160, 160), "Not Baked");
                                         }
                                     });
-                                    ui.horizontal(|ui| {
+                                    ui.horizontal_wrapped(|ui| {
                                         if ui.button("Shelf...").on_hover_text("Select Normal map from Project Shelf").clicked() {
                                             self.shelf_picker = Some(ShelfPickerState::new(ShelfPickerTarget::MeshMapTangentNormal));
                                         }
@@ -2860,7 +2858,7 @@ impl PaintcraftApp {
 
                                 // 2. Ambient Occlusion (AO)
                                 ui.group(|ui| {
-                                    ui.horizontal(|ui| {
+                                    ui.horizontal_wrapped(|ui| {
                                         ui.strong("Ambient Occlusion (AO):");
                                         if self.project.ao_map.is_some() {
                                             ui.colored_label(egui::Color32::from_rgb(80, 220, 120), "Active");
@@ -2868,7 +2866,7 @@ impl PaintcraftApp {
                                             ui.colored_label(egui::Color32::from_rgb(160, 160, 160), "Not Baked");
                                         }
                                     });
-                                    ui.horizontal(|ui| {
+                                    ui.horizontal_wrapped(|ui| {
                                         if ui.button("Shelf...").on_hover_text("Select AO map from Project Shelf").clicked() {
                                             self.shelf_picker = Some(ShelfPickerState::new(ShelfPickerTarget::MeshMapAo));
                                         }
@@ -2897,7 +2895,7 @@ impl PaintcraftApp {
 
                                 // 3. Curvature Map
                                 ui.group(|ui| {
-                                    ui.horizontal(|ui| {
+                                    ui.horizontal_wrapped(|ui| {
                                         ui.strong("Curvature:");
                                         if self.project.curvature_map.is_some() {
                                             ui.colored_label(egui::Color32::from_rgb(80, 220, 120), "Active");
@@ -2905,7 +2903,7 @@ impl PaintcraftApp {
                                             ui.colored_label(egui::Color32::from_rgb(160, 160, 160), "Not Baked");
                                         }
                                     });
-                                    ui.horizontal(|ui| {
+                                    ui.horizontal_wrapped(|ui| {
                                         if ui.button("Shelf...").on_hover_text("Select Curvature map from Project Shelf").clicked() {
                                             self.shelf_picker = Some(ShelfPickerState::new(ShelfPickerTarget::MeshMapCurvature));
                                         }
@@ -2934,7 +2932,7 @@ impl PaintcraftApp {
 
                                 // 4. World Space Normal Map
                                 ui.group(|ui| {
-                                    ui.horizontal(|ui| {
+                                    ui.horizontal_wrapped(|ui| {
                                         ui.strong("World Space Normal:");
                                         if self.project.world_space_normal_map.is_some() {
                                             ui.colored_label(egui::Color32::from_rgb(80, 220, 120), "Active");
@@ -2942,7 +2940,7 @@ impl PaintcraftApp {
                                             ui.colored_label(egui::Color32::from_rgb(160, 160, 160), "Not Baked");
                                         }
                                     });
-                                    ui.horizontal(|ui| {
+                                    ui.horizontal_wrapped(|ui| {
                                         if ui.button("Shelf...").on_hover_text("Select World Space Normal map from Project Shelf").clicked() {
                                             self.shelf_picker = Some(ShelfPickerState::new(ShelfPickerTarget::MeshMapWorldSpaceNormal));
                                         }
@@ -2971,7 +2969,7 @@ impl PaintcraftApp {
 
                                 // 5. Position Map (WPO)
                                 ui.group(|ui| {
-                                    ui.horizontal(|ui| {
+                                    ui.horizontal_wrapped(|ui| {
                                         ui.strong("Position (WPO):");
                                         if self.project.position_map.is_some() {
                                             ui.colored_label(egui::Color32::from_rgb(80, 220, 120), "Active");
@@ -2979,7 +2977,7 @@ impl PaintcraftApp {
                                             ui.colored_label(egui::Color32::from_rgb(160, 160, 160), "Not Baked");
                                         }
                                     });
-                                    ui.horizontal(|ui| {
+                                    ui.horizontal_wrapped(|ui| {
                                         if ui.button("Shelf...").on_hover_text("Select Position map from Project Shelf").clicked() {
                                             self.shelf_picker = Some(ShelfPickerState::new(ShelfPickerTarget::MeshMapPosition));
                                         }
@@ -3008,7 +3006,7 @@ impl PaintcraftApp {
 
                                 // 6. Thickness Map
                                 ui.group(|ui| {
-                                    ui.horizontal(|ui| {
+                                    ui.horizontal_wrapped(|ui| {
                                         ui.strong("Thickness:");
                                         if self.project.thickness_map.is_some() {
                                             ui.colored_label(egui::Color32::from_rgb(80, 220, 120), "Active");
@@ -3016,7 +3014,7 @@ impl PaintcraftApp {
                                             ui.colored_label(egui::Color32::from_rgb(160, 160, 160), "Not Baked");
                                         }
                                     });
-                                    ui.horizontal(|ui| {
+                                    ui.horizontal_wrapped(|ui| {
                                         if ui.button("Shelf...").on_hover_text("Select Thickness map from Project Shelf").clicked() {
                                             self.shelf_picker = Some(ShelfPickerState::new(ShelfPickerTarget::MeshMapThickness));
                                         }
@@ -3054,7 +3052,7 @@ impl PaintcraftApp {
 
                                 // 7. ID Map
                                 ui.group(|ui| {
-                                    ui.horizontal(|ui| {
+                                    ui.horizontal_wrapped(|ui| {
                                         ui.strong("ID (Color Mask):");
                                         if self.project.id_map.is_some() {
                                             ui.colored_label(egui::Color32::from_rgb(80, 220, 120), "Active");
@@ -3062,7 +3060,7 @@ impl PaintcraftApp {
                                             ui.colored_label(egui::Color32::from_rgb(160, 160, 160), "Not Baked");
                                         }
                                     });
-                                    ui.horizontal(|ui| {
+                                    ui.horizontal_wrapped(|ui| {
                                         if ui.button("Shelf...").on_hover_text("Select ID map from Project Shelf").clicked() {
                                             self.shelf_picker = Some(ShelfPickerState::new(ShelfPickerTarget::MeshMapId));
                                         }

@@ -282,6 +282,7 @@ pub struct AppIcons {
     pub clone: TextureHandle,
     pub picker: TextureHandle,
     pub path_tool: TextureHandle,
+    pub stamp: TextureHandle,
     pub shelf: TextureHandle,
     pub layer_paint: TextureHandle,
     pub layer_fill: TextureHandle,
@@ -309,6 +310,7 @@ impl AppIcons {
         let clone = Self::load_or_generate(ctx, &assets_dir, "tool_clone.png", generate_clone_icon);
         let picker = Self::load_or_generate(ctx, &assets_dir, "tool_picker.png", generate_picker_icon);
         let path_tool = Self::load_or_generate(ctx, &assets_dir, "tool_path.png", generate_path_tool_icon);
+        let stamp = Self::load_or_generate(ctx, &assets_dir, "tool_stamp.png", generate_stamp_icon);
         let shelf = Self::load_or_generate(ctx, &assets_dir, "tool_shelf.png", generate_shelf_icon);
 
         let layer_paint = Self::load_or_generate(ctx, &assets_dir, "layer_paint.png", generate_layer_paint_icon);
@@ -332,6 +334,7 @@ impl AppIcons {
             clone,
             picker,
             path_tool,
+            stamp,
             shelf,
             layer_paint,
             layer_fill,
@@ -473,6 +476,23 @@ pub fn generate_path_tool_icon() -> IconCanvas {
     c.draw_rect(20.0, 24.0, 28.0, 32.0, 255, 255, 255, 255);
     c.draw_rect(36.0, 32.0, 44.0, 40.0, 255, 255, 255, 255);
     c.draw_rect(46.0, 10.0, 54.0, 18.0, 255, 255, 255, 255);
+    c
+}
+
+pub fn generate_stamp_icon() -> IconCanvas {
+    let mut c = IconCanvas::new(64, 64);
+    // Stamp tool knob and stem
+    c.draw_circle(32.0, 14.0, 6.0, 255, 255, 255, 255);
+    c.draw_line(32.0, 18.0, 32.0, 30.0, 5.0, 255, 255, 255, 255);
+    // Stamp base plate
+    c.draw_rect(16.0, 30.0, 48.0, 38.0, 255, 255, 255, 255);
+    // Rubber stamp pad
+    c.draw_rect(18.0, 38.0, 46.0, 43.0, 255, 255, 255, 255);
+    // Star decal imprint beneath
+    c.draw_line(32.0, 47.0, 32.0, 57.0, 2.5, 255, 255, 255, 255);
+    c.draw_line(27.0, 52.0, 37.0, 52.0, 2.5, 255, 255, 255, 255);
+    c.draw_line(28.0, 48.0, 36.0, 56.0, 2.0, 255, 255, 255, 255);
+    c.draw_line(28.0, 56.0, 36.0, 48.0, 2.0, 255, 255, 255, 255);
     c
 }
 
@@ -652,6 +672,7 @@ mod tests {
             ("tool_clone.png", generate_clone_icon()),
             ("tool_picker.png", generate_picker_icon()),
             ("tool_path.png", generate_path_tool_icon()),
+            ("tool_stamp.png", generate_stamp_icon()),
             ("tool_shelf.png", generate_shelf_icon()),
             ("layer_paint.png", generate_layer_paint_icon()),
             ("layer_fill.png", generate_layer_fill_icon()),
