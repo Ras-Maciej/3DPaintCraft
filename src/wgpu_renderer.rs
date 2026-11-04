@@ -2204,12 +2204,26 @@ fn blur_equirectangular(
             if self.submeshes.is_empty() {
                 shadow_pass.draw_indexed(0..self.index_count, 0, 0..1);
             } else {
+                let mut batch_start: Option<u32> = None;
+                let mut batch_count: u32 = 0;
                 for sm in &self.submeshes {
                     if sm.visible && sm.index_count > 0 {
                         let start = sm.start_index as u32;
                         let count = sm.index_count as u32;
-                        shadow_pass.draw_indexed(start..(start + count), 0, 0..1);
+                        if let Some(b_start) = batch_start {
+                            if b_start + batch_count == start {
+                                batch_count += count;
+                                continue;
+                            } else {
+                                shadow_pass.draw_indexed(b_start..(b_start + batch_count), 0, 0..1);
+                            }
+                        }
+                        batch_start = Some(start);
+                        batch_count = count;
                     }
+                }
+                if let Some(b_start) = batch_start {
+                    shadow_pass.draw_indexed(b_start..(b_start + batch_count), 0, 0..1);
                 }
             }
         }
@@ -2278,12 +2292,26 @@ fn blur_equirectangular(
             if self.submeshes.is_empty() {
                 pass.draw_indexed(0..self.index_count, 0, 0..1);
             } else {
+                let mut batch_start: Option<u32> = None;
+                let mut batch_count: u32 = 0;
                 for sm in &self.submeshes {
                     if sm.visible && sm.index_count > 0 {
                         let start = sm.start_index as u32;
                         let count = sm.index_count as u32;
-                        pass.draw_indexed(start..(start + count), 0, 0..1);
+                        if let Some(b_start) = batch_start {
+                            if b_start + batch_count == start {
+                                batch_count += count;
+                                continue;
+                            } else {
+                                pass.draw_indexed(b_start..(b_start + batch_count), 0, 0..1);
+                            }
+                        }
+                        batch_start = Some(start);
+                        batch_count = count;
                     }
+                }
+                if let Some(b_start) = batch_start {
+                    pass.draw_indexed(b_start..(b_start + batch_count), 0, 0..1);
                 }
             }
 
