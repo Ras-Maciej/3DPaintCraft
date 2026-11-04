@@ -1552,7 +1552,7 @@ impl PaintcraftApp {
                 ));
             }
 
-            // 3. Draw discrete stamp indicators along the path line
+            // 3. Draw realistic 3D live preview for decals, weld beads, and path stroke styles
             let mut samples = self.brush_engine.settings.path_tool.sample_path(world_rad);
             if self.brush_engine.settings.path_tool.snap_to_surface {
                 crate::brush::PathToolState::project_samples_to_mesh(
@@ -1562,16 +1562,228 @@ impl PaintcraftApp {
                     self.brush_engine.settings.path_tool.surface_offset,
                 );
             }
+
+            let light_dir = glam::Vec3::new(0.4, 0.7, 0.6).normalize();
+            let p_col = self.brush_engine.settings.paint_color;
+            let base_rgb = egui::Color32::from_rgb(
+                (p_col.x * 255.0).clamp(0.0, 255.0) as u8,
+                (p_col.y * 255.0).clamp(0.0, 255.0) as u8,
+                (p_col.z * 255.0).clamp(0.0, 255.0) as u8,
+            );
+
+            let stroke_style = self.brush_engine.settings.path_tool.stroke_style;
+            let decal_type = self.brush_engine.settings.path_tool.decal_type;
+            let heat_tint = self.brush_engine.settings.path_tool.heat_tint;
+
             for sample in &samples {
-                if let Some(s_pos) = self.camera.world_to_screen(sample.position_3d, vp_w, vp_h) {
-                    let cur_screen_pt = rect.min + egui::vec2(s_pos.x, s_pos.y);
-                    let r = match self.brush_engine.settings.path_tool.stroke_style {
-                        crate::brush::PathStrokeStyle::SmartDecal => (4.0 * sample.radius_scale).clamp(3.0, 10.0),
-                        crate::brush::PathStrokeStyle::WeldSeam => (2.8 * sample.radius_scale).clamp(1.8, 8.0),
-                        _ => (2.2 * sample.radius_scale).clamp(1.2, 7.0),
-                    };
-                    ui.painter().circle_stroke(cur_screen_pt, r + 1.0, egui::Stroke::new(1.0_f32, egui::Color32::from_rgba_unmultiplied(20, 20, 25, 180)));
-                    ui.painter().circle_filled(cur_screen_pt, r, egui::Color32::from_rgb(255, 215, 120));
+                let norm = sample.normal.normalize_or_zero();
+                let norm = if norm.length_squared() > 1e-4 { norm } else { glam::Vec3::Y };
+
+                // Tangent frame on the 3D surface
+                let up = if norm.y.abs() < 0.9 { glam::Vec3::Y } else { glam::Vec3::X };
+                let initial_tan = norm.cross(up).normalize();
+                let initial_bitan = norm.cross(initial_tan).normalize();
+
+                let cos_a = sample.tangent_angle.cos();
+                let sin_a = sample.tangent_angle.sin();
+                let tan = (initial_tan * cos_a + initial_bitan * sin_a).normalize();
+                let bitan = norm.cross(tan).normalize();
+
+                let r_eff = world_rad * sample.radius_scale;
+                let n_dot_l = norm.dot(light_dir).max(0.2);
+
+                let shade_col = |factor: f32, alpha: u8| -> egui::Color32 {
+                    let r = ((base_rgb.r() as f32 * n_dot_l * factor).clamp(0.0, 255.0)) as u8;
+                    let g = ((base_rgb.g() as f32 * n_dot_l * factor).clamp(0.0, 255.0)) as u8;
+                    let b = ((base_rgb.b() as f32 * n_dot_l * factor).clamp(0.0, 255.0)) as u8;
+                    egui::Color32::from_rgba_unmultiplied(r, g, b, alpha)
+                };
+
+                match stroke_style {
+                    crate::brush::PathStrokeStyle::SmartDecal => {
+                        match decal_type {
+                            crate::brush::SmartDecalType::HexBolt => {
+                                let mut hex_pts = Vec::with_capacity(6);
+                                for i in 0..6 {
+                                    let theta = (i as f32) * std::f32::consts::PI / 3.0 + std::f32::consts::PI / 6.0;
+                                    let p3d = sample.position_3d + (tan * theta.cos() + bitan * theta.sin()) * r_eff;
+                                    if let Some(sp) = self.camera.world_to_screen(p3d, vp_w, vp_h) {
+                                        hex_pts.push(rect.min + egui::vec2(sp.x, sp.y));
+                                    }
+                                }
+                                if hex_pts.len() == 6 {
+                                    ui.painter().add(egui::Shape::convex_polygon(
+                                        hex_pts,
+                                        shade_col(1.0, 240),
+                                        egui::Stroke::new(1.2_f32, egui::Color32::from_rgba_unmultiplied(20, 20, 25, 220)),
+                                    ));
+                                }
+                                if let Some(sp) = self.camera.world_to_screen(sample.position_3d, vp_w, vp_h) {
+                                    let c = rect.min + egui::vec2(sp.x, sp.y);
+                                    let r_screen = ((r_eff / world_rad) * 6.0).clamp(2.5, 14.0);
+                                    ui.painter().circle_filled(c, r_screen * 0.45, egui::Color32::from_rgba_unmultiplied(25, 27, 35, 220));
+                                    ui.painter().circle_stroke(c, r_screen * 0.45, egui::Stroke::new(0.8_f32, shade_col(1.4, 200)));
+                                }
+                            }
+                            crate::brush::SmartDecalType::PhillipsScrew => {
+                                if let Some(sp) = self.camera.world_to_screen(sample.position_3d, vp_w, vp_h) {
+                                    let c = rect.min + egui::vec2(sp.x, sp.y);
+                                    let r_screen = ((r_eff / world_rad) * 7.0).clamp(3.0, 16.0);
+                                    ui.painter().circle_filled(c, r_screen, shade_col(0.9, 230));
+                                    ui.painter().circle_stroke(c, r_screen, egui::Stroke::new(1.2_f32, egui::Color32::from_rgba_unmultiplied(15, 15, 20, 200)));
+                                    let slot_len = r_screen * 0.7;
+                                    let slot_tan = if let Some(p_t) = self.camera.world_to_screen(sample.position_3d + tan * (r_eff * 0.7), vp_w, vp_h) {
+                                        ((rect.min + egui::vec2(p_t.x, p_t.y)) - c).normalized()
+                                    } else {
+                                        egui::vec2(1.0, 0.0)
+                                    };
+                                    let slot_bitan = egui::vec2(-slot_tan.y, slot_tan.x);
+                                    ui.painter().line_segment([c - slot_tan * slot_len, c + slot_tan * slot_len], egui::Stroke::new(2.0_f32, egui::Color32::from_rgba_unmultiplied(20, 22, 28, 240)));
+                                    ui.painter().line_segment([c - slot_bitan * slot_len, c + slot_bitan * slot_len], egui::Stroke::new(2.0_f32, egui::Color32::from_rgba_unmultiplied(20, 22, 28, 240)));
+                                }
+                            }
+                            crate::brush::SmartDecalType::FlatheadScrew => {
+                                if let Some(sp) = self.camera.world_to_screen(sample.position_3d, vp_w, vp_h) {
+                                    let c = rect.min + egui::vec2(sp.x, sp.y);
+                                    let r_screen = ((r_eff / world_rad) * 7.0).clamp(3.0, 16.0);
+                                    ui.painter().circle_filled(c, r_screen, shade_col(0.9, 230));
+                                    ui.painter().circle_stroke(c, r_screen, egui::Stroke::new(1.2_f32, egui::Color32::from_rgba_unmultiplied(15, 15, 20, 200)));
+                                    let slot_len = r_screen * 0.75;
+                                    let slot_tan = if let Some(p_t) = self.camera.world_to_screen(sample.position_3d + tan * (r_eff * 0.75), vp_w, vp_h) {
+                                        ((rect.min + egui::vec2(p_t.x, p_t.y)) - c).normalized()
+                                    } else {
+                                        egui::vec2(1.0, 0.0)
+                                    };
+                                    ui.painter().line_segment([c - slot_tan * slot_len, c + slot_tan * slot_len], egui::Stroke::new(2.2_f32, egui::Color32::from_rgba_unmultiplied(20, 22, 28, 240)));
+                                }
+                            }
+                            crate::brush::SmartDecalType::TorxScrew => {
+                                if let Some(sp) = self.camera.world_to_screen(sample.position_3d, vp_w, vp_h) {
+                                    let c = rect.min + egui::vec2(sp.x, sp.y);
+                                    let r_screen = ((r_eff / world_rad) * 7.0).clamp(3.0, 16.0);
+                                    ui.painter().circle_filled(c, r_screen, shade_col(0.95, 230));
+                                    ui.painter().circle_stroke(c, r_screen, egui::Stroke::new(1.2_f32, egui::Color32::from_rgba_unmultiplied(15, 15, 20, 200)));
+                                    let mut star_pts = Vec::with_capacity(12);
+                                    for k in 0..12 {
+                                        let ang = (k as f32) * std::f32::consts::PI / 6.0;
+                                        let rad = if k % 2 == 0 { r_screen * 0.55 } else { r_screen * 0.32 };
+                                        let p3d = sample.position_3d + (tan * ang.cos() + bitan * ang.sin()) * (r_eff * (rad / r_screen));
+                                        if let Some(st) = self.camera.world_to_screen(p3d, vp_w, vp_h) {
+                                            star_pts.push(rect.min + egui::vec2(st.x, st.y));
+                                        }
+                                    }
+                                    if star_pts.len() == 12 {
+                                        ui.painter().add(egui::Shape::convex_polygon(
+                                            star_pts,
+                                            egui::Color32::from_rgba_unmultiplied(22, 24, 30, 240),
+                                            egui::Stroke::new(0.8_f32, shade_col(1.2, 180)),
+                                        ));
+                                    }
+                                }
+                            }
+                            crate::brush::SmartDecalType::DomedRivet => {
+                                if let Some(sp) = self.camera.world_to_screen(sample.position_3d, vp_w, vp_h) {
+                                    let c = rect.min + egui::vec2(sp.x, sp.y);
+                                    let r_screen = ((r_eff / world_rad) * 6.5).clamp(2.5, 15.0);
+                                    ui.painter().circle_filled(c, r_screen, egui::Color32::from_rgba_unmultiplied(25, 25, 30, 160));
+                                    ui.painter().circle_filled(c, r_screen * 0.88, shade_col(0.9, 230));
+                                    let hl_pos = c - egui::vec2(r_screen * 0.25, r_screen * 0.25);
+                                    ui.painter().circle_filled(hl_pos, r_screen * 0.32, egui::Color32::from_rgba_unmultiplied(255, 255, 255, 180));
+                                }
+                            }
+                            crate::brush::SmartDecalType::ButtonHole | crate::brush::SmartDecalType::GrommetEyelet => {
+                                if let Some(sp) = self.camera.world_to_screen(sample.position_3d, vp_w, vp_h) {
+                                    let c = rect.min + egui::vec2(sp.x, sp.y);
+                                    let r_screen = ((r_eff / world_rad) * 6.5).clamp(2.5, 15.0);
+                                    ui.painter().circle_stroke(c, r_screen, egui::Stroke::new(2.2_f32, shade_col(1.1, 230)));
+                                    ui.painter().circle_filled(c, r_screen * 0.55, egui::Color32::from_rgba_unmultiplied(10, 10, 14, 255));
+                                }
+                            }
+                            crate::brush::SmartDecalType::AirVentLouver => {
+                                let p0 = sample.position_3d - tan * (r_eff * 0.8) - bitan * (r_eff * 0.5);
+                                let p1 = sample.position_3d + tan * (r_eff * 0.8) - bitan * (r_eff * 0.5);
+                                let p2 = sample.position_3d + tan * (r_eff * 0.8) + bitan * (r_eff * 0.5);
+                                let p3 = sample.position_3d - tan * (r_eff * 0.8) + bitan * (r_eff * 0.5);
+                                if let (Some(s0), Some(s1), Some(s2), Some(s3)) = (
+                                    self.camera.world_to_screen(p0, vp_w, vp_h),
+                                    self.camera.world_to_screen(p1, vp_w, vp_h),
+                                    self.camera.world_to_screen(p2, vp_w, vp_h),
+                                    self.camera.world_to_screen(p3, vp_w, vp_h),
+                                ) {
+                                    let pts = vec![
+                                        rect.min + egui::vec2(s0.x, s0.y),
+                                        rect.min + egui::vec2(s1.x, s1.y),
+                                        rect.min + egui::vec2(s2.x, s2.y),
+                                        rect.min + egui::vec2(s3.x, s3.y),
+                                    ];
+                                    ui.painter().add(egui::Shape::convex_polygon(
+                                        pts,
+                                        shade_col(0.7, 210),
+                                        egui::Stroke::new(1.0_f32, egui::Color32::from_rgba_unmultiplied(20, 20, 25, 230)),
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                    crate::brush::PathStrokeStyle::WeldSeam => {
+                        if let Some(sp) = self.camera.world_to_screen(sample.position_3d, vp_w, vp_h) {
+                            let c = rect.min + egui::vec2(sp.x, sp.y);
+                            let r_screen = ((r_eff / world_rad) * 6.0).clamp(2.5, 14.0);
+                            if heat_tint {
+                                ui.painter().circle_filled(c, r_screen * 1.55, egui::Color32::from_rgba_unmultiplied(75, 85, 175, 70));
+                                ui.painter().circle_filled(c, r_screen * 1.25, egui::Color32::from_rgba_unmultiplied(215, 165, 55, 120));
+                            }
+                            ui.painter().circle_filled(c, r_screen, shade_col(1.15, 235));
+                            ui.painter().circle_stroke(c, r_screen, egui::Stroke::new(1.0_f32, egui::Color32::from_rgba_unmultiplied(35, 38, 48, 190)));
+                            ui.painter().circle_stroke(c, r_screen * 0.45, egui::Stroke::new(0.9_f32, shade_col(1.4, 210)));
+                        }
+                    }
+                    crate::brush::PathStrokeStyle::RopeBraid => {
+                        let r_screen = ((r_eff / world_rad) * 5.5).clamp(2.2, 12.0);
+                        let strand_alt = if (((sample.arc_length / (r_eff * 1.5).max(0.01)) as i32) % 2) == 0 { 1.0 } else { -1.0 };
+                        let p_strand = sample.position_3d + bitan * (r_eff * 0.35 * strand_alt);
+                        if let Some(sp2) = self.camera.world_to_screen(p_strand, vp_w, vp_h) {
+                            let c2 = rect.min + egui::vec2(sp2.x, sp2.y);
+                            ui.painter().circle_filled(c2, r_screen * 0.85, shade_col(1.05, 230));
+                            ui.painter().circle_stroke(c2, r_screen * 0.85, egui::Stroke::new(1.0_f32, egui::Color32::from_rgba_unmultiplied(25, 28, 35, 200)));
+                        }
+                    }
+                    crate::brush::PathStrokeStyle::StitchSeam => {
+                        let p_l = sample.position_3d - bitan * (r_eff * 0.6) + tan * (r_eff * 0.2);
+                        let p_r = sample.position_3d + bitan * (r_eff * 0.6) - tan * (r_eff * 0.2);
+                        if let (Some(s_l), Some(s_r)) = (
+                            self.camera.world_to_screen(p_l, vp_w, vp_h),
+                            self.camera.world_to_screen(p_r, vp_w, vp_h),
+                        ) {
+                            let pt_l = rect.min + egui::vec2(s_l.x, s_l.y);
+                            let pt_r = rect.min + egui::vec2(s_r.x, s_r.y);
+                            ui.painter().circle_filled(pt_l, 2.0, egui::Color32::from_rgba_unmultiplied(15, 15, 20, 240));
+                            ui.painter().circle_filled(pt_r, 2.0, egui::Color32::from_rgba_unmultiplied(15, 15, 20, 240));
+                            ui.painter().line_segment([pt_l, pt_r], egui::Stroke::new(2.8_f32, shade_col(1.3, 250)));
+                        }
+                    }
+                    crate::brush::PathStrokeStyle::ChainLinks => {
+                        if let Some(sp) = self.camera.world_to_screen(sample.position_3d, vp_w, vp_h) {
+                            let c = rect.min + egui::vec2(sp.x, sp.y);
+                            let r_screen = ((r_eff / world_rad) * 6.0).clamp(2.5, 14.0);
+                            let is_flat = (((sample.arc_length / (r_eff * 2.0).max(0.01)) as i32) % 2) == 0;
+                            if is_flat {
+                                ui.painter().circle_stroke(c, r_screen, egui::Stroke::new(2.4_f32, shade_col(1.2, 240)));
+                                ui.painter().circle_stroke(c, r_screen + 1.2, egui::Stroke::new(0.8_f32, egui::Color32::from_rgba_unmultiplied(20, 20, 25, 180)));
+                            } else {
+                                ui.painter().circle_filled(c, r_screen * 0.65, shade_col(0.8, 240));
+                                ui.painter().circle_stroke(c, r_screen * 0.65, egui::Stroke::new(1.0_f32, egui::Color32::from_rgba_unmultiplied(20, 20, 25, 200)));
+                            }
+                        }
+                    }
+                    crate::brush::PathStrokeStyle::Continuous => {
+                        if let Some(sp) = self.camera.world_to_screen(sample.position_3d, vp_w, vp_h) {
+                            let c = rect.min + egui::vec2(sp.x, sp.y);
+                            let r_screen = ((r_eff / world_rad) * 5.0).clamp(2.0, 12.0);
+                            ui.painter().circle_stroke(c, r_screen + 1.0, egui::Stroke::new(1.0_f32, egui::Color32::from_rgba_unmultiplied(20, 20, 25, 180)));
+                            ui.painter().circle_filled(c, r_screen, shade_col(1.0, 220));
+                        }
+                    }
                 }
             }
 

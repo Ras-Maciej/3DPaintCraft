@@ -950,3 +950,92 @@
         let redo_painted_px = project.layers[1].base_color_buf.get_pixel(32, 32);
         assert_eq!(redo_painted_px, glam::Vec4::new(1.0, 0.0, 0.0, 1.0), "Stroke must be reapplied on second redo");
     }
+
+    #[test]
+    fn test_paint_layer_normal_channel_and_intensity() {
+        let mut settings = crate::brush::BrushSettings::default();
+        assert_eq!(settings.paint_normal_intensity, 1.0, "Default normal intensity must be 1.0");
+
+        // Toggle normal channel flag
+        settings.channels.normal = true;
+        assert!(settings.channels.normal);
+
+        // Verify normal intensity range clamping/reset
+        settings.paint_normal_intensity = 1.75;
+        assert_eq!(settings.paint_normal_intensity, 1.75);
+
+        // Verify paint layer normal buffer initialization and allocation
+        let mut layer = crate::layer::Layer::new_paint_layer(1, "NormalTestLayer".to_string(), 64, 64);
+        assert_eq!(layer.normal_buf.width, 64);
+        assert_eq!(layer.normal_buf.height, 64);
+
+        layer.normal_buf.ensure_allocated();
+        assert!(!layer.normal_buf.is_sparse());
+
+        // Default tangent normal is (0.5, 0.5, 1.0, 0.0) -> flat tangent-space vector (0, 0, 1)
+        let def_px = layer.normal_buf.get_pixel(10, 10);
+        assert!((def_px.x - 0.5).abs() < 1e-4);
+        assert!((def_px.y - 0.5).abs() < 1e-4);
+        assert!((def_px.z - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_reoriented_normal_mapping_blending() {
+        use crate::layer::BlendMode;
+        let flat_n = glam::Vec4::new(0.5, 0.5, 1.0, 0.0);
+
+        // 1. Blending neutral base with neutral src at full opacity yields neutral normal
+        let blended_neutral = BlendMode::Normal.blend_normal(flat_n, flat_n, 1.0);
+        assert!((blended_neutral.x - 0.5).abs() < 1e-4);
+        assert!((blended_neutral.y - 0.5).abs() < 1e-4);
+        assert!((blended_neutral.z - 1.0).abs() < 1e-4);
+
+        // 2. Zero opacity returns destination untouched
+        let tilted_src = glam::Vec4::new(0.8, 0.5, 0.6, 0.3);
+        let blended_zero = BlendMode::Normal.blend_normal(flat_n, tilted_src, 0.0);
+        assert_eq!(blended_zero, flat_n);
+
+        // 3. Blending tilted normal on top of flat base preserves tilt
+        let blended_tilt = BlendMode::Normal.blend_normal(flat_n, tilted_src, 1.0);
+        let recon_n = glam::Vec3::new(
+            blended_tilt.x * 2.0 - 1.0,
+            blended_tilt.y * 2.0 - 1.0,
+            blended_tilt.z * 2.0 - 1.0,
+        );
+        let len = recon_n.length();
+        assert!((len - 1.0).abs() < 1e-3, "RNM blended normal must be unit length");
+        assert!(recon_n.x > 0.4, "X deflection must be preserved");
+
+        // 4. Blending two deflections produces valid unit vector
+        let tilted_bg = glam::Vec4::new(0.5, 0.8, 0.6, 0.0);
+        let combined = BlendMode::Normal.blend_normal(tilted_bg, tilted_src, 1.0);
+        let recon_combined = glam::Vec3::new(
+            combined.x * 2.0 - 1.0,
+            combined.y * 2.0 - 1.0,
+            combined.z * 2.0 - 1.0,
+        );
+        assert!((recon_combined.length() - 1.0).abs() < 1e-3, "Combined RNM normal must be unit length");
+        assert!(recon_combined.x > 0.0);
+        assert!(recon_combined.y > 0.0);
+    }
+
+    #[test]
+    fn test_analytical_normal_preserved_through_height_update() {
+        let mut layer = crate::layer::Layer::new_paint_layer(2, "DecalLayer".to_string(), 64, 64);
+        layer.normal_buf.ensure_allocated();
+        layer.height_buf.ensure_allocated();
+
+        // Stamp an analytical decal normal with significant horizontal deflection at (32, 32)
+        // Decal normal vector: tangent space (+0.6, -0.4, 0.6928) -> packed: (0.8, 0.3, 0.8464, 0.5)
+        let analytical_px = glam::Vec4::new(0.8, 0.3, 0.8464, 0.5);
+        layer.normal_buf.set_pixel(32, 32, analytical_px);
+
+        // Run Sobel height-to-normal update with flat height buffer
+        layer.update_normal_from_height_rect(30, 30, 34, 34, 1.0);
+
+        // The pre-existing analytical normal should be preserved via RNM, NOT flattened to (0.5, 0.5, 1.0)
+        let result_px = layer.normal_buf.get_pixel(32, 32);
+        assert!((result_px.x - 0.5).abs() > 0.2, "Analytical X deflection must be preserved through height update");
+        assert!((result_px.y - 0.5).abs() > 0.1, "Analytical Y deflection must be preserved through height update");
+        assert!(result_px.z > 0.7, "Z normal component must remain positive pointing upward");
+    }

@@ -2614,6 +2614,9 @@ impl PaintcraftApp {
                                             if channel_pill_button(ui, "rough", self.brush_engine.settings.channels.roughness).clicked() {
                                                 self.brush_engine.settings.channels.roughness = !self.brush_engine.settings.channels.roughness;
                                             }
+                                            if channel_pill_button(ui, "nrm", self.brush_engine.settings.channels.normal).clicked() {
+                                                self.brush_engine.settings.channels.normal = !self.brush_engine.settings.channels.normal;
+                                            }
                                             if channel_pill_button(ui, "height", self.brush_engine.settings.channels.height).clicked() {
                                                 self.brush_engine.settings.channels.height = !self.brush_engine.settings.channels.height;
                                             }
@@ -2652,6 +2655,14 @@ impl PaintcraftApp {
                                         }
                                         if self.brush_engine.settings.channels.metallic {
                                             ui.add(egui::Slider::new(&mut self.brush_engine.settings.paint_metallic, 0.0..=1.0).text("Metallic"));
+                                        }
+                                        if self.brush_engine.settings.channels.normal {
+                                            ui.horizontal(|ui| {
+                                                ui.add(egui::Slider::new(&mut self.brush_engine.settings.paint_normal_intensity, 0.0..=2.0).text("Normal Intensity"));
+                                                if ui.small_button("Reset (1.0)").clicked() {
+                                                    self.brush_engine.settings.paint_normal_intensity = 1.0;
+                                                }
+                                            });
                                         }
                                         if self.brush_engine.settings.channels.height {
                                             ui.add(egui::Slider::new(&mut self.brush_engine.settings.paint_height, 0.0..=1.0).text("Height"));

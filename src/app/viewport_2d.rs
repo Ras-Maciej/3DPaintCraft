@@ -773,17 +773,141 @@ impl PaintcraftApp {
                     ));
                 }
 
-                // 3. Draw discrete stamp indicators along the path line
+                // 3. Draw realistic live preview for decals, weld beads, and path stroke styles in 2D UV space
                 let samples = self.brush_engine.settings.path_tool.sample_path(uv_rad);
+                let p_col = self.brush_engine.settings.paint_color;
+                let base_rgb = egui::Color32::from_rgb(
+                    (p_col.x * 255.0).clamp(0.0, 255.0) as u8,
+                    (p_col.y * 255.0).clamp(0.0, 255.0) as u8,
+                    (p_col.z * 255.0).clamp(0.0, 255.0) as u8,
+                );
+
+                let stroke_style = self.brush_engine.settings.path_tool.stroke_style;
+                let decal_type = self.brush_engine.settings.path_tool.decal_type;
+                let heat_tint = self.brush_engine.settings.path_tool.heat_tint;
+
                 for sample in &samples {
                     let cur_2d_pt = cmin + egui::vec2(sample.uv.x * cw, sample.uv.y * ch);
-                    let r = match self.brush_engine.settings.path_tool.stroke_style {
-                        crate::brush::PathStrokeStyle::SmartDecal => (4.0 * sample.radius_scale).clamp(3.0, 10.0),
-                        crate::brush::PathStrokeStyle::WeldSeam => (2.8 * sample.radius_scale).clamp(1.8, 8.0),
-                        _ => (2.2 * sample.radius_scale).clamp(1.2, 7.0),
+                    let r_screen = (uv_rad * cw * sample.radius_scale * 0.5).clamp(3.0, 40.0);
+                    let cos_a = sample.tangent_angle.cos();
+                    let sin_a = sample.tangent_angle.sin();
+                    let tan_2d = egui::vec2(cos_a, -sin_a);
+                    let bitan_2d = egui::vec2(sin_a, cos_a);
+
+                    let shade_col = |factor: f32, alpha: u8| -> egui::Color32 {
+                        let r = ((base_rgb.r() as f32 * factor).clamp(0.0, 255.0)) as u8;
+                        let g = ((base_rgb.g() as f32 * factor).clamp(0.0, 255.0)) as u8;
+                        let b = ((base_rgb.b() as f32 * factor).clamp(0.0, 255.0)) as u8;
+                        egui::Color32::from_rgba_unmultiplied(r, g, b, alpha)
                     };
-                    ui.painter().circle_stroke(cur_2d_pt, r + 1.0, egui::Stroke::new(1.0_f32, egui::Color32::from_rgba_unmultiplied(20, 20, 25, 180)));
-                    ui.painter().circle_filled(cur_2d_pt, r, egui::Color32::from_rgb(255, 215, 120));
+
+                    match stroke_style {
+                        crate::brush::PathStrokeStyle::SmartDecal => {
+                            match decal_type {
+                                crate::brush::SmartDecalType::HexBolt => {
+                                    let mut hex_pts = Vec::with_capacity(6);
+                                    for i in 0..6 {
+                                        let theta = (i as f32) * std::f32::consts::PI / 3.0 + std::f32::consts::PI / 6.0;
+                                        let pt = cur_2d_pt + (tan_2d * theta.cos() + bitan_2d * theta.sin()) * r_screen;
+                                        hex_pts.push(pt);
+                                    }
+                                    ui.painter().add(egui::Shape::convex_polygon(
+                                        hex_pts,
+                                        shade_col(1.0, 240),
+                                        egui::Stroke::new(1.2_f32, egui::Color32::from_rgba_unmultiplied(20, 20, 25, 220)),
+                                    ));
+                                    ui.painter().circle_filled(cur_2d_pt, r_screen * 0.45, egui::Color32::from_rgba_unmultiplied(25, 27, 35, 220));
+                                    ui.painter().circle_stroke(cur_2d_pt, r_screen * 0.45, egui::Stroke::new(0.8_f32, shade_col(1.3, 200)));
+                                }
+                                crate::brush::SmartDecalType::PhillipsScrew => {
+                                    ui.painter().circle_filled(cur_2d_pt, r_screen, shade_col(0.9, 230));
+                                    ui.painter().circle_stroke(cur_2d_pt, r_screen, egui::Stroke::new(1.2_f32, egui::Color32::from_rgba_unmultiplied(15, 15, 20, 200)));
+                                    let slot_len = r_screen * 0.7;
+                                    ui.painter().line_segment([cur_2d_pt - tan_2d * slot_len, cur_2d_pt + tan_2d * slot_len], egui::Stroke::new(2.0_f32, egui::Color32::from_rgba_unmultiplied(20, 22, 28, 240)));
+                                    ui.painter().line_segment([cur_2d_pt - bitan_2d * slot_len, cur_2d_pt + bitan_2d * slot_len], egui::Stroke::new(2.0_f32, egui::Color32::from_rgba_unmultiplied(20, 22, 28, 240)));
+                                }
+                                crate::brush::SmartDecalType::FlatheadScrew => {
+                                    ui.painter().circle_filled(cur_2d_pt, r_screen, shade_col(0.9, 230));
+                                    ui.painter().circle_stroke(cur_2d_pt, r_screen, egui::Stroke::new(1.2_f32, egui::Color32::from_rgba_unmultiplied(15, 15, 20, 200)));
+                                    let slot_len = r_screen * 0.75;
+                                    ui.painter().line_segment([cur_2d_pt - tan_2d * slot_len, cur_2d_pt + tan_2d * slot_len], egui::Stroke::new(2.2_f32, egui::Color32::from_rgba_unmultiplied(20, 22, 28, 240)));
+                                }
+                                crate::brush::SmartDecalType::TorxScrew => {
+                                    ui.painter().circle_filled(cur_2d_pt, r_screen, shade_col(0.95, 230));
+                                    ui.painter().circle_stroke(cur_2d_pt, r_screen, egui::Stroke::new(1.2_f32, egui::Color32::from_rgba_unmultiplied(15, 15, 20, 200)));
+                                    let mut star_pts = Vec::with_capacity(12);
+                                    for k in 0..12 {
+                                        let ang = (k as f32) * std::f32::consts::PI / 6.0;
+                                        let rad = if k % 2 == 0 { r_screen * 0.55 } else { r_screen * 0.32 };
+                                        let pt = cur_2d_pt + (tan_2d * ang.cos() + bitan_2d * ang.sin()) * rad;
+                                        star_pts.push(pt);
+                                    }
+                                    ui.painter().add(egui::Shape::convex_polygon(
+                                        star_pts,
+                                        egui::Color32::from_rgba_unmultiplied(22, 24, 30, 240),
+                                        egui::Stroke::new(0.8_f32, shade_col(1.2, 180)),
+                                    ));
+                                }
+                                crate::brush::SmartDecalType::DomedRivet => {
+                                    ui.painter().circle_filled(cur_2d_pt, r_screen, egui::Color32::from_rgba_unmultiplied(25, 25, 30, 160));
+                                    ui.painter().circle_filled(cur_2d_pt, r_screen * 0.88, shade_col(0.9, 230));
+                                    let hl = cur_2d_pt - egui::vec2(r_screen * 0.25, r_screen * 0.25);
+                                    ui.painter().circle_filled(hl, r_screen * 0.32, egui::Color32::from_rgba_unmultiplied(255, 255, 255, 180));
+                                }
+                                crate::brush::SmartDecalType::ButtonHole | crate::brush::SmartDecalType::GrommetEyelet => {
+                                    ui.painter().circle_stroke(cur_2d_pt, r_screen, egui::Stroke::new(2.2_f32, shade_col(1.1, 230)));
+                                    ui.painter().circle_filled(cur_2d_pt, r_screen * 0.55, egui::Color32::from_rgba_unmultiplied(10, 10, 14, 255));
+                                }
+                                crate::brush::SmartDecalType::AirVentLouver => {
+                                    let p0 = cur_2d_pt - tan_2d * (r_screen * 0.8) - bitan_2d * (r_screen * 0.5);
+                                    let p1 = cur_2d_pt + tan_2d * (r_screen * 0.8) - bitan_2d * (r_screen * 0.5);
+                                    let p2 = cur_2d_pt + tan_2d * (r_screen * 0.8) + bitan_2d * (r_screen * 0.5);
+                                    let p3 = cur_2d_pt - tan_2d * (r_screen * 0.8) + bitan_2d * (r_screen * 0.5);
+                                    ui.painter().add(egui::Shape::convex_polygon(
+                                        vec![p0, p1, p2, p3],
+                                        shade_col(0.7, 210),
+                                        egui::Stroke::new(1.0_f32, egui::Color32::from_rgba_unmultiplied(20, 20, 25, 230)),
+                                    ));
+                                }
+                            }
+                        }
+                        crate::brush::PathStrokeStyle::WeldSeam => {
+                            if heat_tint {
+                                ui.painter().circle_filled(cur_2d_pt, r_screen * 1.55, egui::Color32::from_rgba_unmultiplied(75, 85, 175, 70));
+                                ui.painter().circle_filled(cur_2d_pt, r_screen * 1.25, egui::Color32::from_rgba_unmultiplied(215, 165, 55, 120));
+                            }
+                            ui.painter().circle_filled(cur_2d_pt, r_screen, shade_col(1.15, 235));
+                            ui.painter().circle_stroke(cur_2d_pt, r_screen, egui::Stroke::new(1.0_f32, egui::Color32::from_rgba_unmultiplied(35, 38, 48, 190)));
+                            ui.painter().circle_stroke(cur_2d_pt, r_screen * 0.45, egui::Stroke::new(0.9_f32, shade_col(1.4, 210)));
+                        }
+                        crate::brush::PathStrokeStyle::RopeBraid => {
+                            let strand_alt = if (((sample.arc_length / (uv_rad * 1.5).max(0.01)) as i32) % 2) == 0 { 1.0 } else { -1.0 };
+                            let p2 = cur_2d_pt + bitan_2d * (r_screen * 0.35 * strand_alt);
+                            ui.painter().circle_filled(p2, r_screen * 0.85, shade_col(1.05, 230));
+                            ui.painter().circle_stroke(p2, r_screen * 0.85, egui::Stroke::new(1.0_f32, egui::Color32::from_rgba_unmultiplied(25, 28, 35, 200)));
+                        }
+                        crate::brush::PathStrokeStyle::StitchSeam => {
+                            let p_l = cur_2d_pt - bitan_2d * (r_screen * 0.6) + tan_2d * (r_screen * 0.2);
+                            let p_r = cur_2d_pt + bitan_2d * (r_screen * 0.6) - tan_2d * (r_screen * 0.2);
+                            ui.painter().circle_filled(p_l, 2.0_f32, egui::Color32::from_rgba_unmultiplied(15, 15, 20, 240));
+                            ui.painter().circle_filled(p_r, 2.0_f32, egui::Color32::from_rgba_unmultiplied(15, 15, 20, 240));
+                            ui.painter().line_segment([p_l, p_r], egui::Stroke::new(2.8_f32, shade_col(1.3, 250)));
+                        }
+                        crate::brush::PathStrokeStyle::ChainLinks => {
+                            let is_flat = (((sample.arc_length / (uv_rad * 2.0).max(0.01)) as i32) % 2) == 0;
+                            if is_flat {
+                                ui.painter().circle_stroke(cur_2d_pt, r_screen, egui::Stroke::new(2.4_f32, shade_col(1.2, 240)));
+                                ui.painter().circle_stroke(cur_2d_pt, r_screen + 1.2_f32, egui::Stroke::new(0.8_f32, egui::Color32::from_rgba_unmultiplied(20, 20, 25, 180)));
+                            } else {
+                                ui.painter().circle_filled(cur_2d_pt, r_screen * 0.65, shade_col(0.8, 240));
+                                ui.painter().circle_stroke(cur_2d_pt, r_screen * 0.65, egui::Stroke::new(1.0_f32, egui::Color32::from_rgba_unmultiplied(20, 20, 25, 200)));
+                            }
+                        }
+                        crate::brush::PathStrokeStyle::Continuous => {
+                            ui.painter().circle_stroke(cur_2d_pt, r_screen + 1.0_f32, egui::Stroke::new(1.0_f32, egui::Color32::from_rgba_unmultiplied(20, 20, 25, 180)));
+                            ui.painter().circle_filled(cur_2d_pt, r_screen, shade_col(1.0, 220));
+                        }
+                    }
                 }
 
                 // 4. Draw control point handle rings with index numbers

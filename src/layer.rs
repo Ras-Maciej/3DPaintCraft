@@ -82,6 +82,34 @@ impl BlendMode {
         Vec4::new(final_rgb.x, final_rgb.y, final_rgb.z, final_a)
     }
 
+    /// Blends normal maps using Reoriented Normal Mapping (RNM)
+    #[inline]
+    pub fn blend_normal(&self, dst: Vec4, src: Vec4, opacity: f32) -> Vec4 {
+        let eff_alpha = opacity.clamp(0.0, 1.0);
+        if eff_alpha <= 1e-5 {
+            return dst;
+        }
+
+        let n_bg = (dst.truncate() * 2.0 - Vec3::ONE).normalize_or_zero();
+        let n_src = (src.truncate() * 2.0 - Vec3::ONE).normalize_or_zero();
+
+        let n_blended = if n_bg.length_squared() > 1e-4 && n_src.length_squared() > 1e-4 {
+            let t = n_bg + Vec3::Z;
+            let u = Vec3::new(-n_src.x, -n_src.y, n_src.z);
+            let nz = t.z.max(0.0001);
+            (t * (t.dot(u) / nz) - u).normalize_or_zero()
+        } else if n_src.length_squared() > 1e-4 {
+            n_src
+        } else {
+            n_bg
+        };
+
+        let final_n = n_bg.lerp(n_blended, eff_alpha).normalize_or_zero();
+        let final_n = if final_n.length_squared() > 1e-4 { final_n } else { Vec3::Z };
+        let h = dst.w * (1.0 - eff_alpha) + src.w * eff_alpha;
+        Vec4::new(final_n.x * 0.5 + 0.5, final_n.y * 0.5 + 0.5, final_n.z * 0.5 + 0.5, h)
+    }
+
     #[inline]
     pub fn blend_scalar(&self, dst: f32, src: f32, opacity: f32) -> f32 {
         let blended = match self {
@@ -4713,7 +4741,16 @@ impl Layer {
                             bump_n
                         }
                     } else {
-                        bump_n
+                        let existing_packed = norm_row[x as usize];
+                        let existing_n = (existing_packed.truncate() * 2.0 - glam::Vec3::ONE).normalize_or_zero();
+                        if existing_n.length_squared() > 1e-4 && (existing_n - glam::Vec3::Z).length_squared() > 1e-4 {
+                            let t = existing_n + glam::Vec3::Z;
+                            let u = glam::Vec3::new(-bump_n.x, -bump_n.y, bump_n.z);
+                            let nz = t.z.max(0.001);
+                            (t * (t.dot(u) / nz) - u).normalize()
+                        } else {
+                            bump_n
+                        }
                     };
 
                     let cur_h = height_buf.get_pixel(x, y);
@@ -4789,7 +4826,16 @@ impl Layer {
                         bump_n
                     }
                 } else {
-                    bump_n
+                    let existing_packed = self.normal_buf.get_pixel(x, y);
+                    let existing_n = (existing_packed.truncate() * 2.0 - glam::Vec3::ONE).normalize_or_zero();
+                    if existing_n.length_squared() > 1e-4 && (existing_n - glam::Vec3::Z).length_squared() > 1e-4 {
+                        let t = existing_n + glam::Vec3::Z;
+                        let u = glam::Vec3::new(-bump_n.x, -bump_n.y, bump_n.z);
+                        let nz = t.z.max(0.001);
+                        (t * (t.dot(u) / nz) - u).normalize()
+                    } else {
+                        bump_n
+                    }
                 };
 
                 let cur_h = self.height_buf.get_pixel(x, y);
@@ -5069,7 +5115,7 @@ impl CompositeTextureSet {
                                 } else {
                                     glam::Vec4::new(0.5, 0.5, 1.0, 1.0)
                                 };
-                                norm_row[x] = ch_modes.normal.blend_color(norm_row[x], src, op);
+                                norm_row[x] = ch_modes.normal.blend_normal(norm_row[x], src, op);
                             }
                         }
 

@@ -950,6 +950,8 @@ pub struct BrushSettings {
     pub paint_clearcoat: f32,
     pub paint_anisotropy: f32,
     pub paint_anisotropy_angle: f32,
+    #[serde(default = "default_paint_normal_intensity")]
+    pub paint_normal_intensity: f32,
 
     // Polygon Fill Settings
     pub polygon_fill_mode: PolygonFillMode,
@@ -998,6 +1000,10 @@ fn default_min_pressure_opacity() -> f32 {
 
 fn default_min_pressure_hardness() -> f32 {
     0.2
+}
+
+fn default_paint_normal_intensity() -> f32 {
+    1.0
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1089,6 +1095,7 @@ impl Default for BrushSettings {
             paint_clearcoat: 0.0,
             paint_anisotropy: 0.0,
             paint_anisotropy_angle: 0.0,
+            paint_normal_intensity: 1.0,
             polygon_fill_mode: PolygonFillMode::Triangle,
             polygon_fill_value: 1.0,
             mask_paint_value: 1.0,
@@ -2331,13 +2338,19 @@ pub fn barycentric_3d(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> (f32, f32, f32) {
                                     }
                                     if self.settings.channels.normal || do_h {
                                         let cur_packed = *layer.normal_buf.data.get_unchecked(idx);
-                                        let cur_n = Vec3::new(cur_packed.x * 2.0 - 1.0, cur_packed.y * 2.0 - 1.0, cur_packed.z * 2.0 - 1.0);
-                                        let blended_n = Vec3::new(
-                                            cur_n.x + decal_px.normal.x * weight,
-                                            cur_n.y + decal_px.normal.y * weight,
-                                            cur_n.z * decal_px.normal.z,
+                                        let cur_n = Vec3::new(cur_packed.x * 2.0 - 1.0, cur_packed.y * 2.0 - 1.0, cur_packed.z * 2.0 - 1.0).normalize_or_zero();
+                                        let cur_n = if cur_n.length_squared() > 1e-4 { cur_n } else { Vec3::Z };
+                                        let decal_n = Vec3::new(
+                                            decal_px.normal.x * self.settings.paint_normal_intensity,
+                                            decal_px.normal.y * self.settings.paint_normal_intensity,
+                                            decal_px.normal.z,
                                         ).normalize_or_zero();
-                                        let final_n = if blended_n.length_squared() > 1e-4 { blended_n } else { Vec3::Z };
+                                        let t = cur_n + Vec3::Z;
+                                        let u = Vec3::new(-decal_n.x, -decal_n.y, decal_n.z);
+                                        let nz = t.z.max(0.0001);
+                                        let rnm_n = (t * (t.dot(u) / nz) - u).normalize_or_zero();
+                                        let final_n = cur_n.lerp(rnm_n, weight).normalize_or_zero();
+                                        let final_n = if final_n.length_squared() > 1e-4 { final_n } else { Vec3::Z };
                                         *layer.normal_buf.data.get_unchecked_mut(idx) = Vec4::new(
                                             final_n.x * 0.5 + 0.5,
                                             final_n.y * 0.5 + 0.5,
@@ -2498,15 +2511,17 @@ pub fn barycentric_3d(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> (f32, f32, f32) {
                             }
                             if self.settings.channels.normal || do_h {
                                 let cur_packed = *layer.normal_buf.data.get_unchecked(idx);
-                                let cur_n = Vec3::new(cur_packed.x * 2.0 - 1.0, cur_packed.y * 2.0 - 1.0, cur_packed.z * 2.0 - 1.0);
-                                let rot_u = decal_px.normal.x * cos_a - decal_px.normal.y * sin_a;
-                                let rot_v = decal_px.normal.x * sin_a + decal_px.normal.y * cos_a;
-                                let blended_n = Vec3::new(
-                                    cur_n.x + rot_u * weight,
-                                    cur_n.y + rot_v * weight,
-                                    cur_n.z * decal_px.normal.z,
-                                ).normalize_or_zero();
-                                let final_n = if blended_n.length_squared() > 1e-4 { blended_n } else { Vec3::Z };
+                                let cur_n = Vec3::new(cur_packed.x * 2.0 - 1.0, cur_packed.y * 2.0 - 1.0, cur_packed.z * 2.0 - 1.0).normalize_or_zero();
+                                let cur_n = if cur_n.length_squared() > 1e-4 { cur_n } else { Vec3::Z };
+                                let rot_u = (decal_px.normal.x * cos_a - decal_px.normal.y * sin_a) * self.settings.paint_normal_intensity;
+                                let rot_v = (decal_px.normal.x * sin_a + decal_px.normal.y * cos_a) * self.settings.paint_normal_intensity;
+                                let decal_n = Vec3::new(rot_u, rot_v, decal_px.normal.z).normalize_or_zero();
+                                let t = cur_n + Vec3::Z;
+                                let u = Vec3::new(-decal_n.x, -decal_n.y, decal_n.z);
+                                let nz = t.z.max(0.0001);
+                                let rnm_n = (t * (t.dot(u) / nz) - u).normalize_or_zero();
+                                let final_n = cur_n.lerp(rnm_n, weight).normalize_or_zero();
+                                let final_n = if final_n.length_squared() > 1e-4 { final_n } else { Vec3::Z };
                                 *layer.normal_buf.data.get_unchecked_mut(idx) = Vec4::new(
                                     final_n.x * 0.5 + 0.5,
                                     final_n.y * 0.5 + 0.5,

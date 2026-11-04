@@ -44,6 +44,13 @@ struct CompositorUniforms {
 @group(2) @binding(0) var samp_nearest: sampler;
 @group(2) @binding(1) var<uniform> params: CompositorUniforms;
 
+fn blend_rnm(n_base: vec3<f32>, n_detail: vec3<f32>) -> vec3<f32> {
+    let t = n_base + vec3<f32>(0.0, 0.0, 1.0);
+    let u = n_detail * vec3<f32>(-1.0, -1.0, 1.0);
+    let nz = select(max(t.z, 0.0001), max(abs(t.z), 0.0001), t.z <= 0.0);
+    return normalize(t * dot(t, u) / nz - u);
+}
+
 fn get_effective_opacity(uv: vec2<f32>) -> f32 {
     var mask_val = 1.0;
     if params.has_mask == 1u {
@@ -87,7 +94,14 @@ fn fs_color(in: VertexOutput) -> FragmentColorOutput {
         }
     }
 
-    let out_normal_rgb = mix(bg_normal.rgb, src_normal.rgb, eff_norm_op);
+    var out_normal_rgb = bg_normal.rgb;
+    if eff_norm_op > 0.0001 {
+        let n_bg = normalize(bg_normal.rgb * 2.0 - 1.0);
+        let n_src = normalize(src_normal.rgb * 2.0 - 1.0);
+        let n_blended = blend_rnm(n_bg, n_src);
+        let final_n = normalize(mix(n_bg, n_blended, eff_norm_op));
+        out_normal_rgb = final_n * 0.5 + 0.5;
+    }
     let out_height = mix(bg_normal.a, src_normal.a, eff_height_op);
 
     var out: FragmentColorOutput;
