@@ -808,7 +808,7 @@ impl PaintcraftApp {
                                     if let Some(wgpu) = &mut self.wgpu_viewport {
                                         if let Some(gpu_layer) = wgpu.gpu_layers.get(act_idx) {
                                             wgpu.gpu_compositor.update_layer(layer, gpu_layer, doc_w, doc_h);
-                                            wgpu.composite_and_update_active(&self.project, act_idx);
+                                            wgpu.composite_and_update_active_rect(&self.project, act_idx, Some(d_rect));
                                         }
                                     }
                                     self.update_uv_texture_rect(ctx, d_rect.0, d_rect.1, d_rect.2, d_rect.3);
@@ -982,7 +982,7 @@ impl PaintcraftApp {
                                                         let pw = self.project.texture_width;
                                                         let ph = self.project.texture_height;
                                                         wgpu.gpu_compositor.update_layer(layer, gpu_layer, pw, ph);
-                                                        wgpu.composite_and_update_active(&self.project, act_idx);
+                                                        wgpu.composite_and_update_active_rect(&self.project, act_idx, Some((b_min_x, b_min_y, b_max_x, b_max_y)));
                                                         if let Some(preview_id) = self.mask_preview_layer_id {
                                                             wgpu.sync_mask_preview_full(&self.project, preview_id);
                                                         }
@@ -1052,7 +1052,7 @@ impl PaintcraftApp {
                                                         let pw = self.project.texture_width;
                                                         let ph = self.project.texture_height;
                                                         wgpu.gpu_compositor.update_layer(layer, gpu_layer, pw, ph);
-                                                        wgpu.composite_and_update_active(&self.project, act_idx);
+                                                        wgpu.composite_and_update_active_rect(&self.project, act_idx, Some((b_min_x, b_min_y, b_max_x, b_max_y)));
                                                     }
                                                 }
                                                 self.need_cpu_composite_sync = true;
@@ -1183,7 +1183,7 @@ impl PaintcraftApp {
                                             }
 
                                             if any_stamped {
-                                                wgpu.composite_and_update_active(&self.project, act_idx);
+                                                wgpu.composite_and_update_active_rect(&self.project, act_idx, self.gpu_stroke_dirty_rect);
                                                 self.perf_metrics.texture_transfer_bytes = 0;
                                                 gpu_synced = true;
                                             }
@@ -1209,7 +1209,7 @@ impl PaintcraftApp {
                                                     }
                                                     if let Some(gpu_layer) = wgpu.gpu_layers.get(act_idx) {
                                                         wgpu.gpu_compositor.update_layer(active_layer, gpu_layer, doc_w, doc_h);
-                                                        wgpu.composite_and_update_active(&self.project, act_idx);
+                                                        wgpu.composite_and_update_active_rect(&self.project, act_idx, Some(d_rect));
                                                         let rw = (d_rect.2.saturating_sub(d_rect.0) + 1) as u64;
                                                         let rh = (d_rect.3.saturating_sub(d_rect.1) + 1) as u64;
                                                         self.perf_metrics.texture_transfer_bytes = rw * rh * 32;
@@ -1253,6 +1253,7 @@ impl PaintcraftApp {
                     if let Some((x0, y0, x1, y1)) = self.gpu_stroke_dirty_rect.take() {
                         if let Some(wgpu) = &mut self.wgpu_viewport {
                             if let Some(layer) = self.project.layers.get_mut(idx) {
+                                layer.record_tiles_for_rect(x0, y0, x1, y1);
                                 wgpu.start_async_readback(idx, layer, x0, y0, x1, y1, self.brush_engine.settings.channels, &desc);
                             }
                         }

@@ -1344,31 +1344,63 @@ impl WgpuViewport {
     }
 
     /// Incremental GPU composite: reuses cached background DAG composite for active painting layer
+    #[allow(dead_code)]
     pub fn composite_and_update_active(&mut self, project: &crate::project::Project, active_idx: usize) {
+        self.composite_and_update_active_rect(project, active_idx, None);
+    }
+
+    /// Incremental GPU composite with sub-rectangle VRAM blit optimization to eliminate 4K bandwidth stalls
+    pub fn composite_and_update_active_rect(
+        &mut self,
+        project: &crate::project::Project,
+        active_idx: usize,
+        dirty_rect: Option<(u32, u32, u32, u32)>,
+    ) {
         let t0 = std::time::Instant::now();
         let final_target = self.gpu_compositor.composite_incremental(&project.layers, &self.gpu_layers, active_idx);
-        let size = wgpu::Extent3d { width: self.pbr_tex_width, height: self.pbr_tex_height, depth_or_array_layers: 1 };
+
+        let (origin, size) = if let Some((x0, y0, x1, y1)) = dirty_rect {
+            let x0 = x0.min(self.pbr_tex_width.saturating_sub(1));
+            let y0 = y0.min(self.pbr_tex_height.saturating_sub(1));
+            let x1 = x1.min(self.pbr_tex_width.saturating_sub(1));
+            let y1 = y1.min(self.pbr_tex_height.saturating_sub(1));
+            let w = (x1.saturating_sub(x0) + 1).min(self.pbr_tex_width.saturating_sub(x0));
+            let h = (y1.saturating_sub(y0) + 1).min(self.pbr_tex_height.saturating_sub(y0));
+            if w == 0 || h == 0 {
+                return;
+            }
+            (
+                wgpu::Origin3d { x: x0, y: y0, z: 0 },
+                wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            )
+        } else {
+            (
+                wgpu::Origin3d::ZERO,
+                wgpu::Extent3d { width: self.pbr_tex_width, height: self.pbr_tex_height, depth_or_array_layers: 1 },
+            )
+        };
+
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
         if self.mask_preview_layer_id.is_none() {
             encoder.copy_texture_to_texture(
-                wgpu::ImageCopyTexture { texture: &final_target.base_color, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-                wgpu::ImageCopyTexture { texture: &self.tex_base_color, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                wgpu::ImageCopyTexture { texture: &final_target.base_color, mip_level: 0, origin, aspect: wgpu::TextureAspect::All },
+                wgpu::ImageCopyTexture { texture: &self.tex_base_color, mip_level: 0, origin, aspect: wgpu::TextureAspect::All },
                 size
             );
         }
         encoder.copy_texture_to_texture(
-            wgpu::ImageCopyTexture { texture: &final_target.normal, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-            wgpu::ImageCopyTexture { texture: &self.tex_normal, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            wgpu::ImageCopyTexture { texture: &final_target.normal, mip_level: 0, origin, aspect: wgpu::TextureAspect::All },
+            wgpu::ImageCopyTexture { texture: &self.tex_normal, mip_level: 0, origin, aspect: wgpu::TextureAspect::All },
             size
         );
         encoder.copy_texture_to_texture(
-            wgpu::ImageCopyTexture { texture: &final_target.roughness, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-            wgpu::ImageCopyTexture { texture: &self.tex_roughness, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            wgpu::ImageCopyTexture { texture: &final_target.roughness, mip_level: 0, origin, aspect: wgpu::TextureAspect::All },
+            wgpu::ImageCopyTexture { texture: &self.tex_roughness, mip_level: 0, origin, aspect: wgpu::TextureAspect::All },
             size
         );
         encoder.copy_texture_to_texture(
-            wgpu::ImageCopyTexture { texture: &final_target.metallic, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-            wgpu::ImageCopyTexture { texture: &self.tex_metallic, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            wgpu::ImageCopyTexture { texture: &final_target.metallic, mip_level: 0, origin, aspect: wgpu::TextureAspect::All },
+            wgpu::ImageCopyTexture { texture: &self.tex_metallic, mip_level: 0, origin, aspect: wgpu::TextureAspect::All },
             size
         );
         self.queue.submit(std::iter::once(encoder.finish()));

@@ -481,7 +481,7 @@ impl PaintcraftApp {
                                 ui.horizontal_wrapped(|ui| {
                                     if ui.button("+ New").on_hover_text("Create a new blank template").clicked() {
                                         let new_preset = crate::packing::CustomPackingPreset {
-                                            id: format!("custom_{}", chrono::Utc::now().timestamp_millis()),
+                                            id: format!("custom_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis()),
                                             name: "New Output Template".to_string(),
                                             description: "Custom user-defined channel matrix".to_string(),
                                             maps: vec![

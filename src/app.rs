@@ -1082,7 +1082,7 @@ impl PaintcraftApp {
                 if let Some(wgpu) = &mut self.wgpu_viewport {
                     if let Some(gpu_layer) = wgpu.gpu_layers.get(act_idx) {
                         wgpu.gpu_compositor.update_layer(layer, gpu_layer, doc_w, doc_h);
-                        wgpu.composite_and_update_active(&self.project, act_idx);
+                        wgpu.composite_and_update_active_rect(&self.project, act_idx, Some(d_rect));
                     }
                 }
                 self.update_uv_texture_rect(ctx, d_rect.0, d_rect.1, d_rect.2, d_rect.3);
@@ -1768,7 +1768,6 @@ impl PaintcraftApp {
                 let x1 = x0 + res.rect_w.saturating_sub(1);
                 let y1 = y0 + res.rect_h.saturating_sub(1);
                 if let Some(layer) = self.project.layers.get_mut(res.layer_idx) {
-                    layer.record_tiles_for_rect(x0, y0, x1, y1);
                     if let Some(action) = layer.finish_stroke_delta(res.layer_idx, &res.description) {
                         self.history.push(&res.description, action);
                     }
@@ -1790,7 +1789,6 @@ impl PaintcraftApp {
                     let x1 = x0 + res.rect_w.saturating_sub(1);
                     let y1 = y0 + res.rect_h.saturating_sub(1);
                     if let Some(layer) = self.project.layers.get_mut(res.layer_idx) {
-                        layer.record_tiles_for_rect(x0, y0, x1, y1);
                         if let Some(action) = layer.finish_stroke_delta(res.layer_idx, &res.description) {
                             self.history.push(&res.description, action);
                         }

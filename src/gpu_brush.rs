@@ -572,6 +572,9 @@ impl GpuBrushEngine {
         // Ensure target CPU buffers are allocated
         cpu_layer.ensure_allocated_for_paint(crate::brush::PaintTarget::Material, channels, false);
 
+        // Pre-record pristine unpainted tiles BEFORE staging readback overwrites cpu_layer
+        cpu_layer.record_tiles_for_rect(min_x, min_y, max_x, max_y);
+
         let copy_size = wgpu::Extent3d {
             width: rect_w,
             height: rect_h,

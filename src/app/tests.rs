@@ -849,3 +849,104 @@
             assert_eq!(s.normal, glam::Vec3::Y);
         }
     }
+
+    #[test]
+    fn test_add_layer_and_paint_stroke_two_step_undo_redo() {
+        let mut project = Project::new_default(64, 64);
+        assert_eq!(project.layers.len(), 1);
+        assert_eq!(project.active_layer_idx, 0);
+
+        let mut history = crate::history::HistoryManager::new();
+
+        // 1. User adds a new Paint Layer
+        let prev_active = project.active_layer_idx;
+        let new_layer = crate::layer::Layer::new_paint_layer(10, "Paint Layer 1".to_string(), 64, 64);
+        project.layers.push(new_layer);
+        let new_idx = project.layers.len() - 1;
+        project.active_layer_idx = new_idx;
+        history.push(
+            "Add Paint Layer",
+            crate::history::HistoryAction::AddLayer {
+                layer_idx: new_idx,
+                prev_active,
+                layer: Box::new(project.layers[new_idx].clone()),
+            },
+        );
+
+        assert_eq!(project.layers.len(), 2);
+        assert_eq!(project.active_layer_idx, 1);
+        assert_eq!(history.undo_stack.len(), 1);
+
+        // Verify layer is initially transparent (alpha = 0)
+        let initial_px = project.layers[1].base_color_buf.get_pixel(32, 32);
+        assert_eq!(initial_px.w, 0.0);
+
+        // 2. User paints their first stroke on the new layer
+        let target = crate::brush::PaintTarget::Material;
+        let channels = crate::channel::ChannelFlags {
+            base_color: true,
+            roughness: true,
+            metallic: true,
+            normal: false,
+            height: false,
+            emission: false,
+            opacity: false,
+            clearcoat: false,
+            anisotropy: false,
+            ao: false,
+        };
+
+        // Begin stroke recording
+        project.layers[1].begin_stroke_recording(target, channels);
+
+        // Pre-record pristine tiles before painted pixels are committed
+        project.layers[1].record_tiles_for_rect(30, 30, 34, 34);
+
+        // Simulate brush stroke stamping into the layer
+        for py in 30..=34 {
+            for px in 30..=34 {
+                project.layers[1].base_color_buf.set_pixel(px, py, glam::Vec4::new(1.0, 0.0, 0.0, 1.0));
+            }
+        }
+        let painted_px = project.layers[1].base_color_buf.get_pixel(32, 32);
+        assert_eq!(painted_px, glam::Vec4::new(1.0, 0.0, 0.0, 1.0));
+
+        // Finish stroke delta
+        let stroke_action = project.layers[1]
+            .finish_stroke_delta(1, "Paint Red Square")
+            .expect("Must produce TileStroke action");
+        history.push("Paint Red Square", stroke_action);
+
+        // Undo stack must contain exactly 2 distinct actions: [Add Paint Layer, Paint Red Square]
+        assert_eq!(history.undo_stack.len(), 2);
+
+        // 3. First Undo: Should undo the stroke ONLY, keeping the layer intact
+        let first_undo = history.undo(&mut project);
+        assert_eq!(first_undo, Some("Paint Red Square".to_string()));
+        assert_eq!(project.layers.len(), 2, "Layer must NOT be deleted on first stroke undo");
+        let restored_px = project.layers[1].base_color_buf.get_pixel(32, 32);
+        assert_eq!(restored_px.w, 0.0, "Pixels must be restored to clean unpainted state");
+        assert_eq!(history.undo_stack.len(), 1);
+
+        // 4. Second Undo: Should undo the layer addition, removing the layer
+        let second_undo = history.undo(&mut project);
+        assert_eq!(second_undo, Some("Add Paint Layer".to_string()));
+        assert_eq!(project.layers.len(), 1, "Layer must be removed on second undo");
+        assert_eq!(project.active_layer_idx, 0, "Active layer must return to previous active");
+        assert_eq!(history.undo_stack.len(), 0);
+
+        // 5. First Redo: Should re-create the layer
+        let first_redo = history.redo(&mut project);
+        assert_eq!(first_redo, Some("Add Paint Layer".to_string()));
+        assert_eq!(project.layers.len(), 2, "Layer must be restored on first redo");
+        assert_eq!(project.active_layer_idx, 1);
+        let redo_initial_px = project.layers[1].base_color_buf.get_pixel(32, 32);
+        assert_eq!(redo_initial_px.w, 0.0, "Layer on first redo must be clean unpainted");
+
+        // 6. Second Redo: Should re-apply the paint stroke
+        let second_redo = history.redo(&mut project);
+        assert_eq!(second_redo, Some("Paint Red Square".to_string()));
+        assert_eq!(project.layers.len(), 2);
+        let redo_painted_px = project.layers[1].base_color_buf.get_pixel(32, 32);
+        assert_eq!(redo_painted_px, glam::Vec4::new(1.0, 0.0, 0.0, 1.0), "Stroke must be reapplied on second redo");
+    }

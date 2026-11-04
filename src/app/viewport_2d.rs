@@ -3,7 +3,7 @@ use eframe::egui::{self, Color32};
 
 impl PaintcraftApp {
     pub(crate) fn render_2d_uv_viewport_ui(&mut self, ui: &mut egui::Ui, size: Vec2, ctx: &egui::Context) {
-        if self.project.is_dirty || self.uv_canvas_texture.is_none() {
+        if (self.project.is_dirty && !self.is_stroke_active) || self.uv_canvas_texture.is_none() {
             self.project.composite_textures.composite_layers(&self.project.layers);
             self.update_uv_texture(ctx);
             self.project.is_dirty = false;
@@ -354,7 +354,7 @@ impl PaintcraftApp {
                                         if let Some(wgpu) = &mut self.wgpu_viewport {
                                             if let Some(gpu_layer) = wgpu.gpu_layers.get(act_idx) {
                                                 wgpu.gpu_compositor.update_layer(layer, gpu_layer, doc_w, doc_h);
-                                                wgpu.composite_and_update_active(&self.project, act_idx);
+                                                wgpu.composite_and_update_active_rect(&self.project, act_idx, Some(d_rect));
                                             }
                                         }
                                         self.update_uv_texture_rect(ctx, d_rect.0, d_rect.1, d_rect.2, d_rect.3);
@@ -485,7 +485,7 @@ impl PaintcraftApp {
                                                             let pw = self.project.texture_width;
                                                             let ph = self.project.texture_height;
                                                             wgpu.gpu_compositor.update_layer(layer, gpu_layer, pw, ph);
-                                                            wgpu.composite_and_update_active(&self.project, act_idx);
+                                                            wgpu.composite_and_update_active_rect(&self.project, act_idx, Some((b_min_x, b_min_y, b_max_x, b_max_y)));
                                                             if let Some(preview_id) = self.mask_preview_layer_id {
                                                                 wgpu.sync_mask_preview_full(&self.project, preview_id);
                                                             }
@@ -555,7 +555,7 @@ impl PaintcraftApp {
                                                             let pw = self.project.texture_width;
                                                             let ph = self.project.texture_height;
                                                             wgpu.gpu_compositor.update_layer(layer, gpu_layer, pw, ph);
-                                                            wgpu.composite_and_update_active(&self.project, act_idx);
+                                                            wgpu.composite_and_update_active_rect(&self.project, act_idx, Some((b_min_x, b_min_y, b_max_x, b_max_y)));
                                                         }
                                                     }
                                                     self.need_cpu_composite_sync = true;
@@ -617,7 +617,7 @@ impl PaintcraftApp {
                                             });
 
                                             wgpu.stamp_2d_gpu(act_idx, &uniform);
-                                            wgpu.composite_and_update_active(&self.project, act_idx);
+                                            wgpu.composite_and_update_active_rect(&self.project, act_idx, self.gpu_stroke_dirty_rect);
                                             self.perf_metrics.texture_transfer_bytes = 0;
                                         }
                                     } else {
@@ -637,7 +637,7 @@ impl PaintcraftApp {
                                                     let doc_h = self.project.texture_height;
                                                     let active_layer = &mut self.project.layers[act_idx];
                                                     wgpu.gpu_compositor.update_layer(active_layer, gpu_layer, doc_w, doc_h);
-                                                    wgpu.composite_and_update_active(&self.project, act_idx);
+                                                    wgpu.composite_and_update_active_rect(&self.project, act_idx, Some((d_x0, d_y0, d_x1, d_y1)));
                                                 }
                                             }
                                         } else {
@@ -671,6 +671,7 @@ impl PaintcraftApp {
                     if let Some((x0, y0, x1, y1)) = self.gpu_stroke_dirty_rect.take() {
                         if let Some(wgpu) = &mut self.wgpu_viewport {
                             if let Some(layer) = self.project.layers.get_mut(idx) {
+                                layer.record_tiles_for_rect(x0, y0, x1, y1);
                                 wgpu.start_async_readback(idx, layer, x0, y0, x1, y1, self.brush_engine.settings.channels, &desc);
                             }
                         }
