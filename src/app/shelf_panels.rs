@@ -1763,7 +1763,7 @@ impl PaintcraftApp {
                             let response = response.on_hover_text(tooltip);
 
                             if response.clicked() {
-                                self.apply_shelf_asset(&asset);
+                                self.apply_shelf_asset(&asset, ui.ctx());
                             }
                         }
                     });
@@ -1776,7 +1776,7 @@ impl PaintcraftApp {
     }
 
     /// Apply an asset from the shelf to the project
-    pub(crate) fn apply_shelf_asset(&mut self, asset: &crate::shelf::ShelfAsset) {
+    pub(crate) fn apply_shelf_asset(&mut self, asset: &crate::shelf::ShelfAsset, ctx: &egui::Context) {
         match asset.category {
             crate::shelf::ShelfCategory::Materials => {
                 let col = glam::Vec4::new(
@@ -1978,16 +1978,29 @@ impl PaintcraftApp {
                 }
             }
             crate::shelf::ShelfCategory::Alphas => {
-                match asset.id {
-                    "alpha_soft_round" => self.brush_engine.settings.alpha = crate::brush::AlphaType::SoftRound,
-                    "alpha_hard_round" => self.brush_engine.settings.alpha = crate::brush::AlphaType::HardRound,
-                    "alpha_noise_splatter" => self.brush_engine.settings.alpha = crate::brush::AlphaType::NoiseSplatter,
-                    "alpha_chisel" => self.brush_engine.settings.alpha = crate::brush::AlphaType::Chisel,
-                    "alpha_stipple" => self.brush_engine.settings.alpha = crate::brush::AlphaType::Stipple,
-                    "alpha_scratches" => self.brush_engine.settings.alpha = crate::brush::AlphaType::Scratches,
-                    _ => {}
-                }
+                let alpha_type = match asset.id {
+                    "alpha_soft_round" => crate::brush::AlphaType::SoftRound,
+                    "alpha_hard_round" => crate::brush::AlphaType::HardRound,
+                    "alpha_noise_splatter" => crate::brush::AlphaType::NoiseSplatter,
+                    "alpha_chisel" => crate::brush::AlphaType::Chisel,
+                    "alpha_stipple" => crate::brush::AlphaType::Stipple,
+                    "alpha_scratches" => crate::brush::AlphaType::Scratches,
+                    _ => crate::brush::AlphaType::SoftRound,
+                };
+                self.brush_engine.settings.alpha = alpha_type;
                 self.brush_engine.update_cache();
+
+                self.brush_engine.settings.path_tool.stroke_style = crate::brush::PathStrokeStyle::CustomAlpha;
+                self.brush_engine.settings.path_tool.custom_alpha = alpha_type;
+                self.brush_engine.settings.path_tool.custom_resource_id = Some(asset.id.to_string());
+                self.brush_engine.settings.stamp_tool.stroke_style = crate::brush::PathStrokeStyle::CustomAlpha;
+                self.brush_engine.settings.stamp_tool.custom_alpha = alpha_type;
+                self.brush_engine.settings.stamp_tool.selected_preset_id = Some(asset.id.to_string());
+
+                let is_path_layer = self.project.active_layer().map_or(false, |l| l.layer_type == crate::layer::LayerType::Path);
+                if is_path_layer {
+                    self.sync_and_evaluate_active_path_layer(ctx);
+                }
                 self.status_message = format!("Selected Brush Alpha: {}", asset.name);
             }
             crate::shelf::ShelfCategory::Decals => {
@@ -2114,12 +2127,22 @@ impl PaintcraftApp {
                         _ => {}
                     }
                 }
+                let is_path_layer = self.project.active_layer().map_or(false, |l| l.layer_type == crate::layer::LayerType::Path);
+                if is_path_layer {
+                    self.sync_and_evaluate_active_path_layer(ctx);
+                }
                 self.status_message = format!("Selected Decal Preset: {}", asset.name);
             }
             crate::shelf::ShelfCategory::Environments => {}
             _ => {}
         }
         self.project.rebuild_composite();
+        self.project.gpu_sync_needed = true;
+        self.update_uv_texture(ctx);
+        if let Some(wgpu) = &mut self.wgpu_viewport {
+            wgpu.sync_textures(&mut self.project);
+        }
+        ctx.request_repaint();
     }
 
     /// Load an HDRI environment from file and update the viewport environment map

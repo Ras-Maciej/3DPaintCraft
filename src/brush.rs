@@ -37,6 +37,28 @@ impl ToolMode {
     }
 }
 
+/// Control point interpolation type for vector paths
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PathPointType {
+    Smooth, // Smooth Catmull-Rom spline interpolation
+    Corner, // Discontinuous sharp corner point
+}
+
+impl Default for PathPointType {
+    fn default() -> Self {
+        Self::Smooth
+    }
+}
+
+impl PathPointType {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Smooth => "Smooth",
+            Self::Corner => "Corner",
+        }
+    }
+}
+
 /// A 3D/2D control point on the spline path
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PathControlPoint {
@@ -45,21 +67,36 @@ pub struct PathControlPoint {
     pub uv: Vec2,
     #[serde(default = "default_radius_scale")]
     pub radius_scale: f32,
+    #[serde(default)]
+    pub point_type: PathPointType,
 }
 
 fn default_radius_scale() -> f32 {
     1.0
 }
 
+impl PathControlPoint {
+    pub fn new(position_3d: Vec3, normal: Vec3, uv: Vec2) -> Self {
+        Self {
+            position_3d,
+            normal,
+            uv,
+            radius_scale: 1.0,
+            point_type: PathPointType::Smooth,
+        }
+    }
+}
+
 /// Stroke generation style for the Substance 3D Painter-style Vector Path Tool
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PathStrokeStyle {
-    Continuous, // Standard continuous brush stamps
-    WeldSeam,   // Industrial TIG/MIG weld puddle ripple beads with temper heat tint
-    RopeBraid,  // Multi-strand twisted helical cord / rope
-    StitchSeam, // Alternating textile thread stitches with puncture holes
-    ChainLinks, // Interlocking chain links
-    SmartDecal, // Discrete hardware decal stamps (uses SmartDecalType)
+    Continuous,  // Standard continuous brush stamps
+    WeldSeam,    // Industrial TIG/MIG weld puddle ripple beads with temper heat tint
+    RopeBraid,   // Multi-strand twisted helical cord / rope
+    StitchSeam,  // Alternating textile thread stitches with puncture holes
+    ChainLinks,  // Interlocking chain links
+    SmartDecal,  // Discrete hardware decal stamps (uses SmartDecalType)
+    CustomAlpha, // Procedural or custom shelf alpha stamp
 }
 
 impl Default for PathStrokeStyle {
@@ -77,6 +114,7 @@ impl PathStrokeStyle {
             Self::StitchSeam => "Stitch Seam",
             Self::ChainLinks => "Chain Links",
             Self::SmartDecal => "Smart Decal Stamp",
+            Self::CustomAlpha => "Custom Alpha",
         }
     }
 }
@@ -177,6 +215,7 @@ pub struct DecalPixel {
 pub fn evaluate_decal_pixel(
     style: PathStrokeStyle,
     decal: SmartDecalType,
+    custom_alpha: AlphaType,
     u: f32, // Along tangent (-1.0 to 1.0)
     v: f32, // Across bitangent (-1.0 to 1.0)
     mat: DecalMaterialParams,
@@ -204,6 +243,67 @@ pub fn evaluate_decal_pixel(
     let theta = v.atan2(u);
 
     let (col, raw_h, rough, metal, opac, raw_n, emis, coat, aniso, alpha) = match style {
+        PathStrokeStyle::CustomAlpha => {
+            let alpha = match custom_alpha {
+                AlphaType::SoftRound => {
+                    let edge = (1.0 - r).clamp(0.0, 1.0);
+                    edge * edge * (3.0 - 2.0 * edge)
+                }
+                AlphaType::HardRound => {
+                    if r <= 0.96 {
+                        1.0
+                    } else if r <= 1.02 {
+                        ((1.02 - r) / 0.06).clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    }
+                }
+                AlphaType::NoiseSplatter => {
+                    let nx = u * 5.5 + 10.0;
+                    let ny = v * 5.5 + 20.0;
+                    let n = NoiseGenerator::value_noise_2d(nx, ny);
+                    let base_falloff = (1.0 - r).clamp(0.0, 1.0);
+                    if n > 0.35 {
+                        base_falloff * ((n - 0.35) / 0.65).clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    }
+                }
+                AlphaType::Chisel => {
+                    let ax = u.abs();
+                    let ay = v.abs();
+                    if ax < 0.95 && ay < 0.32 {
+                        let fx = ((0.95 - ax) / 0.12).clamp(0.0, 1.0);
+                        let fy = ((0.32 - ay) / 0.10).clamp(0.0, 1.0);
+                        fx * fy
+                    } else {
+                        0.0
+                    }
+                }
+                AlphaType::Stipple => {
+                    let n = NoiseGenerator::value_noise_2d(u * 12.0 + 3.2, v * 12.0 + 4.7);
+                    let base_falloff = (1.0 - r).clamp(0.0, 1.0);
+                    if n > 0.45 {
+                        base_falloff * ((n - 0.45) / 0.55).clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    }
+                }
+                AlphaType::Scratches => {
+                    let n = NoiseGenerator::value_noise_2d(u * 16.0 + 2.0, v * 3.5 + 4.0);
+                    let base_falloff = (1.0 - r).clamp(0.0, 1.0);
+                    if n > 0.65 {
+                        base_falloff * ((n - 0.65) / 0.35).clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    }
+                }
+            };
+
+            let h = 0.5 + 0.35 * alpha * ((mat.height - 0.5) * 2.0).clamp(-1.0, 1.0);
+            let norm = Vec3::new(-u * alpha * 0.75, -v * alpha * 0.75, (1.0 - (r * alpha).min(0.96)).max(0.04).sqrt()).normalize();
+            (mat.base_color, h, mat.roughness, mat.metallic, mat.opacity, norm, mat.emission, mat.clearcoat, mat.anisotropy, alpha)
+        }
         PathStrokeStyle::Continuous => {
             let edge = (1.0 - r).clamp(0.0, 1.0);
             let alpha = edge * edge * (3.0 - 2.0 * edge);
@@ -559,6 +659,10 @@ pub struct PathToolState {
     pub stroke_style: PathStrokeStyle,
     #[serde(default)]
     pub decal_type: SmartDecalType,
+    #[serde(default = "default_custom_alpha")]
+    pub custom_alpha: AlphaType,
+    #[serde(default)]
+    pub custom_resource_id: Option<String>,
     #[serde(default = "default_decal_spacing")]
     pub decal_spacing: f32,
     #[serde(default = "default_heat_tint")]
@@ -569,6 +673,10 @@ pub struct PathToolState {
     pub height_depth: f32,
     #[serde(default = "default_snap_to_surface")]
     pub snap_to_surface: bool,
+}
+
+fn default_custom_alpha() -> AlphaType {
+    AlphaType::SoftRound
 }
 
 fn default_decal_spacing() -> f32 {
@@ -606,6 +714,8 @@ impl Default for PathToolState {
             is_sketching: false,
             stroke_style: PathStrokeStyle::Continuous,
             decal_type: SmartDecalType::PhillipsScrew,
+            custom_alpha: AlphaType::SoftRound,
+            custom_resource_id: None,
             decal_spacing: 1.2,
             heat_tint: true,
             surface_offset: 0.003,
@@ -620,6 +730,8 @@ impl Default for PathToolState {
 pub struct StampToolState {
     pub stroke_style: PathStrokeStyle,
     pub decal_type: SmartDecalType,
+    #[serde(default = "default_custom_alpha")]
+    pub custom_alpha: AlphaType,
     pub rotation_angle: f32, // Degrees 0.0 to 360.0
     pub randomize_rotation: bool,
     pub height_depth: f32,
@@ -633,6 +745,7 @@ impl Default for StampToolState {
         Self {
             stroke_style: PathStrokeStyle::SmartDecal,
             decal_type: SmartDecalType::PhillipsScrew,
+            custom_alpha: AlphaType::SoftRound,
             rotation_angle: 0.0,
             randomize_rotation: false,
             height_depth: 1.0,
@@ -664,6 +777,67 @@ impl PathToolState {
         self.selected_point = None;
         self.is_dragging = false;
         self.is_sketching = false;
+    }
+
+    /// Deletes the currently active path, promoting the most recent sub-path in other_paths if available
+    pub fn delete_active_path(&mut self) {
+        if let Some(prev) = self.other_paths.pop() {
+            self.points = prev.points;
+            self.closed = prev.closed;
+        } else {
+            self.points.clear();
+            self.closed = false;
+        }
+        self.selected_point = None;
+        self.is_dragging = false;
+        self.is_sketching = false;
+    }
+
+    /// Deletes a specific sub-path from other_paths by index
+    pub fn delete_sub_path(&mut self, idx: usize) {
+        if idx < self.other_paths.len() {
+            self.other_paths.remove(idx);
+        }
+    }
+
+    /// Deletes the currently selected control point, adjusting the selected_point index
+    pub fn delete_selected_point(&mut self) -> bool {
+        if let Some(idx) = self.selected_point {
+            if idx < self.points.len() {
+                self.points.remove(idx);
+                if self.points.is_empty() {
+                    self.selected_point = None;
+                } else if idx >= self.points.len() {
+                    self.selected_point = Some(self.points.len() - 1);
+                }
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Toggles the selected control point between Smooth and Corner
+    pub fn toggle_selected_point_type(&mut self) -> Option<PathPointType> {
+        if let Some(idx) = self.selected_point {
+            if idx < self.points.len() {
+                let new_type = match self.points[idx].point_type {
+                    PathPointType::Smooth => PathPointType::Corner,
+                    PathPointType::Corner => PathPointType::Smooth,
+                };
+                self.points[idx].point_type = new_type;
+                return Some(new_type);
+            }
+        }
+        None
+    }
+
+    /// Sets the radius scale of the selected control point (clamped 0.05 to 5.0)
+    pub fn set_selected_point_radius_scale(&mut self, scale: f32) {
+        if let Some(idx) = self.selected_point {
+            if idx < self.points.len() {
+                self.points[idx].radius_scale = scale.clamp(0.05, 5.0);
+            }
+        }
     }
 
     /// Total number of distinct path segments (other_paths + active path if non-empty)
@@ -773,29 +947,54 @@ impl PathToolState {
                 &points[(seg + 2) % n]
             };
 
+            let p1_corner = p1.point_type == PathPointType::Corner;
+            let p2_corner = p2.point_type == PathPointType::Corner;
+
+            // When both endpoints are Corner, evaluate pure straight linear interpolation (zero overshoot)
+            let is_pure_linear = p1_corner && p2_corner;
+
+            // Clamping tangents at corner boundaries
+            let eff_p0 = if p1_corner { p1 } else { p0 };
+            let eff_p3 = if p2_corner { p2 } else { p3 };
+
             for step in 0..steps {
                 let t = step as f32 / steps as f32;
-                let t2 = t * t;
-                let t3 = t2 * t;
 
-                // Catmull-Rom spline basis
-                let b0 = -t3 + 2.0 * t2 - t;
-                let b1 = 3.0 * t3 - 5.0 * t2 + 2.0;
-                let b2 = -3.0 * t3 + 4.0 * t2 + t;
-                let b3 = t3 - t2;
+                let (pos, norm, uv, tangent_angle) = if is_pure_linear {
+                    let pos = p1.position_3d.lerp(p2.position_3d, t);
+                    let norm = p1.normal.lerp(p2.normal, t).normalize_or_zero();
+                    let uv = p1.uv.lerp(p2.uv, t);
+                    let d_uv = p2.uv - p1.uv;
+                    let angle = if d_uv.length_squared() > 1e-8 {
+                        d_uv.y.atan2(d_uv.x)
+                    } else {
+                        0.0
+                    };
+                    (pos, norm, uv, angle)
+                } else {
+                    let t2 = t * t;
+                    let t3 = t2 * t;
 
-                let pos = 0.5 * (p0.position_3d * b0 + p1.position_3d * b1 + p2.position_3d * b2 + p3.position_3d * b3);
-                let norm = (0.5 * (p0.normal * b0 + p1.normal * b1 + p2.normal * b2 + p3.normal * b3)).normalize_or_zero();
-                let uv = 0.5 * (p0.uv * b0 + p1.uv * b1 + p2.uv * b2 + p3.uv * b3);
+                    // Catmull-Rom spline basis
+                    let b0 = -t3 + 2.0 * t2 - t;
+                    let b1 = 3.0 * t3 - 5.0 * t2 + 2.0;
+                    let b2 = -3.0 * t3 + 4.0 * t2 + t;
+                    let b3 = t3 - t2;
 
-                // Derivative for tangent vector
-                let d0 = -3.0 * t2 + 4.0 * t - 1.0;
-                let d1 = 9.0 * t2 - 10.0 * t;
-                let d2 = -9.0 * t2 + 8.0 * t + 1.0;
-                let d3 = 3.0 * t2 - 2.0 * t;
+                    let pos = 0.5 * (eff_p0.position_3d * b0 + p1.position_3d * b1 + p2.position_3d * b2 + eff_p3.position_3d * b3);
+                    let norm = (0.5 * (eff_p0.normal * b0 + p1.normal * b1 + p2.normal * b2 + eff_p3.normal * b3)).normalize_or_zero();
+                    let uv = 0.5 * (eff_p0.uv * b0 + p1.uv * b1 + p2.uv * b2 + eff_p3.uv * b3);
 
-                let d_uv = 0.5 * (p0.uv * d0 + p1.uv * d1 + p2.uv * d2 + p3.uv * d3);
-                let tangent_angle = d_uv.y.atan2(d_uv.x);
+                    // Derivative for tangent vector
+                    let d0 = -3.0 * t2 + 4.0 * t - 1.0;
+                    let d1 = 9.0 * t2 - 10.0 * t;
+                    let d2 = -9.0 * t2 + 8.0 * t + 1.0;
+                    let d3 = 3.0 * t2 - 2.0 * t;
+
+                    let d_uv = 0.5 * (eff_p0.uv * d0 + p1.uv * d1 + p2.uv * d2 + eff_p3.uv * d3);
+                    let angle = d_uv.y.atan2(d_uv.x);
+                    (pos, norm, uv, angle)
+                };
 
                 let r_scale = p1.radius_scale * (1.0 - t) + p2.radius_scale * t;
 
@@ -908,6 +1107,7 @@ impl PathToolState {
         }
 
         let step_dist = match stroke_style {
+            PathStrokeStyle::CustomAlpha => (eff_radius * spacing_ratio.max(0.05)).max(0.002),
             PathStrokeStyle::SmartDecal => (eff_radius * decal_spacing.max(0.25) * 2.0).max(0.005),
             PathStrokeStyle::WeldSeam => (eff_radius * 0.22).max(0.002),
             PathStrokeStyle::RopeBraid => (eff_radius * 0.15).max(0.002),
@@ -2373,6 +2573,7 @@ pub fn barycentric_3d(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> (f32, f32, f32) {
         world_radius: f32,
         style: PathStrokeStyle,
         decal: SmartDecalType,
+        custom_alpha: AlphaType,
         heat_tint: bool,
         arc_length: f32,
         height_depth: f32,
@@ -2565,6 +2766,7 @@ pub fn barycentric_3d(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> (f32, f32, f32) {
                             let decal_px = evaluate_decal_pixel(
                                 style,
                                 decal,
+                                custom_alpha,
                                 u_coord,
                                 v_coord,
                                 mat_params,
@@ -2700,6 +2902,7 @@ pub fn barycentric_3d(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> (f32, f32, f32) {
         uv_radius: f32,
         style: PathStrokeStyle,
         decal: SmartDecalType,
+        custom_alpha: AlphaType,
         heat_tint: bool,
         arc_length: f32,
         height_depth: f32,
@@ -2772,6 +2975,7 @@ pub fn barycentric_3d(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> (f32, f32, f32) {
                     let decal_px = evaluate_decal_pixel(
                         style,
                         decal,
+                        custom_alpha,
                         u,
                         v,
                         mat_params,
@@ -3659,29 +3863,14 @@ mod tests {
         assert!(path.sample_path(10.0).is_empty());
 
         // Single point
-        path.points.push(PathControlPoint {
-            position_3d: Vec3::new(0.0, 0.0, 0.0),
-            normal: Vec3::Y,
-            uv: Vec2::new(0.1, 0.1),
-            radius_scale: 1.0,
-        });
+        path.points.push(PathControlPoint::new(Vec3::new(0.0, 0.0, 0.0), Vec3::Y, Vec2::new(0.1, 0.1)));
         let samples = path.sample_path(10.0);
         assert_eq!(samples.len(), 1);
         assert_eq!(samples[0].uv, Vec2::new(0.1, 0.1));
 
         // Add more points along a curve
-        path.points.push(PathControlPoint {
-            position_3d: Vec3::new(1.0, 0.5, 0.0),
-            normal: Vec3::Y,
-            uv: Vec2::new(0.5, 0.3),
-            radius_scale: 1.0,
-        });
-        path.points.push(PathControlPoint {
-            position_3d: Vec3::new(2.0, 0.0, 0.0),
-            normal: Vec3::Y,
-            uv: Vec2::new(0.9, 0.1),
-            radius_scale: 1.0,
-        });
+        path.points.push(PathControlPoint::new(Vec3::new(1.0, 0.5, 0.0), Vec3::Y, Vec2::new(0.5, 0.3)));
+        path.points.push(PathControlPoint::new(Vec3::new(2.0, 0.0, 0.0), Vec3::Y, Vec2::new(0.9, 0.1)));
 
         path.spacing_ratio = 0.2;
         path.taper_start = 0.2;
@@ -3722,7 +3911,7 @@ mod tests {
             PathStrokeStyle::StitchSeam,
             PathStrokeStyle::ChainLinks,
         ] {
-            let px = evaluate_decal_pixel(*style, SmartDecalType::PhillipsScrew, 0.0, 0.0, mat, true, 0.5, 0.1, 1.0);
+            let px = evaluate_decal_pixel(*style, SmartDecalType::PhillipsScrew, AlphaType::SoftRound, 0.0, 0.0, mat, true, 0.5, 0.1, 1.0);
             assert!(px.alpha > 0.0, "Center alpha should be non-zero for style {:?}", style);
             assert!(px.height >= 0.0 && px.height <= 1.0, "Height should be normalized for style {:?}", style);
             assert!(px.roughness >= 0.0 && px.roughness <= 1.0, "Roughness should be normalized for style {:?}", style);
@@ -3731,6 +3920,32 @@ mod tests {
             assert!(px.clearcoat >= 0.0 && px.clearcoat <= 1.0, "Clearcoat should be normalized for style {:?}", style);
             assert!(px.anisotropy >= 0.0 && px.anisotropy <= 1.0, "Anisotropy should be normalized for style {:?}", style);
             assert!((px.normal.length() - 1.0).abs() < 1e-3, "Normal must be normalized for style {:?}", style);
+        }
+
+        // Test CustomAlpha across all 6 AlphaType variants
+        for alpha_type in &[
+            AlphaType::SoftRound,
+            AlphaType::HardRound,
+            AlphaType::NoiseSplatter,
+            AlphaType::Chisel,
+            AlphaType::Stipple,
+            AlphaType::Scratches,
+        ] {
+            let mut found_non_zero = false;
+            for &(su, sv) in &[(0.0, 0.0), (0.1, 0.1), (-0.1, 0.2), (0.2, -0.1), (0.05, 0.05)] {
+                let px = evaluate_decal_pixel(PathStrokeStyle::CustomAlpha, SmartDecalType::PhillipsScrew, *alpha_type, su, sv, mat, true, 0.0, 0.1, 1.0);
+                assert!(px.height >= 0.0 && px.height <= 1.0, "Height should be normalized for CustomAlpha {:?}", alpha_type);
+                assert!(px.roughness >= 0.0 && px.roughness <= 1.0, "Roughness should be normalized for CustomAlpha {:?}", alpha_type);
+                assert!(px.metallic >= 0.0 && px.metallic <= 1.0, "Metallic should be normalized for CustomAlpha {:?}", alpha_type);
+                assert!(px.opacity >= 0.0 && px.opacity <= 1.0, "Opacity should be normalized for CustomAlpha {:?}", alpha_type);
+                assert!(px.clearcoat >= 0.0 && px.clearcoat <= 1.0, "Clearcoat should be normalized for CustomAlpha {:?}", alpha_type);
+                assert!(px.anisotropy >= 0.0 && px.anisotropy <= 1.0, "Anisotropy should be normalized for CustomAlpha {:?}", alpha_type);
+                assert!((px.normal.length() - 1.0).abs() < 1e-3, "Normal must be normalized for CustomAlpha {:?}", alpha_type);
+                if px.alpha > 0.0 {
+                    found_non_zero = true;
+                }
+            }
+            assert!(found_non_zero, "Footprint alpha should have non-zero samples for CustomAlpha {:?}", alpha_type);
         }
 
         // Test all SmartDecalType variants
@@ -3744,7 +3959,7 @@ mod tests {
             SmartDecalType::GrommetEyelet,
             SmartDecalType::AirVentLouver,
         ] {
-            let px = evaluate_decal_pixel(PathStrokeStyle::SmartDecal, *decal, 0.0, 0.0, mat, true, 0.0, 0.1, 1.0);
+            let px = evaluate_decal_pixel(PathStrokeStyle::SmartDecal, *decal, AlphaType::SoftRound, 0.0, 0.0, mat, true, 0.0, 0.1, 1.0);
             assert!(px.alpha > 0.0, "Center alpha should be non-zero for decal {:?}", decal);
             assert!(px.height >= 0.0 && px.height <= 1.0, "Height should be normalized for decal {:?}", decal);
             assert!(px.roughness >= 0.0 && px.roughness <= 1.0, "Roughness should be normalized for decal {:?}", decal);
@@ -3756,31 +3971,16 @@ mod tests {
         }
 
         // Test outside boundary
-        let outside_px = evaluate_decal_pixel(PathStrokeStyle::SmartDecal, SmartDecalType::PhillipsScrew, 1.5, 1.5, mat, true, 0.0, 0.1, 1.0);
+        let outside_px = evaluate_decal_pixel(PathStrokeStyle::SmartDecal, SmartDecalType::PhillipsScrew, AlphaType::SoftRound, 1.5, 1.5, mat, true, 0.0, 0.1, 1.0);
         assert_eq!(outside_px.alpha, 0.0, "Outside boundary alpha must be zero");
     }
 
     #[test]
     fn test_path_tool_manipulation() {
         let mut path = PathToolState::default();
-        path.points.push(PathControlPoint {
-            position_3d: Vec3::new(0.0, 0.0, 0.0),
-            normal: Vec3::Y,
-            uv: Vec2::new(0.0, 0.0),
-            radius_scale: 1.0,
-        });
-        path.points.push(PathControlPoint {
-            position_3d: Vec3::new(1.0, 0.0, 0.0),
-            normal: Vec3::Y,
-            uv: Vec2::new(0.5, 0.0),
-            radius_scale: 1.0,
-        });
-        path.points.push(PathControlPoint {
-            position_3d: Vec3::new(2.0, 0.0, 0.0),
-            normal: Vec3::Y,
-            uv: Vec2::new(1.0, 0.0),
-            radius_scale: 1.0,
-        });
+        path.points.push(PathControlPoint::new(Vec3::new(0.0, 0.0, 0.0), Vec3::Y, Vec2::new(0.0, 0.0)));
+        path.points.push(PathControlPoint::new(Vec3::new(1.0, 0.0, 0.0), Vec3::Y, Vec2::new(0.5, 0.0)));
+        path.points.push(PathControlPoint::new(Vec3::new(2.0, 0.0, 0.0), Vec3::Y, Vec2::new(1.0, 0.0)));
 
         // Test shifting
         path.shift(Vec3::new(0.0, 1.0, 0.0));
@@ -3805,24 +4005,9 @@ mod tests {
     #[test]
     fn test_path_tool_styles_and_decals_sampling() {
         let mut path = PathToolState::default();
-        path.points.push(PathControlPoint {
-            position_3d: Vec3::new(0.0, 0.0, 0.0),
-            normal: Vec3::Y,
-            uv: Vec2::new(0.0, 0.5),
-            radius_scale: 1.0,
-        });
-        path.points.push(PathControlPoint {
-            position_3d: Vec3::new(1.0, 0.0, 0.0),
-            normal: Vec3::Y,
-            uv: Vec2::new(0.5, 0.5),
-            radius_scale: 1.0,
-        });
-        path.points.push(PathControlPoint {
-            position_3d: Vec3::new(2.0, 0.0, 0.0),
-            normal: Vec3::Y,
-            uv: Vec2::new(1.0, 0.5),
-            radius_scale: 1.0,
-        });
+        path.points.push(PathControlPoint::new(Vec3::new(0.0, 0.0, 0.0), Vec3::Y, Vec2::new(0.0, 0.5)));
+        path.points.push(PathControlPoint::new(Vec3::new(1.0, 0.0, 0.0), Vec3::Y, Vec2::new(0.5, 0.5)));
+        path.points.push(PathControlPoint::new(Vec3::new(2.0, 0.0, 0.0), Vec3::Y, Vec2::new(1.0, 0.5)));
 
         // Test WeldSeam style sampling
         path.stroke_style = PathStrokeStyle::WeldSeam;
@@ -3860,6 +4045,7 @@ mod tests {
             0.25,
             PathStrokeStyle::SmartDecal,
             SmartDecalType::PhillipsScrew,
+            AlphaType::SoftRound,
             true,
             0.0,
             1.0,
@@ -3881,6 +4067,7 @@ mod tests {
             0.4,
             PathStrokeStyle::WeldSeam,
             SmartDecalType::PhillipsScrew,
+            AlphaType::SoftRound,
             true,
             0.5,
             1.0,
@@ -3894,35 +4081,31 @@ mod tests {
         let mut path_state = PathToolState::default();
 
         // Stroke 1: Path from (0,0,0) to (1,0,0)
-        path_state.points.push(PathControlPoint {
-            position_3d: Vec3::new(0.0, 0.0, 0.0),
-            normal: Vec3::Y,
-            uv: Vec2::new(0.0, 0.0),
-            radius_scale: 1.0,
-        });
-        path_state.points.push(PathControlPoint {
-            position_3d: Vec3::new(1.0, 0.0, 0.0),
-            normal: Vec3::Y,
-            uv: Vec2::new(0.5, 0.0),
-            radius_scale: 1.0,
-        });
+        path_state.points.push(PathControlPoint::new(
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::Y,
+            Vec2::new(0.0, 0.0),
+        ));
+        path_state.points.push(PathControlPoint::new(
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::Y,
+            Vec2::new(0.5, 0.0),
+        ));
         assert_eq!(path_state.total_path_count(), 1);
         assert_eq!(path_state.total_point_count(), 2);
 
         // Start new stroke: Stroke 2 from (10, 0, 0) to (11, 0, 0)
         path_state.start_new_path();
-        path_state.points.push(PathControlPoint {
-            position_3d: Vec3::new(10.0, 0.0, 0.0),
-            normal: Vec3::Y,
-            uv: Vec2::new(0.0, 0.5),
-            radius_scale: 1.0,
-        });
-        path_state.points.push(PathControlPoint {
-            position_3d: Vec3::new(11.0, 0.0, 0.0),
-            normal: Vec3::Y,
-            uv: Vec2::new(0.5, 0.5),
-            radius_scale: 1.0,
-        });
+        path_state.points.push(PathControlPoint::new(
+            Vec3::new(10.0, 0.0, 0.0),
+            Vec3::Y,
+            Vec2::new(0.0, 0.5),
+        ));
+        path_state.points.push(PathControlPoint::new(
+            Vec3::new(11.0, 0.0, 0.0),
+            Vec3::Y,
+            Vec2::new(0.5, 0.5),
+        ));
         assert_eq!(path_state.total_path_count(), 2);
         assert_eq!(path_state.total_point_count(), 4);
 
@@ -3955,5 +4138,100 @@ mod tests {
         path_state.activate_other_path(0);
         assert_eq!(path_state.points[0].position_3d.x, 0.0);
         assert_eq!(path_state.other_paths[0].points[0].position_3d.x, 10.0);
+    }
+
+    #[test]
+    fn test_corner_points_spline_evaluation() {
+        // Path with 3 points forming a right-angle corner at (1, 0, 0)
+        let mut points = vec![
+            PathControlPoint {
+                position_3d: Vec3::new(0.0, 0.0, 0.0),
+                normal: Vec3::Y,
+                uv: Vec2::new(0.0, 0.0),
+                radius_scale: 1.0,
+                point_type: PathPointType::Corner,
+            },
+            PathControlPoint {
+                position_3d: Vec3::new(1.0, 0.0, 0.0),
+                normal: Vec3::Y,
+                uv: Vec2::new(0.5, 0.0),
+                radius_scale: 1.0,
+                point_type: PathPointType::Corner,
+            },
+            PathControlPoint {
+                position_3d: Vec3::new(1.0, 1.0, 0.0),
+                normal: Vec3::Y,
+                uv: Vec2::new(0.5, 0.5),
+                radius_scale: 1.0,
+                point_type: PathPointType::Corner,
+            },
+        ];
+
+        // Evaluating spline with Corner points must linearly connect endpoints with 0 Y deviation on first segment
+        let samples = PathToolState::evaluate_spline_curve_for(&points, false, 1.0, 16);
+        assert!(!samples.is_empty());
+        for s in &samples {
+            if s.position_3d.x <= 0.99 {
+                assert!(s.position_3d.y.abs() < 1e-4, "Corner segment from (0,0,0) to (1,0,0) must not overshoot in Y, got y={}", s.position_3d.y);
+            }
+        }
+
+        // When points are Smooth, Catmull-Rom will produce non-zero curve curvature
+        points[0].point_type = PathPointType::Smooth;
+        points[1].point_type = PathPointType::Smooth;
+        points[2].point_type = PathPointType::Smooth;
+        let smooth_samples = PathToolState::evaluate_spline_curve_for(&points, false, 1.0, 16);
+        assert_eq!(smooth_samples.len(), samples.len());
+    }
+
+    #[test]
+    fn test_point_radius_scale_and_subpath_deletion() {
+        let mut path_state = PathToolState::default();
+        path_state.points.push(PathControlPoint {
+            position_3d: Vec3::new(0.0, 0.0, 0.0),
+            normal: Vec3::Y,
+            uv: Vec2::new(0.0, 0.0),
+            radius_scale: 1.0,
+            point_type: PathPointType::Smooth,
+        });
+        path_state.points.push(PathControlPoint {
+            position_3d: Vec3::new(1.0, 0.0, 0.0),
+            normal: Vec3::Y,
+            uv: Vec2::new(0.5, 0.0),
+            radius_scale: 1.0,
+            point_type: PathPointType::Smooth,
+        });
+
+        // Test selected point manipulation
+        path_state.selected_point = Some(1);
+        path_state.set_selected_point_radius_scale(2.5);
+        assert_eq!(path_state.points[1].radius_scale, 2.5);
+
+        let new_type = path_state.toggle_selected_point_type();
+        assert_eq!(new_type, Some(PathPointType::Corner));
+        assert_eq!(path_state.points[1].point_type, PathPointType::Corner);
+
+        // Test delete selected point
+        let deleted = path_state.delete_selected_point();
+        assert!(deleted);
+        assert_eq!(path_state.points.len(), 1);
+        assert_eq!(path_state.selected_point, Some(0));
+
+        // Test sub-path creation and deletion
+        path_state.start_new_path();
+        path_state.points.push(PathControlPoint {
+            position_3d: Vec3::new(5.0, 0.0, 0.0),
+            normal: Vec3::Y,
+            uv: Vec2::new(0.2, 0.2),
+            radius_scale: 1.0,
+            point_type: PathPointType::Smooth,
+        });
+        assert_eq!(path_state.total_path_count(), 2);
+
+        // Delete active path promotes sub-path
+        path_state.delete_active_path();
+        assert_eq!(path_state.total_path_count(), 1);
+        assert_eq!(path_state.points.len(), 1);
+        assert_eq!(path_state.other_paths.len(), 0);
     }
 }

@@ -1101,6 +1101,7 @@ impl PaintcraftApp {
 
         let stroke_style = self.brush_engine.settings.path_tool.stroke_style;
         let decal_type = self.brush_engine.settings.path_tool.decal_type;
+        let custom_alpha = self.brush_engine.settings.path_tool.custom_alpha;
         let heat_tint = self.brush_engine.settings.path_tool.heat_tint;
         let height_depth = self.brush_engine.settings.path_tool.height_depth;
         let mut total_stamps = 0;
@@ -1144,6 +1145,7 @@ impl PaintcraftApp {
                         sample_world_rad,
                         stroke_style,
                         decal_type,
+                        custom_alpha,
                         heat_tint,
                         sample.arc_length,
                         height_depth,
@@ -3016,17 +3018,44 @@ impl eframe::App for PaintcraftApp {
                                 .show_ui(ui, |ui| {
                                     for style in &[
                                         crate::brush::PathStrokeStyle::Continuous,
+                                        crate::brush::PathStrokeStyle::CustomAlpha,
                                         crate::brush::PathStrokeStyle::WeldSeam,
                                         crate::brush::PathStrokeStyle::RopeBraid,
                                         crate::brush::PathStrokeStyle::StitchSeam,
                                         crate::brush::PathStrokeStyle::ChainLinks,
                                         crate::brush::PathStrokeStyle::SmartDecal,
                                     ] {
-                                        ui.selectable_value(&mut self.brush_engine.settings.path_tool.stroke_style, *style, style.name());
+                                        if ui.selectable_value(&mut self.brush_engine.settings.path_tool.stroke_style, *style, style.name()).clicked() {
+                                            self.sync_and_evaluate_active_path_layer(ctx);
+                                        }
                                     }
                                 });
 
-                            if self.brush_engine.settings.path_tool.stroke_style == crate::brush::PathStrokeStyle::SmartDecal {
+                            if self.brush_engine.settings.path_tool.stroke_style == crate::brush::PathStrokeStyle::CustomAlpha {
+                                let cur_alpha = self.brush_engine.settings.path_tool.custom_alpha;
+                                egui::ComboBox::from_id_source("top_bar_path_custom_alpha")
+                                    .selected_text(cur_alpha.name())
+                                    .width(115.0)
+                                    .show_ui(ui, |ui| {
+                                        for a in &[
+                                            crate::brush::AlphaType::SoftRound,
+                                            crate::brush::AlphaType::HardRound,
+                                            crate::brush::AlphaType::NoiseSplatter,
+                                            crate::brush::AlphaType::Chisel,
+                                            crate::brush::AlphaType::Stipple,
+                                            crate::brush::AlphaType::Scratches,
+                                        ] {
+                                            if ui.selectable_value(&mut self.brush_engine.settings.path_tool.custom_alpha, *a, a.name()).clicked() {
+                                                self.sync_and_evaluate_active_path_layer(ctx);
+                                            }
+                                        }
+                                    });
+
+                                ui.label("Spacing:");
+                                if ui.add_sized([50.0, 18.0], egui::Slider::new(&mut self.brush_engine.settings.path_tool.decal_spacing, 0.1..=4.0).text("x")).changed() {
+                                    self.sync_and_evaluate_active_path_layer(ctx);
+                                }
+                            } else if self.brush_engine.settings.path_tool.stroke_style == crate::brush::PathStrokeStyle::SmartDecal {
                                 let cur_decal = self.brush_engine.settings.path_tool.decal_type;
                                 egui::ComboBox::from_id_source("top_bar_path_decal_type")
                                     .selected_text(cur_decal.name())
@@ -3042,14 +3071,48 @@ impl eframe::App for PaintcraftApp {
                                             crate::brush::SmartDecalType::GrommetEyelet,
                                             crate::brush::SmartDecalType::AirVentLouver,
                                         ] {
-                                            ui.selectable_value(&mut self.brush_engine.settings.path_tool.decal_type, *decal, decal.name());
+                                            if ui.selectable_value(&mut self.brush_engine.settings.path_tool.decal_type, *decal, decal.name()).clicked() {
+                                                self.sync_and_evaluate_active_path_layer(ctx);
+                                            }
                                         }
                                     });
 
                                 ui.label("Spacing:");
-                                ui.add_sized([50.0, 18.0], egui::Slider::new(&mut self.brush_engine.settings.path_tool.decal_spacing, 0.4..=3.0).text("x"));
+                                if ui.add_sized([50.0, 18.0], egui::Slider::new(&mut self.brush_engine.settings.path_tool.decal_spacing, 0.4..=3.0).text("x")).changed() {
+                                    self.sync_and_evaluate_active_path_layer(ctx);
+                                }
                             } else if self.brush_engine.settings.path_tool.stroke_style == crate::brush::PathStrokeStyle::WeldSeam {
-                                ui.checkbox(&mut self.brush_engine.settings.path_tool.heat_tint, "HAZ Tint");
+                                if ui.checkbox(&mut self.brush_engine.settings.path_tool.heat_tint, "HAZ Tint").changed() {
+                                    self.sync_and_evaluate_active_path_layer(ctx);
+                                }
+                            }
+
+                            if let Some(sel) = self.brush_engine.settings.path_tool.selected_point {
+                                if sel < self.brush_engine.settings.path_tool.points.len() {
+                                    ui.separator();
+                                    let pt_type = self.brush_engine.settings.path_tool.points[sel].point_type;
+                                    let type_btn = match pt_type {
+                                        crate::brush::PathPointType::Smooth => "Pt Smooth (C)",
+                                        crate::brush::PathPointType::Corner => "Pt Corner (C)",
+                                    };
+                                    if ui.button(type_btn).on_hover_text("Toggle between Smooth spline and sharp Corner (Key: C)").clicked() {
+                                        self.brush_engine.settings.path_tool.points[sel].point_type = match pt_type {
+                                            crate::brush::PathPointType::Smooth => crate::brush::PathPointType::Corner,
+                                            crate::brush::PathPointType::Corner => crate::brush::PathPointType::Smooth,
+                                        };
+                                        self.sync_and_evaluate_active_path_layer(ctx);
+                                    }
+                                    ui.label("Scale:");
+                                    let mut r_scale = self.brush_engine.settings.path_tool.points[sel].radius_scale;
+                                    if ui.add_sized([45.0, 18.0], egui::Slider::new(&mut r_scale, 0.1..=4.0).text("x")).on_hover_text("Selected point radius scale (Shift + Mouse Wheel in viewport)").changed() {
+                                        self.brush_engine.settings.path_tool.points[sel].radius_scale = r_scale;
+                                        self.sync_and_evaluate_active_path_layer(ctx);
+                                    }
+                                    if ui.button("Del Pt").on_hover_text("Delete selected point (Delete / Backspace)").clicked() {
+                                        self.brush_engine.settings.path_tool.delete_selected_point();
+                                        self.sync_and_evaluate_active_path_layer(ctx);
+                                    }
+                                }
                             }
 
                             ui.separator();
@@ -3106,6 +3169,7 @@ impl eframe::App for PaintcraftApp {
                                 .show_ui(ui, |ui| {
                                     for style in &[
                                         crate::brush::PathStrokeStyle::Continuous,
+                                        crate::brush::PathStrokeStyle::CustomAlpha,
                                         crate::brush::PathStrokeStyle::WeldSeam,
                                         crate::brush::PathStrokeStyle::RopeBraid,
                                         crate::brush::PathStrokeStyle::StitchSeam,
@@ -3116,7 +3180,24 @@ impl eframe::App for PaintcraftApp {
                                     }
                                 });
 
-                            if self.brush_engine.settings.stamp_tool.stroke_style == crate::brush::PathStrokeStyle::SmartDecal {
+                            if self.brush_engine.settings.stamp_tool.stroke_style == crate::brush::PathStrokeStyle::CustomAlpha {
+                                let cur_alpha = self.brush_engine.settings.stamp_tool.custom_alpha;
+                                egui::ComboBox::from_id_source("top_bar_stamp_custom_alpha")
+                                    .selected_text(cur_alpha.name())
+                                    .width(115.0)
+                                    .show_ui(ui, |ui| {
+                                        for a in &[
+                                            crate::brush::AlphaType::SoftRound,
+                                            crate::brush::AlphaType::HardRound,
+                                            crate::brush::AlphaType::NoiseSplatter,
+                                            crate::brush::AlphaType::Chisel,
+                                            crate::brush::AlphaType::Stipple,
+                                            crate::brush::AlphaType::Scratches,
+                                        ] {
+                                            ui.selectable_value(&mut self.brush_engine.settings.stamp_tool.custom_alpha, *a, a.name());
+                                        }
+                                    });
+                            } else if self.brush_engine.settings.stamp_tool.stroke_style == crate::brush::PathStrokeStyle::SmartDecal {
                                 let cur_decal = self.brush_engine.settings.stamp_tool.decal_type;
                                 egui::ComboBox::from_id_source("top_bar_stamp_decal_type")
                                     .selected_text(cur_decal.name())

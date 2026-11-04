@@ -177,12 +177,28 @@ impl PaintcraftApp {
                     self.status_message = format!("Started new disconnected path stroke (Path #{})", self.brush_engine.settings.path_tool.total_path_count());
                     ctx.request_repaint();
                 } else if ui.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace)) {
+                    if self.brush_engine.settings.path_tool.delete_selected_point() {
+                        self.sync_and_evaluate_active_path_layer(ctx);
+                        self.status_message = "Removed selected path point".to_string();
+                        ctx.request_repaint();
+                    }
+                } else if ui.input(|i| i.key_pressed(egui::Key::C)) && self.brush_engine.settings.path_tool.selected_point.is_some() {
+                    let new_type = self.brush_engine.settings.path_tool.toggle_selected_point_type();
+                    self.sync_and_evaluate_active_path_layer(ctx);
+                    if let Some(t) = new_type {
+                        self.status_message = format!("Changed selected point type to {}", t.name());
+                    }
+                    ctx.request_repaint();
+                } else if ui.input(|i| i.modifiers.shift && i.raw_scroll_delta.y.abs() > 0.1) && self.brush_engine.settings.path_tool.selected_point.is_some() {
                     if let Some(idx) = self.brush_engine.settings.path_tool.selected_point {
                         if idx < self.brush_engine.settings.path_tool.points.len() {
-                            self.brush_engine.settings.path_tool.points.remove(idx);
-                            self.brush_engine.settings.path_tool.selected_point = None;
+                            let scroll_y = ui.input(|i| i.raw_scroll_delta.y);
+                            let cur = self.brush_engine.settings.path_tool.points[idx].radius_scale;
+                            let delta = if scroll_y > 0.0 { 0.1 } else { -0.1 };
+                            let new_scale = (cur + delta).clamp(0.1, 4.0);
+                            self.brush_engine.settings.path_tool.points[idx].radius_scale = new_scale;
                             self.sync_and_evaluate_active_path_layer(ctx);
-                            self.status_message = format!("Removed path point {}", idx + 1);
+                            self.status_message = format!("Point #{} Radius Scale: {:.2}x", idx + 1, new_scale);
                             ctx.request_repaint();
                         }
                     }
@@ -226,12 +242,7 @@ impl PaintcraftApp {
                                 self.status_message = format!("Activated Path #{} (point {})", self.brush_engine.settings.path_tool.total_path_count(), idx + 1);
                             } else {
                                 let (pos_3d, norm_3d) = self.project.mesh.uv_to_3d_point(glam::Vec2::new(u, v)).unwrap_or((glam::Vec3::new(u, v, 0.0), glam::Vec3::Y));
-                                self.brush_engine.settings.path_tool.points.push(crate::brush::PathControlPoint {
-                                    position_3d: pos_3d,
-                                    normal: norm_3d,
-                                    uv: glam::Vec2::new(u, v),
-                                    radius_scale: 1.0,
-                                });
+                                self.brush_engine.settings.path_tool.points.push(crate::brush::PathControlPoint::new(pos_3d, norm_3d, glam::Vec2::new(u, v)));
                                 let new_idx = self.brush_engine.settings.path_tool.points.len() - 1;
                                 self.brush_engine.settings.path_tool.selected_point = Some(new_idx);
                                 self.sync_and_evaluate_active_path_layer(ctx);
@@ -254,12 +265,7 @@ impl PaintcraftApp {
                                 }
                                 let (pos_3d, norm_3d) = self.project.mesh.uv_to_3d_point(glam::Vec2::new(u, v)).unwrap_or((glam::Vec3::new(u, v, 0.0), glam::Vec3::Y));
                                 self.brush_engine.settings.path_tool.is_sketching = true;
-                                self.brush_engine.settings.path_tool.points.push(crate::brush::PathControlPoint {
-                                    position_3d: pos_3d,
-                                    normal: norm_3d,
-                                    uv: glam::Vec2::new(u, v),
-                                    radius_scale: 1.0,
-                                });
+                                self.brush_engine.settings.path_tool.points.push(crate::brush::PathControlPoint::new(pos_3d, norm_3d, glam::Vec2::new(u, v)));
                                 let new_idx = self.brush_engine.settings.path_tool.points.len() - 1;
                                 self.brush_engine.settings.path_tool.selected_point = Some(new_idx);
                                 ctx.request_repaint();
@@ -284,12 +290,7 @@ impl PaintcraftApp {
                                     .unwrap_or(true);
                                 if can_add {
                                     let (pos_3d, norm_3d) = self.project.mesh.uv_to_3d_point(glam::Vec2::new(u, v)).unwrap_or((glam::Vec3::new(u, v, 0.0), glam::Vec3::Y));
-                                    self.brush_engine.settings.path_tool.points.push(crate::brush::PathControlPoint {
-                                        position_3d: pos_3d,
-                                        normal: norm_3d,
-                                        uv: glam::Vec2::new(u, v),
-                                        radius_scale: 1.0,
-                                    });
+                                    self.brush_engine.settings.path_tool.points.push(crate::brush::PathControlPoint::new(pos_3d, norm_3d, glam::Vec2::new(u, v)));
                                     let new_idx = self.brush_engine.settings.path_tool.points.len() - 1;
                                     self.brush_engine.settings.path_tool.selected_point = Some(new_idx);
                                     self.status_message = format!("Drawing UV path stroke ({} points)", self.brush_engine.settings.path_tool.points.len());
@@ -372,6 +373,7 @@ impl PaintcraftApp {
                                     let rot_rad = stamp_state.rotation_angle.to_radians();
                                     let stroke_style = stamp_state.stroke_style;
                                     let decal_type = stamp_state.decal_type;
+                                    let custom_alpha = stamp_state.custom_alpha;
                                     let heat_tint = stamp_state.heat_tint;
                                     let height_depth = stamp_state.height_depth;
 
@@ -383,6 +385,7 @@ impl PaintcraftApp {
                                         uv_rad,
                                         stroke_style,
                                         decal_type,
+                                        custom_alpha,
                                         heat_tint,
                                         0.0,
                                         height_depth,
@@ -949,6 +952,39 @@ impl PaintcraftApp {
                                 ui.painter().circle_stroke(cur_2d_pt, r_screen * 0.65, egui::Stroke::new(1.0_f32, egui::Color32::from_rgba_unmultiplied(20, 20, 25, 200)));
                             }
                         }
+                        crate::brush::PathStrokeStyle::CustomAlpha => {
+                            let custom_alpha = self.brush_engine.settings.path_tool.custom_alpha;
+                            match custom_alpha {
+                                crate::brush::AlphaType::Chisel => {
+                                    let p0 = cur_2d_pt - tan_2d * (r_screen * 0.9) - bitan_2d * (r_screen * 0.32);
+                                    let p1 = cur_2d_pt + tan_2d * (r_screen * 0.9) - bitan_2d * (r_screen * 0.32);
+                                    let p2 = cur_2d_pt + tan_2d * (r_screen * 0.9) + bitan_2d * (r_screen * 0.32);
+                                    let p3 = cur_2d_pt - tan_2d * (r_screen * 0.9) + bitan_2d * (r_screen * 0.32);
+                                    ui.painter().add(egui::Shape::convex_polygon(
+                                        vec![p0, p1, p2, p3],
+                                        shade_col(1.0, 220),
+                                        egui::Stroke::new(1.0_f32, egui::Color32::from_rgba_unmultiplied(20, 20, 25, 200)),
+                                    ));
+                                }
+                                crate::brush::AlphaType::HardRound => {
+                                    ui.painter().circle_stroke(cur_2d_pt, r_screen, egui::Stroke::new(1.5_f32, egui::Color32::from_rgba_unmultiplied(20, 20, 25, 220)));
+                                    ui.painter().circle_filled(cur_2d_pt, r_screen, shade_col(1.1, 240));
+                                }
+                                crate::brush::AlphaType::Scratches => {
+                                    for offset_k in &[-0.4, 0.0, 0.4] {
+                                        let center_k = cur_2d_pt + bitan_2d * (r_screen * offset_k);
+                                        ui.painter().line_segment(
+                                            [center_k - tan_2d * (r_screen * 0.8), center_k + tan_2d * (r_screen * 0.8)],
+                                            egui::Stroke::new(1.5_f32, shade_col(1.2, 230)),
+                                        );
+                                    }
+                                }
+                                _ => {
+                                    ui.painter().circle_stroke(cur_2d_pt, r_screen + 1.0_f32, egui::Stroke::new(1.0_f32, egui::Color32::from_rgba_unmultiplied(20, 20, 25, 180)));
+                                    ui.painter().circle_filled(cur_2d_pt, r_screen, shade_col(1.0, 210));
+                                }
+                            }
+                        }
                         crate::brush::PathStrokeStyle::Continuous => {
                             ui.painter().circle_stroke(cur_2d_pt, r_screen + 1.0_f32, egui::Stroke::new(1.0_f32, egui::Color32::from_rgba_unmultiplied(20, 20, 25, 180)));
                             ui.painter().circle_filled(cur_2d_pt, r_screen, shade_col(1.0, 220));
@@ -961,8 +997,19 @@ impl PaintcraftApp {
                 for (op_idx, op) in self.brush_engine.settings.path_tool.other_paths.iter().enumerate() {
                     for (i, pt) in op.points.iter().enumerate() {
                         let pt_2d = cmin + egui::vec2(pt.uv.x * cw, pt.uv.y * ch);
-                        ui.painter().circle_stroke(pt_2d, 6.5, egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(100, 160, 220)));
-                        ui.painter().circle_filled(pt_2d, 3.5, egui::Color32::from_rgb(25, 35, 50));
+                        if pt.point_type == crate::brush::PathPointType::Corner {
+                            let d = 5.5_f32;
+                            let diamond = vec![
+                                pt_2d + egui::vec2(0.0, -d),
+                                pt_2d + egui::vec2(d, 0.0),
+                                pt_2d + egui::vec2(0.0, d),
+                                pt_2d + egui::vec2(-d, 0.0),
+                            ];
+                            ui.painter().add(egui::Shape::convex_polygon(diamond, egui::Color32::from_rgb(25, 35, 50), egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(100, 160, 220))));
+                        } else {
+                            ui.painter().circle_stroke(pt_2d, 6.5, egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(100, 160, 220)));
+                            ui.painter().circle_filled(pt_2d, 3.5, egui::Color32::from_rgb(25, 35, 50));
+                        }
                         let badge_pos = pt_2d + egui::vec2(10.0, -10.0);
                         ui.painter().text(
                             badge_pos,
@@ -980,7 +1027,19 @@ impl PaintcraftApp {
                     let pt_2d = cmin + egui::vec2(pt.uv.x * cw, pt.uv.y * ch);
                     let is_selected = sel_idx == Some(i);
 
-                    if is_selected {
+                    if pt.point_type == crate::brush::PathPointType::Corner {
+                        let d = if is_selected { 8.5_f32 } else { 7.0_f32 };
+                        let diamond = vec![
+                            pt_2d + egui::vec2(0.0, -d),
+                            pt_2d + egui::vec2(d, 0.0),
+                            pt_2d + egui::vec2(0.0, d),
+                            pt_2d + egui::vec2(-d, 0.0),
+                        ];
+                        let fill_col = if is_selected { egui::Color32::from_rgb(243, 94, 24) } else { egui::Color32::from_rgb(30, 32, 40) };
+                        let stroke_col = if is_selected { egui::Color32::from_rgb(255, 230, 60) } else { egui::Color32::WHITE };
+                        let stroke_w = if is_selected { 3.0_f32 } else { 2.0_f32 };
+                        ui.painter().add(egui::Shape::convex_polygon(diamond, fill_col, egui::Stroke::new(stroke_w, stroke_col)));
+                    } else if is_selected {
                         ui.painter().circle_stroke(pt_2d, 9.0, egui::Stroke::new(3.0_f32, egui::Color32::from_rgb(255, 230, 60)));
                         ui.painter().circle_filled(pt_2d, 5.0, egui::Color32::from_rgb(243, 94, 24));
                     } else {
@@ -988,11 +1047,28 @@ impl PaintcraftApp {
                         ui.painter().circle_filled(pt_2d, 4.0, egui::Color32::from_rgb(30, 32, 40));
                     }
 
+                    // For the selected point, draw dashed radius ring showing effective scale
+                    if is_selected {
+                        let r_ring = ((uv_rad * cw * pt.radius_scale) * 0.5).clamp(8.0, 80.0);
+                        ui.painter().circle_stroke(pt_2d, r_ring, egui::Stroke::new(1.2_f32, egui::Color32::from_rgba_unmultiplied(255, 230, 60, 160)));
+                        if (pt.radius_scale - 1.0).abs() > 0.05 {
+                            let label_pos = pt_2d + egui::vec2(r_ring + 4.0, 0.0);
+                            ui.painter().text(
+                                label_pos,
+                                egui::Align2::LEFT_CENTER,
+                                format!("{:.1}x", pt.radius_scale),
+                                egui::FontId::monospace(10.0),
+                                egui::Color32::from_rgb(255, 230, 60),
+                            );
+                        }
+                    }
+
                     let badge_pos = pt_2d + egui::vec2(12.0, -12.0);
+                    let type_prefix = if pt.point_type == crate::brush::PathPointType::Corner { "[C] " } else { "" };
                     ui.painter().text(
                         badge_pos,
                         egui::Align2::LEFT_CENTER,
-                        if total_paths > 1 { format!("P{}.{}", total_paths, i + 1) } else { format!("{}", i + 1) },
+                        if total_paths > 1 { format!("{}P{}.{}", type_prefix, total_paths, i + 1) } else { format!("{}{}", type_prefix, i + 1) },
                         egui::FontId::monospace(11.0),
                         if is_selected { egui::Color32::from_rgb(255, 230, 60) } else { egui::Color32::WHITE },
                     );

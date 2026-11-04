@@ -2624,7 +2624,54 @@ impl PaintcraftApp {
                                                         }
                                                     }
                                                 }
+                                                if ui.button("Delete Path").on_hover_text("Delete the active sub-path").clicked() {
+                                                    ps.delete_active_path();
+                                                    prop_changed = true;
+                                                }
                                             });
+                                        }
+
+                                        if let Some(sel_idx) = ps.selected_point {
+                                            if sel_idx < ps.points.len() {
+                                                ui.group(|ui| {
+                                                    ui.horizontal(|ui| {
+                                                        ui.label(egui::RichText::new(format!("Selected Point #{} of {}", sel_idx + 1, ps.points.len())).strong().color(Color32::from_rgb(255, 220, 80)));
+                                                        let pt = &mut ps.points[sel_idx];
+                                                        let (type_name, next_hint) = match pt.point_type {
+                                                            crate::brush::PathPointType::Smooth => ("Type: Smooth", "Click to switch to sharp Corner (Key: C)"),
+                                                            crate::brush::PathPointType::Corner => ("Type: Corner", "Click to switch to Smooth spline (Key: C)"),
+                                                        };
+                                                        if ui.button(type_name).on_hover_text(next_hint).clicked() {
+                                                            pt.point_type = match pt.point_type {
+                                                                crate::brush::PathPointType::Smooth => crate::brush::PathPointType::Corner,
+                                                                crate::brush::PathPointType::Corner => crate::brush::PathPointType::Smooth,
+                                                            };
+                                                            prop_changed = true;
+                                                        }
+                                                        if ui.button("Delete Point (Del)").on_hover_text("Delete this control point (Key: Delete / Backspace)").clicked() {
+                                                            ps.delete_selected_point();
+                                                            prop_changed = true;
+                                                        }
+                                                    });
+                                                    if let Some(cur_sel) = ps.selected_point {
+                                                        if cur_sel < ps.points.len() {
+                                                            let pt = &mut ps.points[cur_sel];
+                                                            ui.horizontal(|ui| {
+                                                                ui.label("Radius Scale:");
+                                                                if ui.add(egui::Slider::new(&mut pt.radius_scale, 0.1..=4.0).text("x").logarithmic(true)).on_hover_text("Per-point radius taper scale (Shift + Mouse Wheel in viewport)").changed() {
+                                                                    prop_changed = true;
+                                                                }
+                                                                for &scale in &[0.5, 1.0, 1.5, 2.0] {
+                                                                    if ui.button(format!("{:.1}x", scale)).clicked() {
+                                                                        pt.radius_scale = scale;
+                                                                        prop_changed = true;
+                                                                    }
+                                                                }
+                                                            });
+                                                        }
+                                                    }
+                                                });
+                                            }
                                         }
 
                                         ui.horizontal(|ui| {
@@ -2678,6 +2725,7 @@ impl PaintcraftApp {
                                                 .show_ui(ui, |ui| {
                                                     for style in &[
                                                         crate::brush::PathStrokeStyle::Continuous,
+                                                        crate::brush::PathStrokeStyle::CustomAlpha,
                                                         crate::brush::PathStrokeStyle::WeldSeam,
                                                         crate::brush::PathStrokeStyle::RopeBraid,
                                                         crate::brush::PathStrokeStyle::StitchSeam,
@@ -2691,7 +2739,34 @@ impl PaintcraftApp {
                                                 });
                                         });
 
-                                        if ps.stroke_style == crate::brush::PathStrokeStyle::SmartDecal {
+                                        if ps.stroke_style == crate::brush::PathStrokeStyle::CustomAlpha {
+                                            ui.horizontal(|ui| {
+                                                ui.label("Alpha:");
+                                                egui::ComboBox::from_id_source("path_layer_custom_alpha")
+                                                    .selected_text(ps.custom_alpha.name())
+                                                    .show_ui(ui, |ui| {
+                                                        for a in &[
+                                                            crate::brush::AlphaType::SoftRound,
+                                                            crate::brush::AlphaType::HardRound,
+                                                            crate::brush::AlphaType::NoiseSplatter,
+                                                            crate::brush::AlphaType::Chisel,
+                                                            crate::brush::AlphaType::Stipple,
+                                                            crate::brush::AlphaType::Scratches,
+                                                        ] {
+                                                            if ui.selectable_value(&mut ps.custom_alpha, *a, a.name()).clicked() {
+                                                                prop_changed = true;
+                                                            }
+                                                        }
+                                                    });
+                                            });
+
+                                            ui.horizontal(|ui| {
+                                                ui.label("Spacing Ratio:");
+                                                if ui.add(egui::Slider::new(&mut ps.decal_spacing, 0.1..=4.0)).on_hover_text("Spacing ratio along path relative to brush radius").changed() {
+                                                    prop_changed = true;
+                                                }
+                                            });
+                                        } else if ps.stroke_style == crate::brush::PathStrokeStyle::SmartDecal {
                                             ui.horizontal(|ui| {
                                                 ui.label("Decal:");
                                                 egui::ComboBox::from_id_source("path_layer_decal_type")

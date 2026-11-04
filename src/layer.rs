@@ -840,6 +840,7 @@ impl Layer {
                         sample_world_rad,
                         path_state.stroke_style,
                         path_state.decal_type,
+                        path_state.custom_alpha,
                         path_state.heat_tint,
                         sample.arc_length,
                         path_state.height_depth,
@@ -6348,18 +6349,16 @@ mod tests {
 
         // Configure path points
         if let Some(ps) = &mut layer.path_state {
-            ps.points.push(crate::brush::PathControlPoint {
-                position_3d: Vec3::new(0.0, 1.0, 0.0),
-                normal: Vec3::Y,
-                uv: glam::Vec2::new(0.2, 0.5),
-                radius_scale: 1.0,
-            });
-            ps.points.push(crate::brush::PathControlPoint {
-                position_3d: Vec3::new(0.5, 1.0, 0.0),
-                normal: Vec3::Y,
-                uv: glam::Vec2::new(0.8, 0.5),
-                radius_scale: 1.0,
-            });
+            ps.points.push(crate::brush::PathControlPoint::new(
+                Vec3::new(0.0, 1.0, 0.0),
+                Vec3::Y,
+                glam::Vec2::new(0.2, 0.5),
+            ));
+            ps.points.push(crate::brush::PathControlPoint::new(
+                Vec3::new(0.5, 1.0, 0.0),
+                Vec3::Y,
+                glam::Vec2::new(0.8, 0.5),
+            ));
             ps.stroke_style = crate::brush::PathStrokeStyle::WeldSeam;
         }
 
@@ -6389,22 +6388,88 @@ mod tests {
         // Add a second disconnected path on the same Path layer
         if let Some(ps) = &mut layer.path_state {
             ps.start_new_path();
-            ps.points.push(crate::brush::PathControlPoint {
-                position_3d: Vec3::new(-0.5, 1.0, 0.0),
-                normal: Vec3::Y,
-                uv: glam::Vec2::new(0.1, 0.2),
-                radius_scale: 1.0,
-            });
-            ps.points.push(crate::brush::PathControlPoint {
-                position_3d: Vec3::new(-0.8, 1.0, 0.0),
-                normal: Vec3::Y,
-                uv: glam::Vec2::new(0.1, 0.8),
-                radius_scale: 1.0,
-            });
+            ps.points.push(crate::brush::PathControlPoint::new(
+                Vec3::new(-0.5, 1.0, 0.0),
+                Vec3::Y,
+                glam::Vec2::new(0.1, 0.2),
+            ));
+            ps.points.push(crate::brush::PathControlPoint::new(
+                Vec3::new(-0.8, 1.0, 0.0),
+                Vec3::Y,
+                glam::Vec2::new(0.1, 0.8),
+            ));
             assert_eq!(ps.total_path_count(), 2);
         }
         layer.evaluate_path_layer(&mesh, &mut engine);
         assert!(layer.dirty_flags.color);
+    }
+
+    #[test]
+    fn test_path_layer_custom_alpha_and_corner_points() {
+        let mut layer = Layer::new_path_layer(11, "Custom Alpha Seam".to_string(), 64, 64);
+        assert_eq!(layer.layer_type, LayerType::Path);
+
+        let mesh = crate::mesh::Mesh::create_cube_mesh("Cube", 2.0);
+        let mut engine = crate::brush::BrushEngine::new();
+        engine.settings.radius = 0.25;
+
+        // Configure path state with CustomAlpha and corner points
+        if let Some(ps) = &mut layer.path_state {
+            let mut pt0 = crate::brush::PathControlPoint::new(
+                Vec3::new(0.0, 1.0, 0.0),
+                Vec3::Y,
+                glam::Vec2::new(0.2, 0.5),
+            );
+            pt0.point_type = crate::brush::PathPointType::Corner;
+            pt0.radius_scale = 1.8;
+
+            let mut pt1 = crate::brush::PathControlPoint::new(
+                Vec3::new(0.5, 1.0, 0.0),
+                Vec3::Y,
+                glam::Vec2::new(0.5, 0.5),
+            );
+            pt1.point_type = crate::brush::PathPointType::Smooth;
+            pt1.radius_scale = 0.7;
+
+            let mut pt2 = crate::brush::PathControlPoint::new(
+                Vec3::new(0.8, 1.0, 0.0),
+                Vec3::Y,
+                glam::Vec2::new(0.8, 0.5),
+            );
+            pt2.point_type = crate::brush::PathPointType::Corner;
+            pt2.radius_scale = 1.0;
+
+            ps.points.push(pt0);
+            ps.points.push(pt1);
+            ps.points.push(pt2);
+
+            ps.stroke_style = crate::brush::PathStrokeStyle::CustomAlpha;
+            ps.custom_alpha = crate::brush::AlphaType::NoiseSplatter;
+            ps.decal_spacing = 0.8;
+            ps.taper_start = 0.2;
+            ps.taper_end = 0.2;
+        }
+
+        layer.evaluate_path_layer(&mesh, &mut engine);
+        assert!(layer.dirty_rect.is_some(), "Layer must have a dirty rect after path evaluation");
+        assert!(layer.dirty_flags.color, "Base color channel must be dirty");
+        assert!(layer.dirty_flags.roughness, "Roughness channel must be dirty");
+        assert!(layer.dirty_flags.metallic, "Metallic channel must be dirty");
+
+        // Test with different CustomAlpha variants
+        for alpha in &[
+            crate::brush::AlphaType::SoftRound,
+            crate::brush::AlphaType::HardRound,
+            crate::brush::AlphaType::Chisel,
+            crate::brush::AlphaType::Stipple,
+            crate::brush::AlphaType::Scratches,
+        ] {
+            if let Some(ps) = &mut layer.path_state {
+                ps.custom_alpha = *alpha;
+            }
+            layer.evaluate_path_layer(&mesh, &mut engine);
+            assert!(layer.dirty_flags.color);
+        }
     }
 }
 
