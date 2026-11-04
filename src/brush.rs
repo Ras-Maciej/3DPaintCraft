@@ -532,10 +532,20 @@ pub struct PathSample {
     pub arc_length: f32,
 }
 
+/// An independent sub-path segment containing control points
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SubPath {
+    pub points: Vec<PathControlPoint>,
+    #[serde(default)]
+    pub closed: bool,
+}
+
 /// State of the Substance 3D Painter-style Vector Path Tool
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PathToolState {
     pub points: Vec<PathControlPoint>,
+    #[serde(default)]
+    pub other_paths: Vec<SubPath>,
     pub closed: bool,
     pub spacing_ratio: f32, // Spacing as fraction of brush radius (default 0.35)
     pub follow_tangent: bool, // Align stamp rotation to path tangent (default true)
@@ -585,6 +595,7 @@ impl Default for PathToolState {
     fn default() -> Self {
         Self {
             points: Vec::new(),
+            other_paths: Vec::new(),
             closed: false,
             spacing_ratio: 0.35,
             follow_tangent: true,
@@ -635,9 +646,58 @@ impl Default for StampToolState {
 impl PathToolState {
     pub fn clear(&mut self) {
         self.points.clear();
+        self.other_paths.clear();
         self.selected_point = None;
         self.is_dragging = false;
         self.is_sketching = false;
+    }
+
+    /// Starts a new disconnected path segment, moving current points into other_paths
+    pub fn start_new_path(&mut self) {
+        if !self.points.is_empty() {
+            self.other_paths.push(SubPath {
+                points: std::mem::take(&mut self.points),
+                closed: self.closed,
+            });
+        }
+        self.closed = false;
+        self.selected_point = None;
+        self.is_dragging = false;
+        self.is_sketching = false;
+    }
+
+    /// Total number of distinct path segments (other_paths + active path if non-empty)
+    pub fn total_path_count(&self) -> usize {
+        let active = if !self.points.is_empty() { 1 } else { 0 };
+        self.other_paths.len() + active
+    }
+
+    /// Total count of all control points across all paths
+    pub fn total_point_count(&self) -> usize {
+        self.points.len() + self.other_paths.iter().map(|p| p.points.len()).sum::<usize>()
+    }
+
+    /// True if all paths are empty
+    pub fn is_empty(&self) -> bool {
+        self.points.is_empty() && self.other_paths.is_empty()
+    }
+
+    /// Swaps the currently active path with one of the other sub-paths
+    pub fn activate_other_path(&mut self, other_idx: usize) {
+        if other_idx < self.other_paths.len() {
+            let cur_pts = std::mem::take(&mut self.points);
+            let cur_closed = self.closed;
+            let target = self.other_paths.remove(other_idx);
+            if !cur_pts.is_empty() {
+                self.other_paths.push(SubPath {
+                    points: cur_pts,
+                    closed: cur_closed,
+                });
+            }
+            self.points = target.points;
+            self.closed = target.closed;
+            self.selected_point = None;
+        }
     }
 
     /// Project spline samples onto the true 3D mesh surface so chords never dip inside curved geometry
@@ -660,53 +720,57 @@ impl PathToolState {
         }
     }
 
-    /// Evaluates smooth Catmull-Rom spline curves across control points and returns
-    /// a dense polyline sequence of curve points for rendering the vector line itself.
-    pub fn evaluate_spline_curve(&self, sub_steps_per_segment: usize) -> Vec<PathSample> {
-        let n = self.points.len();
+    /// Evaluates smooth Catmull-Rom spline curves across a specific slice of control points
+    pub fn evaluate_spline_curve_for(
+        points: &[PathControlPoint],
+        closed: bool,
+        taper_start: f32,
+        sub_steps_per_segment: usize,
+    ) -> Vec<PathSample> {
+        let n = points.len();
         if n == 0 {
             return Vec::new();
         }
         if n == 1 {
-            let pt = &self.points[0];
+            let pt = &points[0];
             return vec![PathSample {
                 position_3d: pt.position_3d,
                 normal: pt.normal,
                 uv: pt.uv,
                 tangent_angle: 0.0,
-                radius_scale: pt.radius_scale * self.taper_start,
+                radius_scale: pt.radius_scale * taper_start,
                 arc_length: 0.0,
             }];
         }
 
-        let num_segments = if self.closed { n } else { n - 1 };
+        let num_segments = if closed { n } else { n - 1 };
         let steps = sub_steps_per_segment.max(8);
         let mut curve = Vec::with_capacity(num_segments * steps + 1);
         let mut cur_dist = 0.0f32;
         let mut prev_pos: Option<Vec3> = None;
 
         for seg in 0..num_segments {
-            let p1 = &self.points[seg];
-            let p2 = &self.points[(seg + 1) % n];
+            let p1 = &points[seg];
+            let p2 = &points[(seg + 1) % n];
 
             let p0 = if seg == 0 {
-                if self.closed {
-                    &self.points[n - 1]
+                if closed {
+                    &points[n - 1]
                 } else {
                     p1
                 }
             } else {
-                &self.points[seg - 1]
+                &points[seg - 1]
             };
 
             let p3 = if seg + 1 >= num_segments {
-                if self.closed {
-                    &self.points[(seg + 2) % n]
+                if closed {
+                    &points[(seg + 2) % n]
                 } else {
                     p2
                 }
             } else {
-                &self.points[(seg + 2) % n]
+                &points[(seg + 2) % n]
             };
 
             for step in 0..steps {
@@ -752,9 +816,9 @@ impl PathToolState {
         }
 
         // Add final point for open curves
-        if !self.closed {
-            let last = &self.points[n - 1];
-            let prev = &self.points[n - 2];
+        if !closed {
+            let last = &points[n - 1];
+            let prev = &points[n - 2];
             let d_uv = last.uv - prev.uv;
             if let Some(prev_p) = prev_pos {
                 cur_dist += (last.position_3d - prev_p).length();
@@ -772,21 +836,48 @@ impl PathToolState {
         curve
     }
 
-    /// Evaluates smooth Catmull-Rom spline curves across control points and returns
-    /// sampled stroke points spaced evenly by (world_radius * spacing_ratio).
-    pub fn sample_path(&self, brush_radius: f32) -> Vec<PathSample> {
-        let n = self.points.len();
+    /// Evaluates smooth Catmull-Rom spline curves across the active path control points
+    pub fn evaluate_spline_curve(&self, sub_steps_per_segment: usize) -> Vec<PathSample> {
+        Self::evaluate_spline_curve_for(&self.points, self.closed, self.taper_start, sub_steps_per_segment)
+    }
+
+    /// Evaluates each independent path segment into its own distinct polyline curve points (no connection across paths)
+    pub fn evaluate_all_spline_curves(&self, sub_steps_per_segment: usize) -> Vec<Vec<PathSample>> {
+        let mut all = Vec::new();
+        for op in &self.other_paths {
+            if !op.points.is_empty() {
+                all.push(Self::evaluate_spline_curve_for(&op.points, op.closed, self.taper_start, sub_steps_per_segment));
+            }
+        }
+        if !self.points.is_empty() {
+            all.push(Self::evaluate_spline_curve_for(&self.points, self.closed, self.taper_start, sub_steps_per_segment));
+        }
+        all
+    }
+
+    /// Evaluates and samples stroke points for a specific sub-path segment
+    pub fn sample_path_for(
+        points: &[PathControlPoint],
+        closed: bool,
+        stroke_style: PathStrokeStyle,
+        decal_spacing: f32,
+        spacing_ratio: f32,
+        taper_start: f32,
+        taper_end: f32,
+        brush_radius: f32,
+    ) -> Vec<PathSample> {
+        let n = points.len();
         if n == 0 {
             return Vec::new();
         }
         if n == 1 {
-            let pt = &self.points[0];
+            let pt = &points[0];
             return vec![PathSample {
                 position_3d: pt.position_3d,
                 normal: pt.normal,
                 uv: pt.uv,
                 tangent_angle: 0.0,
-                radius_scale: pt.radius_scale * self.taper_start,
+                radius_scale: pt.radius_scale * taper_start,
                 arc_length: 0.0,
             }];
         }
@@ -798,7 +889,7 @@ impl PathToolState {
             brush_radius
         }.clamp(0.002, 1.0);
 
-        let dense_eval = self.evaluate_spline_curve(32);
+        let dense_eval = Self::evaluate_spline_curve_for(points, closed, taper_start, 32);
         if dense_eval.is_empty() {
             return Vec::new();
         }
@@ -811,18 +902,18 @@ impl PathToolState {
                 normal: s0.normal,
                 uv: s0.uv,
                 tangent_angle: s0.tangent_angle,
-                radius_scale: s0.radius_scale * self.taper_start,
+                radius_scale: s0.radius_scale * taper_start,
                 arc_length: 0.0,
             }];
         }
 
-        let step_dist = match self.stroke_style {
-            PathStrokeStyle::SmartDecal => (eff_radius * self.decal_spacing.max(0.25) * 2.0).max(0.005),
+        let step_dist = match stroke_style {
+            PathStrokeStyle::SmartDecal => (eff_radius * decal_spacing.max(0.25) * 2.0).max(0.005),
             PathStrokeStyle::WeldSeam => (eff_radius * 0.22).max(0.002),
             PathStrokeStyle::RopeBraid => (eff_radius * 0.15).max(0.002),
             PathStrokeStyle::StitchSeam => (eff_radius * 0.25).max(0.002),
             PathStrokeStyle::ChainLinks => (eff_radius * 0.35).max(0.002),
-            PathStrokeStyle::Continuous => (eff_radius * self.spacing_ratio.max(0.05)).max(0.002),
+            PathStrokeStyle::Continuous => (eff_radius * spacing_ratio.max(0.05)).max(0.002),
         };
 
         let mut samples = Vec::new();
@@ -859,10 +950,10 @@ impl PathToolState {
             let norm_pos = (cur_dist / total_len).clamp(0.0, 1.0);
             let taper = if norm_pos < 0.25 {
                 let f = norm_pos / 0.25;
-                self.taper_start * (1.0 - f) + 1.0 * f
+                taper_start * (1.0 - f) + 1.0 * f
             } else if norm_pos > 0.75 {
                 let f = (norm_pos - 0.75) / 0.25;
-                1.0 * (1.0 - f) + self.taper_end * f
+                1.0 * (1.0 - f) + taper_end * f
             } else {
                 1.0
             };
@@ -882,6 +973,43 @@ impl PathToolState {
         samples
     }
 
+    /// Evaluates and samples all independent path segments, keeping them grouped so each path has distinct tangent angles and bounds
+    pub fn sample_all_paths_grouped(&self, brush_radius: f32) -> Vec<Vec<PathSample>> {
+        let mut grouped = Vec::new();
+        for op in &self.other_paths {
+            if !op.points.is_empty() {
+                grouped.push(Self::sample_path_for(
+                    &op.points,
+                    op.closed,
+                    self.stroke_style,
+                    self.decal_spacing,
+                    self.spacing_ratio,
+                    self.taper_start,
+                    self.taper_end,
+                    brush_radius,
+                ));
+            }
+        }
+        if !self.points.is_empty() {
+            grouped.push(Self::sample_path_for(
+                &self.points,
+                self.closed,
+                self.stroke_style,
+                self.decal_spacing,
+                self.spacing_ratio,
+                self.taper_start,
+                self.taper_end,
+                brush_radius,
+            ));
+        }
+        grouped
+    }
+
+    /// Evaluates smooth Catmull-Rom spline curves across all control points in all sub-paths
+    pub fn sample_path(&self, brush_radius: f32) -> Vec<PathSample> {
+        self.sample_all_paths_grouped(brush_radius).into_iter().flatten().collect()
+    }
+
     /// Shift path points in 3D world space (either all points, or just the selected point)
     pub fn shift(&mut self, delta: Vec3) {
         if let Some(idx) = self.selected_point {
@@ -892,6 +1020,11 @@ impl PathToolState {
         }
         for pt in &mut self.points {
             pt.position_3d += delta;
+        }
+        for op in &mut self.other_paths {
+            for pt in &mut op.points {
+                pt.position_3d += delta;
+            }
         }
     }
 
@@ -908,6 +1041,12 @@ impl PathToolState {
             let n = pt.normal.normalize_or_zero();
             pt.position_3d += n * distance;
         }
+        for op in &mut self.other_paths {
+            for pt in &mut op.points {
+                let n = pt.normal.normalize_or_zero();
+                pt.position_3d += n * distance;
+            }
+        }
     }
 
     /// Reverses the order of path points
@@ -920,24 +1059,32 @@ impl PathToolState {
         }
     }
 
-    /// Smooths the path by applying a Laplacian smoothing filter across points
-    pub fn smooth(&mut self) {
-        let n = self.points.len();
+    /// Smooths a slice of control points using Laplacian smoothing filter
+    pub fn smooth_points(points: &mut [PathControlPoint], closed: bool) {
+        let n = points.len();
         if n < 3 {
             return;
         }
-        let old_pts: Vec<Vec3> = self.points.iter().map(|p| p.position_3d).collect();
-        let old_uvs: Vec<Vec2> = self.points.iter().map(|p| p.uv).collect();
-        let num_segments = if self.closed { n } else { n - 2 };
-        let start_idx = if self.closed { 0 } else { 1 };
+        let old_pts: Vec<Vec3> = points.iter().map(|p| p.position_3d).collect();
+        let old_uvs: Vec<Vec2> = points.iter().map(|p| p.uv).collect();
+        let num_segments = if closed { n } else { n - 2 };
+        let start_idx = if closed { 0 } else { 1 };
 
         for i in 0..num_segments {
             let idx = start_idx + i;
             let prev_idx = if idx == 0 { n - 1 } else { idx - 1 };
             let next_idx = (idx + 1) % n;
 
-            self.points[idx].position_3d = old_pts[prev_idx] * 0.25 + old_pts[idx] * 0.5 + old_pts[next_idx] * 0.25;
-            self.points[idx].uv = old_uvs[prev_idx] * 0.25 + old_uvs[idx] * 0.5 + old_uvs[next_idx] * 0.25;
+            points[idx].position_3d = old_pts[prev_idx] * 0.25 + old_pts[idx] * 0.5 + old_pts[next_idx] * 0.25;
+            points[idx].uv = old_uvs[prev_idx] * 0.25 + old_uvs[idx] * 0.5 + old_uvs[next_idx] * 0.25;
+        }
+    }
+
+    /// Smooths the path by applying a Laplacian smoothing filter across points in all paths
+    pub fn smooth(&mut self) {
+        Self::smooth_points(&mut self.points, self.closed);
+        for op in &mut self.other_paths {
+            Self::smooth_points(&mut op.points, op.closed);
         }
     }
 }
@@ -3740,5 +3887,73 @@ mod tests {
         );
         assert!(layer.dirty_flags.color);
         assert!(layer.dirty_flags.normal);
+    }
+
+    #[test]
+    fn test_multiple_disconnected_paths() {
+        let mut path_state = PathToolState::default();
+
+        // Stroke 1: Path from (0,0,0) to (1,0,0)
+        path_state.points.push(PathControlPoint {
+            position_3d: Vec3::new(0.0, 0.0, 0.0),
+            normal: Vec3::Y,
+            uv: Vec2::new(0.0, 0.0),
+            radius_scale: 1.0,
+        });
+        path_state.points.push(PathControlPoint {
+            position_3d: Vec3::new(1.0, 0.0, 0.0),
+            normal: Vec3::Y,
+            uv: Vec2::new(0.5, 0.0),
+            radius_scale: 1.0,
+        });
+        assert_eq!(path_state.total_path_count(), 1);
+        assert_eq!(path_state.total_point_count(), 2);
+
+        // Start new stroke: Stroke 2 from (10, 0, 0) to (11, 0, 0)
+        path_state.start_new_path();
+        path_state.points.push(PathControlPoint {
+            position_3d: Vec3::new(10.0, 0.0, 0.0),
+            normal: Vec3::Y,
+            uv: Vec2::new(0.0, 0.5),
+            radius_scale: 1.0,
+        });
+        path_state.points.push(PathControlPoint {
+            position_3d: Vec3::new(11.0, 0.0, 0.0),
+            normal: Vec3::Y,
+            uv: Vec2::new(0.5, 0.5),
+            radius_scale: 1.0,
+        });
+        assert_eq!(path_state.total_path_count(), 2);
+        assert_eq!(path_state.total_point_count(), 4);
+
+        // 1. Spline evaluation must yield two separate, disconnected polyline arrays
+        let all_curves = path_state.evaluate_all_spline_curves(8);
+        assert_eq!(all_curves.len(), 2, "Must evaluate to exactly 2 isolated curves");
+        assert!(!all_curves[0].is_empty());
+        assert!(!all_curves[1].is_empty());
+
+        // Ensure curve 0 stays within [0, 1] on X, and curve 1 stays within [10, 11] on X
+        for pt in &all_curves[0] {
+            assert!(pt.position_3d.x >= -0.1 && pt.position_3d.x <= 1.1, "Curve 0 must not bridge across space");
+        }
+        for pt in &all_curves[1] {
+            assert!(pt.position_3d.x >= 9.9 && pt.position_3d.x <= 11.1, "Curve 1 must not bridge across space");
+        }
+
+        // 2. Grouped sampling must sample each path independently, resetting arc length
+        let grouped = path_state.sample_all_paths_grouped(0.2);
+        assert_eq!(grouped.len(), 2, "Must produce two independent sample groups");
+        assert_eq!(grouped[0][0].arc_length, 0.0);
+        assert_eq!(grouped[1][0].arc_length, 0.0);
+
+        // 3. Transformations affect both active and other paths
+        path_state.shift(Vec3::new(0.0, 5.0, 0.0));
+        assert_eq!(path_state.points[0].position_3d.y, 5.0);
+        assert_eq!(path_state.other_paths[0].points[0].position_3d.y, 5.0);
+
+        // 4. Activate other path swaps active and archived
+        path_state.activate_other_path(0);
+        assert_eq!(path_state.points[0].position_3d.x, 0.0);
+        assert_eq!(path_state.other_paths[0].points[0].position_3d.x, 10.0);
     }
 }

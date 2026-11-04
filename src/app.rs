@@ -936,6 +936,66 @@ impl PaintcraftApp {
         }
     }
 
+    /// Robust layer selection: saves outgoing vector path state if switching from a Path layer,
+    /// configures tool mode and active state for the incoming layer, and cleans up phantom previews.
+    pub fn select_layer(&mut self, new_idx: usize, ctx: &egui::Context) {
+        if new_idx >= self.project.layers.len() {
+            return;
+        }
+
+        let old_idx = self.project.active_layer_idx;
+        if old_idx < self.project.layers.len() && self.project.layers[old_idx].layer_type == LayerType::Path {
+            self.project.layers[old_idx].path_state = Some(self.brush_engine.settings.path_tool.clone());
+        }
+
+        self.project.active_layer_idx = new_idx;
+        let layer_type = self.project.layers[new_idx].layer_type;
+        let layer_name = self.project.layers[new_idx].name.clone();
+
+        match layer_type {
+            LayerType::Path => {
+                if let Some(ps) = &self.project.layers[new_idx].path_state {
+                    self.brush_engine.settings.path_tool = ps.clone();
+                } else {
+                    self.brush_engine.settings.path_tool = crate::brush::PathToolState::default();
+                    self.project.layers[new_idx].path_state = Some(self.brush_engine.settings.path_tool.clone());
+                }
+                self.brush_engine.settings.mode = ToolMode::Path;
+                self.brush_engine.settings.target = PaintTarget::Material;
+                self.status_message = format!("Selected Vector Path Layer '{}' (Paths live & editable)", layer_name);
+            }
+            LayerType::Paint => {
+                if self.brush_engine.settings.mode == ToolMode::Path {
+                    self.brush_engine.settings.mode = ToolMode::Brush;
+                }
+                self.brush_engine.settings.path_tool.clear();
+                self.brush_engine.settings.target = PaintTarget::Material;
+                self.status_message = format!("Selected Paint Layer '{}'", layer_name);
+            }
+            LayerType::Fill => {
+                if self.brush_engine.settings.mode == ToolMode::Path {
+                    self.brush_engine.settings.mode = ToolMode::Brush;
+                }
+                self.brush_engine.settings.path_tool.clear();
+                self.brush_engine.settings.target = PaintTarget::Material;
+                self.status_message = format!("Selected Fill Layer '{}'", layer_name);
+            }
+            LayerType::Folder => {
+                if self.brush_engine.settings.mode == ToolMode::Path {
+                    self.brush_engine.settings.mode = ToolMode::Brush;
+                }
+                self.brush_engine.settings.path_tool.clear();
+                self.status_message = format!("Selected Folder '{}'", layer_name);
+            }
+        }
+
+        if self.mask_preview_layer_id.is_some() {
+            self.exit_mask_preview(ctx);
+        }
+
+        ctx.request_repaint();
+    }
+
     /// Syncs vector path state into active Path layer, re-evaluates all spline decals non-destructively, and updates viewport textures
     pub fn sync_and_evaluate_active_path_layer(&mut self, ctx: &egui::Context) {
         let act_idx = self.project.active_layer_idx;
@@ -958,8 +1018,7 @@ impl PaintcraftApp {
 
     /// Commit all stamps along the Catmull-Rom spline path into the active layer or mask
     pub fn commit_path_tool(&mut self, ctx: &egui::Context) {
-        let n_points = self.brush_engine.settings.path_tool.points.len();
-        if n_points == 0 {
+        if self.brush_engine.settings.path_tool.is_empty() {
             return;
         }
 
@@ -984,18 +1043,20 @@ impl PaintcraftApp {
 
         let doc_w = self.project.texture_width;
         let world_rad = ((self.brush_engine.settings.radius / (doc_w as f32).max(1.0)) * 2.0).clamp(0.005, 0.5);
-        let mut samples = self.brush_engine.settings.path_tool.sample_path(world_rad);
-        if samples.is_empty() {
+        let mut grouped_samples = self.brush_engine.settings.path_tool.sample_all_paths_grouped(world_rad);
+        if grouped_samples.is_empty() {
             return;
         }
 
         if self.brush_engine.settings.path_tool.snap_to_surface {
-            crate::brush::PathToolState::project_samples_to_mesh(
-                &mut samples,
-                &self.project.mesh,
-                world_rad,
-                self.brush_engine.settings.path_tool.surface_offset,
-            );
+            for samples in &mut grouped_samples {
+                crate::brush::PathToolState::project_samples_to_mesh(
+                    samples,
+                    &self.project.mesh,
+                    world_rad,
+                    self.brush_engine.settings.path_tool.surface_offset,
+                );
+            }
         }
 
         self.flush_pending_gpu_readbacks(ctx);
@@ -1038,52 +1099,56 @@ impl PaintcraftApp {
         let mesh = self.project.mesh.clone();
         let doc_h = self.project.texture_height;
 
-        self.brush_engine.last_hit_pos = None;
-        self.brush_engine.last_hit_normal = None;
-        self.brush_engine.last_uv = None;
-
         let stroke_style = self.brush_engine.settings.path_tool.stroke_style;
         let decal_type = self.brush_engine.settings.path_tool.decal_type;
         let heat_tint = self.brush_engine.settings.path_tool.heat_tint;
         let height_depth = self.brush_engine.settings.path_tool.height_depth;
+        let mut total_stamps = 0;
 
-        for (i, sample) in samples.iter().enumerate() {
-            self.brush_engine.settings.radius = (orig_radius * sample.radius_scale).clamp(1.0, 300.0);
-            if self.brush_engine.settings.path_tool.follow_tangent {
-                self.brush_engine.follow_path_angle = sample.tangent_angle;
-            }
+        for samples in grouped_samples {
+            self.brush_engine.last_hit_pos = None;
+            self.brush_engine.last_hit_normal = None;
+            self.brush_engine.last_uv = None;
 
-            let sample_world_rad = ((self.brush_engine.settings.radius / (doc_w as f32).max(1.0)) * 2.0).max(0.005);
-            let layer = &mut self.project.layers[act_idx];
+            for (i, sample) in samples.iter().enumerate() {
+                total_stamps += 1;
+                self.brush_engine.settings.radius = (orig_radius * sample.radius_scale).clamp(1.0, 300.0);
+                if self.brush_engine.settings.path_tool.follow_tangent {
+                    self.brush_engine.follow_path_angle = sample.tangent_angle;
+                }
 
-            if stroke_style == crate::brush::PathStrokeStyle::Continuous {
-                self.brush_engine.paint_stroke_3d(layer, &mesh, sample.position_3d, sample.normal, sample_world_rad);
-            } else {
-                let next_idx = if i + 1 < samples.len() { i + 1 } else { i };
-                let prev_idx = if i > 0 { i - 1 } else { i };
-                let tan_3d = if next_idx != prev_idx {
-                    samples[next_idx].position_3d - samples[prev_idx].position_3d
-                } else if i + 1 < samples.len() {
-                    samples[i + 1].position_3d - sample.position_3d
-                } else if i > 0 {
-                    sample.position_3d - samples[i - 1].position_3d
+                let sample_world_rad = ((self.brush_engine.settings.radius / (doc_w as f32).max(1.0)) * 2.0).max(0.005);
+                let layer = &mut self.project.layers[act_idx];
+
+                if stroke_style == crate::brush::PathStrokeStyle::Continuous {
+                    self.brush_engine.paint_stroke_3d(layer, &mesh, sample.position_3d, sample.normal, sample_world_rad);
                 } else {
-                    glam::Vec3::X
-                };
+                    let next_idx = if i + 1 < samples.len() { i + 1 } else { i };
+                    let prev_idx = if i > 0 { i - 1 } else { i };
+                    let tan_3d = if next_idx != prev_idx {
+                        samples[next_idx].position_3d - samples[prev_idx].position_3d
+                    } else if i + 1 < samples.len() {
+                        samples[i + 1].position_3d - sample.position_3d
+                    } else if i > 0 {
+                        sample.position_3d - samples[i - 1].position_3d
+                    } else {
+                        glam::Vec3::X
+                    };
 
-                self.brush_engine.stamp_3d_decal(
-                    layer,
-                    &mesh,
-                    sample.position_3d,
-                    sample.normal,
-                    tan_3d,
-                    sample_world_rad,
-                    stroke_style,
-                    decal_type,
-                    heat_tint,
-                    sample.arc_length,
-                    height_depth,
-                );
+                    self.brush_engine.stamp_3d_decal(
+                        layer,
+                        &mesh,
+                        sample.position_3d,
+                        sample.normal,
+                        tan_3d,
+                        sample_world_rad,
+                        stroke_style,
+                        decal_type,
+                        heat_tint,
+                        sample.arc_length,
+                        height_depth,
+                    );
+                }
             }
         }
 
@@ -1100,7 +1165,7 @@ impl PaintcraftApp {
         self.brush_engine.last_uv = None;
 
         let style_label = stroke_style.name();
-        let desc = format!("{} Path ({} stamps)", style_label, samples.len());
+        let desc = format!("{} Path ({} stamps)", style_label, total_stamps);
         if let Some(layer) = self.project.layers.get_mut(act_idx) {
             if let Some(action) = layer.finish_stroke_delta(act_idx, &desc) {
                 self.history.push(&desc, action);
@@ -1122,7 +1187,7 @@ impl PaintcraftApp {
         }
 
         self.brush_engine.settings.path_tool.clear();
-        self.status_message = format!("{}: {} stamps committed", style_label, samples.len());
+        self.status_message = format!("{}: {} stamps committed", style_label, total_stamps);
         self.project.is_dirty = true;
         ctx.request_repaint();
     }
@@ -2923,14 +2988,23 @@ impl eframe::App for PaintcraftApp {
                         }
                         ToolMode::Path => {
                             ui.label(egui::RichText::new("Vector Path").strong().color(Color32::from_rgb(243, 94, 24)));
-                            let num_pts = self.brush_engine.settings.path_tool.points.len();
-                            ui.label(format!("Pts: {}", num_pts));
+                            let num_paths = self.brush_engine.settings.path_tool.total_path_count();
+                            let num_pts = self.brush_engine.settings.path_tool.total_point_count();
+                            ui.label(format!("Paths: {} | Pts: {}", num_paths, num_pts));
 
-                            if ui.add_enabled(num_pts > 0, egui::Button::new(egui::RichText::new("Commit (Enter)").color(Color32::WHITE)).fill(Color32::from_rgb(45, 120, 60))).clicked() {
+                            if ui.button("+ New Path (N)").on_hover_text("Start a new disconnected path stroke (Shortcut: N)").clicked() {
+                                self.brush_engine.settings.path_tool.start_new_path();
+                                self.sync_and_evaluate_active_path_layer(ctx);
+                                self.status_message = format!("Started new path #{}", self.brush_engine.settings.path_tool.total_path_count());
+                            }
+
+                            let has_any = !self.brush_engine.settings.path_tool.is_empty();
+                            if ui.add_enabled(has_any, egui::Button::new(egui::RichText::new("Commit (Enter)").color(Color32::WHITE)).fill(Color32::from_rgb(45, 120, 60))).clicked() {
                                 self.commit_path_tool(ctx);
                             }
-                            if ui.add_enabled(num_pts > 0, egui::Button::new("Clear (Esc)")).clicked() {
+                            if ui.add_enabled(has_any, egui::Button::new("Clear (Esc)")).clicked() {
                                 self.brush_engine.settings.path_tool.clear();
+                                self.sync_and_evaluate_active_path_layer(ctx);
                                 self.status_message = "Path cleared".to_string();
                             }
                             ui.separator();

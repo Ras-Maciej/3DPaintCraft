@@ -774,25 +774,27 @@ impl Layer {
         self.clear_paint_buffers();
 
         let path_state = match &self.path_state {
-            Some(ps) if !ps.points.is_empty() => ps.clone(),
+            Some(ps) if !ps.is_empty() => ps.clone(),
             _ => return,
         };
 
         let w = self.base_color_buf.width;
         let orig_radius = brush_engine.settings.radius;
         let world_rad = ((orig_radius / (w as f32).max(1.0)) * 2.0).clamp(0.005, 0.5);
-        let mut samples = path_state.sample_path(world_rad);
-        if samples.is_empty() {
+        let mut grouped_samples = path_state.sample_all_paths_grouped(world_rad);
+        if grouped_samples.is_empty() {
             return;
         }
 
         if path_state.snap_to_surface {
-            crate::brush::PathToolState::project_samples_to_mesh(
-                &mut samples,
-                mesh,
-                world_rad,
-                path_state.surface_offset,
-            );
+            for samples in &mut grouped_samples {
+                crate::brush::PathToolState::project_samples_to_mesh(
+                    samples,
+                    mesh,
+                    world_rad,
+                    path_state.surface_offset,
+                );
+            }
         }
 
         let orig_follow_path = brush_engine.settings.follow_path;
@@ -802,45 +804,47 @@ impl Layer {
             brush_engine.settings.follow_path = true;
         }
 
-        brush_engine.last_hit_pos = None;
-        brush_engine.last_hit_normal = None;
-        brush_engine.last_uv = None;
+        for samples in grouped_samples {
+            brush_engine.last_hit_pos = None;
+            brush_engine.last_hit_normal = None;
+            brush_engine.last_uv = None;
 
-        for (i, sample) in samples.iter().enumerate() {
-            brush_engine.settings.radius = (orig_radius * sample.radius_scale).clamp(1.0, 300.0);
-            if path_state.follow_tangent {
-                brush_engine.follow_path_angle = sample.tangent_angle;
-            }
-            let sample_world_rad = ((brush_engine.settings.radius / (w as f32).max(1.0)) * 2.0).max(0.005);
+            for (i, sample) in samples.iter().enumerate() {
+                brush_engine.settings.radius = (orig_radius * sample.radius_scale).clamp(1.0, 300.0);
+                if path_state.follow_tangent {
+                    brush_engine.follow_path_angle = sample.tangent_angle;
+                }
+                let sample_world_rad = ((brush_engine.settings.radius / (w as f32).max(1.0)) * 2.0).max(0.005);
 
-            if path_state.stroke_style == crate::brush::PathStrokeStyle::Continuous {
-                brush_engine.paint_stroke_3d(self, mesh, sample.position_3d, sample.normal, sample_world_rad);
-            } else {
-                let next_idx = if i + 1 < samples.len() { i + 1 } else { i };
-                let prev_idx = if i > 0 { i - 1 } else { i };
-                let tan_3d = if next_idx != prev_idx {
-                    samples[next_idx].position_3d - samples[prev_idx].position_3d
-                } else if i + 1 < samples.len() {
-                    samples[i + 1].position_3d - sample.position_3d
-                } else if i > 0 {
-                    sample.position_3d - samples[i - 1].position_3d
+                if path_state.stroke_style == crate::brush::PathStrokeStyle::Continuous {
+                    brush_engine.paint_stroke_3d(self, mesh, sample.position_3d, sample.normal, sample_world_rad);
                 } else {
-                    glam::Vec3::X
-                };
+                    let next_idx = if i + 1 < samples.len() { i + 1 } else { i };
+                    let prev_idx = if i > 0 { i - 1 } else { i };
+                    let tan_3d = if next_idx != prev_idx {
+                        samples[next_idx].position_3d - samples[prev_idx].position_3d
+                    } else if i + 1 < samples.len() {
+                        samples[i + 1].position_3d - sample.position_3d
+                    } else if i > 0 {
+                        sample.position_3d - samples[i - 1].position_3d
+                    } else {
+                        glam::Vec3::X
+                    };
 
-                brush_engine.stamp_3d_decal(
-                    self,
-                    mesh,
-                    sample.position_3d,
-                    sample.normal,
-                    tan_3d,
-                    sample_world_rad,
-                    path_state.stroke_style,
-                    path_state.decal_type,
-                    path_state.heat_tint,
-                    sample.arc_length,
-                    path_state.height_depth,
-                );
+                    brush_engine.stamp_3d_decal(
+                        self,
+                        mesh,
+                        sample.position_3d,
+                        sample.normal,
+                        tan_3d,
+                        sample_world_rad,
+                        path_state.stroke_style,
+                        path_state.decal_type,
+                        path_state.heat_tint,
+                        sample.arc_length,
+                        path_state.height_depth,
+                    );
+                }
             }
         }
 
@@ -6381,6 +6385,26 @@ mod tests {
         }
         layer.evaluate_path_layer(&mesh, &mut engine);
         assert_eq!(layer.path_state.as_ref().unwrap().points[0].position_3d.x, 0.1);
+
+        // Add a second disconnected path on the same Path layer
+        if let Some(ps) = &mut layer.path_state {
+            ps.start_new_path();
+            ps.points.push(crate::brush::PathControlPoint {
+                position_3d: Vec3::new(-0.5, 1.0, 0.0),
+                normal: Vec3::Y,
+                uv: glam::Vec2::new(0.1, 0.2),
+                radius_scale: 1.0,
+            });
+            ps.points.push(crate::brush::PathControlPoint {
+                position_3d: Vec3::new(-0.8, 1.0, 0.0),
+                normal: Vec3::Y,
+                uv: glam::Vec2::new(0.1, 0.8),
+                radius_scale: 1.0,
+            });
+            assert_eq!(ps.total_path_count(), 2);
+        }
+        layer.evaluate_path_layer(&mesh, &mut engine);
+        assert!(layer.dirty_flags.color);
     }
 }
 

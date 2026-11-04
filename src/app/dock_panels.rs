@@ -290,7 +290,7 @@ impl PaintcraftApp {
                             if render_tb_btn(ui, paint_tex, "+P", "Add Paint Layer").clicked() {
                                 let prev_active = self.project.active_layer_idx;
                                 let new_idx = self.project.add_paint_layer(None);
-                                self.brush_engine.settings.target = PaintTarget::Material;
+                                self.select_layer(new_idx, ui.ctx());
                                 let layer_clone = self.project.layers[new_idx].clone_stroke_snapshot();
                                 self.history.push("Add Paint Layer", HistoryAction::AddLayer {
                                     layer_idx: new_idx,
@@ -309,7 +309,7 @@ impl PaintcraftApp {
                                     0.5,
                                     0.0,
                                 );
-                                self.brush_engine.settings.target = PaintTarget::Material;
+                                self.select_layer(new_idx, ui.ctx());
                                 let layer_clone = self.project.layers[new_idx].clone_stroke_snapshot();
                                 self.history.push("Add Fill Layer", HistoryAction::AddLayer {
                                     layer_idx: new_idx,
@@ -323,8 +323,7 @@ impl PaintcraftApp {
                             if render_tb_btn(ui, paint_tex, "+Path", "Add Vector Path Layer (Always live and editable)").clicked() {
                                 let prev_active = self.project.active_layer_idx;
                                 let new_idx = self.project.add_path_layer(None);
-                                self.brush_engine.settings.target = PaintTarget::Material;
-                                self.brush_engine.settings.mode = ToolMode::Path;
+                                self.select_layer(new_idx, ui.ctx());
                                 let layer_clone = self.project.layers[new_idx].clone_stroke_snapshot();
                                 self.history.push("Add Path Layer", HistoryAction::AddLayer {
                                     layer_idx: new_idx,
@@ -338,6 +337,7 @@ impl PaintcraftApp {
                             if render_tb_btn(ui, folder_tex, "+D", "Add Layer Folder / Group").clicked() {
                                 let prev_active = self.project.active_layer_idx;
                                 let new_idx = self.project.add_folder_layer(None);
+                                self.select_layer(new_idx, ui.ctx());
                                 let layer_clone = self.project.layers[new_idx].clone_stroke_snapshot();
                                 self.history.push("Add Folder", HistoryAction::AddLayer {
                                     layer_idx: new_idx,
@@ -689,22 +689,7 @@ impl PaintcraftApp {
                                                     }
                                                 }
                                                 if mat_resp.on_hover_text("Layer / Material (Click to switch to Layer painting)").clicked() {
-                                                    self.project.active_layer_idx = i;
-                                                    self.brush_engine.settings.target = PaintTarget::Material;
-                                                    if layer.layer_type == LayerType::Path {
-                                                        if let Some(l) = self.project.layers.get(i) {
-                                                            if let Some(ps) = &l.path_state {
-                                                                self.brush_engine.settings.path_tool = ps.clone();
-                                                            }
-                                                        }
-                                                        self.brush_engine.settings.mode = ToolMode::Path;
-                                                    }
-                                                    if self.mask_preview_layer_id.is_some() {
-                                                        let ctx = ui.ctx().clone();
-                                                        self.exit_mask_preview(&ctx);
-                                                    }
-                                                    self.status_message = format!("Target: Material (Layer '{}')", layer.name);
-                                                    ui.ctx().request_repaint();
+                                                    self.select_layer(i, ui.ctx());
                                                 }
 
                                                 // 3b. Mask Swatch Button (if layer has mask)
@@ -761,7 +746,7 @@ impl PaintcraftApp {
                                                         if ui.input(|inp| inp.modifiers.alt) {
                                                             toggle_mask_preview_id = Some(layer.id);
                                                         } else {
-                                                            self.project.active_layer_idx = i;
+                                                            self.select_layer(i, ui.ctx());
                                                             self.brush_engine.settings.target = PaintTarget::Mask;
                                                             self.status_message = format!("Target: Mask (Layer '{}')", layer.name);
                                                         }
@@ -786,7 +771,7 @@ impl PaintcraftApp {
                                                     );
                                                     if slot_resp.on_hover_text("Add Mask to Layer").clicked() {
                                                         add_mask_idx = Some(i);
-                                                        self.project.active_layer_idx = i;
+                                                        self.select_layer(i, ui.ctx());
                                                         self.brush_engine.settings.target = PaintTarget::Mask;
                                                     }
                                                 }
@@ -813,28 +798,11 @@ impl PaintcraftApp {
                                                     let name_text = egui::RichText::new(&layer.name)
                                                         .color(name_color)
                                                         .strong();
-                                                    let name_resp = ui.add(egui::Label::new(name_text).truncate().selectable(false).sense(egui::Sense::click_and_drag()))
-                                                        .on_hover_text("Click to select material • Drag to reorder • Double-click to rename");
+                                                    let name_resp = ui.add(egui::Label::new(name_text).truncate().selectable(false).sense(egui::Sense::click()))
+                                                        .on_hover_text("Click to select layer • Double-click to rename");
 
-                                                    if name_resp.drag_started() {
-                                                        self.dragged_layer_idx = Some(i);
-                                                    }
                                                     if name_resp.clicked() {
-                                                        self.project.active_layer_idx = i;
-                                                        self.brush_engine.settings.target = PaintTarget::Material;
-                                                        if layer.layer_type == LayerType::Path {
-                                                            if let Some(l) = self.project.layers.get(i) {
-                                                                if let Some(ps) = &l.path_state {
-                                                                    self.brush_engine.settings.path_tool = ps.clone();
-                                                                }
-                                                            }
-                                                            self.brush_engine.settings.mode = ToolMode::Path;
-                                                        }
-                                                        if self.mask_preview_layer_id.is_some() {
-                                                            let ctx = ui.ctx().clone();
-                                                            self.exit_mask_preview(&ctx);
-                                                        }
-                                                        ui.ctx().request_repaint();
+                                                        self.select_layer(i, ui.ctx());
                                                     }
                                                     if name_resp.double_clicked() {
                                                         self.renaming_layer_idx = Some(i);
@@ -866,7 +834,7 @@ impl PaintcraftApp {
                                                 if avail.x > 0.0 && avail.y > 0.0 {
                                                     let (_, empty_resp) = ui.allocate_exact_size(avail, egui::Sense::click_and_drag());
                                                     if empty_resp.clicked() {
-                                                        self.project.active_layer_idx = i;
+                                                        self.select_layer(i, ui.ctx());
                                                     }
                                                     if empty_resp.drag_started() {
                                                         self.dragged_layer_idx = Some(i);
@@ -874,6 +842,12 @@ impl PaintcraftApp {
                                                 }
                                             });
                                         });
+
+                                    let card_rect = card_response.response.rect;
+                                    let card_interact = ui.interact(card_rect, ui.id().with(("card_row_interact", i)), egui::Sense::click());
+                                    if card_interact.clicked() && toggle_visible_idx.is_none() && toggle_collapse_idx.is_none() && self.dragged_layer_idx.is_none() {
+                                        self.select_layer(i, ui.ctx());
+                                    }
 
                                     // Full Right-Click Layer Context Menu
                                     card_response.response.context_menu(|ui| {
@@ -2612,7 +2586,11 @@ impl PaintcraftApp {
                                         let ps = layer.path_state.as_mut().unwrap();
 
                                         ui.horizontal(|ui| {
-                                            ui.label(format!("Points: {}", ps.points.len()));
+                                            ui.label(format!("Paths: {} | Points: {}", ps.total_path_count(), ps.total_point_count()));
+                                            if ui.button("+ New Path (N)").on_hover_text("Start a new disconnected path stroke").clicked() {
+                                                ps.start_new_path();
+                                                prop_changed = true;
+                                            }
                                             if ui.button("Reverse").on_hover_text("Reverse stroke point order").clicked() {
                                                 ps.reverse();
                                                 prop_changed = true;
@@ -2621,11 +2599,33 @@ impl PaintcraftApp {
                                                 ps.smooth();
                                                 prop_changed = true;
                                             }
-                                            if ui.button("Clear Points").clicked() {
+                                            if ui.button("Clear All").clicked() {
                                                 ps.clear();
                                                 prop_changed = true;
                                             }
                                         });
+
+                                        if !ps.other_paths.is_empty() {
+                                            ui.horizontal(|ui| {
+                                                ui.label("Active Path:");
+                                                let total = ps.total_path_count();
+                                                for p_idx in 0..total {
+                                                    let is_cur = p_idx == total - 1;
+                                                    let btn_txt = format!("#{}", p_idx + 1);
+                                                    let btn = if is_cur {
+                                                        egui::Button::new(egui::RichText::new(&btn_txt).color(Color32::from_rgb(255, 230, 60))).fill(Color32::from_rgb(50, 75, 110))
+                                                    } else {
+                                                        egui::Button::new(&btn_txt)
+                                                    };
+                                                    if ui.add(btn).clicked() {
+                                                        if p_idx < ps.other_paths.len() {
+                                                            ps.activate_other_path(p_idx);
+                                                            prop_changed = true;
+                                                        }
+                                                    }
+                                                }
+                                            });
+                                        }
 
                                         ui.horizontal(|ui| {
                                             if ui.checkbox(&mut ps.closed, "Loop Path").changed() {
@@ -2986,6 +2986,9 @@ impl PaintcraftApp {
                             if prop_changed && layer.layer_type == LayerType::Fill {
                                 layer.evaluate_fill_advanced(curv, pos, wn, ao);
                             } else if prop_changed && layer.layer_type == LayerType::Path {
+                                if let Some(ps) = &layer.path_state {
+                                    self.brush_engine.settings.path_tool = ps.clone();
+                                }
                                 layer.evaluate_path_layer(&proj.mesh, &mut self.brush_engine);
                             }
                             if mask_changed && layer.has_mask {
